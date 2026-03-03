@@ -6,7 +6,8 @@ FROM node:22-slim AS frontend-builder
 WORKDIR /frontend
 
 COPY package*.json ./
-RUN npm ci
+# NODE_ENV=development чтобы npm ci установил devDependencies (vite, typescript и т.д.)
+RUN NODE_ENV=development npm ci
 
 COPY . .
 
@@ -23,7 +24,8 @@ FROM node:22-slim AS backend-builder
 WORKDIR /backend
 
 COPY server/package*.json ./
-RUN npm ci
+# NODE_ENV=development чтобы npm ci установил devDependencies (typescript/tsc и т.д.)
+RUN NODE_ENV=development npm ci
 
 COPY server/ ./
 RUN npm run build
