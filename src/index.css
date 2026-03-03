@@ -1,0 +1,161 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Playfair Display", serif;
+  --font-body: "Source Sans 3", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+  
+  --color-medical-50: #f0f9f6;
+  --color-medical-100: #d8f0e8;
+  --color-medical-200: #b3e1d1;
+  --color-medical-300: #81ccb4;
+  --color-medical-400: #52b193;
+  --color-medical-500: #339678;
+  --color-medical-600: #267860;
+  --color-medical-700: #21614f;
+  --color-medical-800: #1e4d41;
+  --color-medical-900: #1a4037;
+  
+  --color-accent-warm: #f59e0b;
+  --color-accent-danger: #ef4444;
+  --color-accent-info: #3b82f6;
+  
+  --color-surface-light: #fafbfc;
+  --color-surface-card: #ffffff;
+  --color-surface-elevated: #f8fafc;
+  
+  --color-text-primary: #1e293b;
+  --color-text-secondary: #64748b;
+  --color-text-muted: #94a3b8;
+  
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@layer base {
+  html {
+    font-family: var(--font-body);
+    background: linear-gradient(135deg, var(--color-medical-50) 0%, var(--color-surface-light) 50%, #fff 100%);
+    min-height: 100vh;
+  }
+  
+  body {
+    @apply text-text-primary antialiased;
+    background-image: 
+      radial-gradient(ellipse at top left, rgba(51, 150, 120, 0.05) 0%, transparent 50%),
+      radial-gradient(ellipse at bottom right, rgba(51, 150, 120, 0.03) 0%, transparent 50%);
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply bg-white/80 backdrop-blur-xl border border-white/60 shadow-xl shadow-medical-500/5;
+    background-image: linear-gradient(135deg, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0.7) 100%);
+  }
+  
+  .btn-primary {
+    @apply px-6 py-3 bg-gradient-to-r from-medical-500 to-medical-600 text-white font-medium rounded-xl
+           shadow-lg shadow-medical-500/30 hover:shadow-xl hover:shadow-medical-500/40
+           hover:from-medical-600 hover:to-medical-700
+           active:scale-[0.98] transition-all duration-200;
+  }
+  
+  .btn-secondary {
+    @apply px-6 py-3 bg-white border-2 border-medical-200 text-medical-700 font-medium rounded-xl
+           hover:bg-medical-50 hover:border-medical-300 
+           active:scale-[0.98] transition-all duration-200;
+  }
+  
+  .input-field {
+    @apply w-full px-4 py-3 bg-white border-2 border-slate-200 rounded-xl
+           focus:border-medical-400 focus:ring-4 focus:ring-medical-100
+           placeholder:text-text-muted transition-all duration-200 outline-none;
+  }
+  
+  .textarea-field {
+    @apply w-full px-4 py-3 bg-white border-2 border-slate-200 rounded-xl
+           focus:border-medical-400 focus:ring-4 focus:ring-medical-100
+           placeholder:text-text-muted transition-all duration-200 outline-none
+           resize-none min-h-[100px];
+  }
+  
+  .section-header {
+    @apply flex items-center gap-3 text-lg font-semibold text-medical-800 mb-4;
+  }
+  
+  .recording-pulse {
+    animation: pulse-ring 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  
+  .fade-in {
+    animation: fadeIn 0.4s var(--ease-smooth) forwards;
+  }
+  
+  .slide-up {
+    animation: slideUp 0.5s var(--ease-spring) forwards;
+  }
+}
+
+@keyframes pulse-ring {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(1.05);
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes waveform {
+  0%, 100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.waveform-bar {
+  animation: waveform 0.8s ease-in-out infinite;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-slate-100 rounded-full;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-medical-300 rounded-full hover:bg-medical-400 transition-colors;
+}
+
+/* PDF Preview styles */
+.pdf-preview {
+  @apply bg-white shadow-2xl rounded-lg overflow-hidden;
+  aspect-ratio: 210 / 297;
+}

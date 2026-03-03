@@ -1,0 +1,23 @@
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 python3-pip ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --no-cache-dir faster-whisper
+
+COPY scripts/whisper_server.py /app/whisper_server.py
+WORKDIR /app
+
+ENV WHISPER_SERVER_HOST=0.0.0.0
+ENV WHISPER_SERVER_PORT=9000
+ENV WHISPER_DEVICE=cuda
+ENV WHISPER_COMPUTE_TYPE=float16
+ENV WHISPER_BEAM_SIZE=5
+
+EXPOSE 9000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:9000/health')"
+
+CMD ["python3", "whisper_server.py"]

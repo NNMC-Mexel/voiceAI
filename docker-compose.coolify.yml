@@ -1,0 +1,48 @@
+# docker-compose для Coolify
+# LLM и Whisper работают на ПК DESKTOP-58KVC87 (RTX 5090) в сети кампуса.
+# Убедись, что на ПК открыты порты 8080 (LLM) и 9000 (Whisper) в Windows Firewall.
+
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - HOST=0.0.0.0
+      - STATIC_DIR=/app/public
+
+      # ── Безопасность ──────────────────────────────
+      # Укажи реальный домен/IP Coolify-сервера в кампусе
+      - CORS_ORIGINS=http://<COOLIFY-IP-или-ДОМЕН>
+      - RATE_LIMIT_WINDOW_MS=60000
+      - RATE_LIMIT_MAX_REQUESTS=120
+      # API_KEY=<поставь-длинный-случайный-ключ>
+
+      # ── Загрузки ──────────────────────────────────
+      - UPLOAD_DIR=/app/uploads
+
+      # ── Whisper (DESKTOP-58KVC87 / RTX 5090) ──────
+      - WHISPER_LANGUAGE=ru
+      - WHISPER_SERVER_URL=http://DESKTOP-58KVC87:9000
+
+      # ── LLM (DESKTOP-58KVC87 / RTX 5090) ─────────
+      - LLM_SERVER_URL=http://DESKTOP-58KVC87:8080
+      - LLM_MODEL=qwen3-8b
+      - LLM_MAX_TOKENS=512
+      - LLM_TEMPERATURE=0.1
+      - LLM_TIMEOUT_MS=120000
+      - LLM_PARALLEL_SLOTS=15
+
+    volumes:
+      - uploads:/app/uploads
+
+    restart: unless-stopped
+
+volumes:
+  uploads:

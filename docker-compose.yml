@@ -1,0 +1,97 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - HOST=0.0.0.0
+      - CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+      - RATE_LIMIT_WINDOW_MS=60000
+      - RATE_LIMIT_MAX_REQUESTS=120
+      - WHISPER_MODEL_PATH=/models/large-v3
+      - WHISPER_LANGUAGE=ru
+      - WHISPER_DEVICE=cuda
+      - WHISPER_SERVER_URL=http://whisper:9000
+      - LLM_SERVER_URL=http://llm:8080
+      - LLM_MODEL=qwen3-8b
+      - LLM_MAX_TOKENS=512
+      - LLM_TEMPERATURE=0.1
+      - LLM_TIMEOUT_MS=120000
+      - LLM_PARALLEL_SLOTS=15
+    volumes:
+      - ./uploads:/app/uploads
+    depends_on:
+      - llm
+      - whisper
+
+  llm:
+    image: ghcr.io/ggerganov/llama.cpp:server-cuda
+    ports:
+      - "8080:8080"
+    environment:
+      - LLAMA_ARG_MODEL=/models/Qwen3-8B-Q4_K_M.gguf
+      - LLAMA_ARG_CTX_SIZE=4096
+      - LLAMA_ARG_N_GPU_LAYERS=99
+      - LLAMA_ARG_HOST=0.0.0.0
+      - LLAMA_ARG_PORT=8080
+      - LLAMA_ARG_PARALLEL=15
+      - LLAMA_ARG_BATCH_SIZE=2048
+      - LLAMA_ARG_FLASH_ATTN=on
+    volumes:
+      - ./models:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  whisper:
+    build:
+      context: ./server
+      dockerfile: Dockerfile.whisper
+    ports:
+      - "9000:9000"
+    environment:
+      - WHISPER_MODEL_PATH=/models/large-v3
+      - WHISPER_DEVICE=cuda
+      - WHISPER_COMPUTE_TYPE=float16
+      - WHISPER_SERVER_HOST=0.0.0.0
+      - WHISPER_SERVER_PORT=9000
+      - WHISPER_BEAM_SIZE=5
+    volumes:
+      - ./models:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:3001
+      - VITE_API_TIMEOUT_MS=120000
+    volumes:
+      - ./src:/app/src
+      - ./public:/app/public
+      - ./index.html:/app/index.html
+      - ./vite.config.ts:/app/vite.config.ts
+      - ./package.json:/app/package.json
+      - ./package-lock.json:/app/package-lock.json
+    command: npm run dev -- --host
+
+volumes:
+  uploads:
