@@ -44,7 +44,15 @@ COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "float16")
 DEVICE_INDEX = int(os.environ.get("WHISPER_DEVICE_INDEX", "0"))
 PORT         = int(os.environ.get("WHISPER_SERVER_PORT", "9000"))
 HOST         = os.environ.get("WHISPER_SERVER_HOST", "127.0.0.1")
-DEFAULT_BEAM = int(os.environ.get("WHISPER_BEAM_SIZE", "5"))
+DEFAULT_BEAM    = int(os.environ.get("WHISPER_BEAM_SIZE", "5"))
+INITIAL_PROMPT  = os.environ.get(
+    "WHISPER_INITIAL_PROMPT",
+    "Пациент. Жалобы. Анамнез. Диагноз. Рекомендации. Объективно. АД мм рт.ст. ЧСС уд/мин. "
+    "SpO2. ЧД. ИМТ. МРТ. КТ. УЗИ. ЭКГ. ОАК. ОАМ. СОЭ. СРБ. "
+    "гипертоническая болезнь, сахарный диабет, ишемическая болезнь сердца, ХОБЛ, "
+    "аускультация, перкуссия, пальпация, хрипы, одышка, тахикардия, брадикардия, "
+    "амлодипин, метформин, омепразол, аспирин, метопролол, лизиноприл, аторвастатин.",
+)
 
 logger.info(f"Loading Whisper model '{MODEL_PATH}' on {DEVICE} ({COMPUTE_TYPE}) ...")
 t_start = time.time()
@@ -121,10 +129,12 @@ class WhisperHandler(BaseHTTPRequestHandler):
 
             # Транскрипция — модель уже загружена, начинаем сразу
             t0 = time.time()
+            initial_prompt = data.get("initial_prompt", INITIAL_PROMPT) or INITIAL_PROMPT
             segments, info = model.transcribe(
                 audio_path,
                 language=language,
                 beam_size=beam_size,
+                initial_prompt=initial_prompt,
             )
             text = " ".join(s.text.strip() for s in segments)
             elapsed = time.time() - t0
