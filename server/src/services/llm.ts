@@ -14,7 +14,6 @@ type RewriteableField = keyof Omit<MedicalDocument, 'patient'>;
 
 export class LLMService {
   private config: LLMConfig;
-  private slotCursor = 0;
 
   constructor(config: LLMConfig) {
     this.config = config;
@@ -90,7 +89,7 @@ Return JSON patch only.`;
     });
 
     if (!response.ok) {
-      throw new Error(`LLM server error: ${response.status} ${response.statusText}`);
+      await this.throwLlmError(response, 'applyAddendum');
     }
 
     const data = (await response.json()) as LlamaCompletionResponse;
@@ -142,7 +141,7 @@ Return JSON patch only.`;
     });
 
     if (!response.ok) {
-      throw new Error(`LLM server error: ${response.status} ${response.statusText}`);
+      await this.throwLlmError(response, 'applyInstruction');
     }
 
     const data = (await response.json()) as LlamaCompletionResponse;
@@ -228,7 +227,7 @@ Return JSON patch only.`;
     });
 
     if (!response.ok) {
-      throw new Error(`LLM server error: ${response.status} ${response.statusText}`);
+      await this.throwLlmError(response, 'structureText');
     }
 
     const data = (await response.json()) as LlamaCompletionResponse;
@@ -264,7 +263,7 @@ Answer in Russian and use bullet points.`;
     });
 
     if (!response.ok) {
-      throw new Error(`LLM server error: ${response.status} ${response.statusText}`);
+      await this.throwLlmError(response, 'generateRecommendations');
     }
 
     const data = (await response.json()) as LlamaCompletionResponse;
@@ -308,7 +307,7 @@ Rules:
     });
 
     if (!response.ok) {
-      throw new Error(`LLM server error: ${response.status} ${response.statusText}`);
+      await this.throwLlmError(response, 'chat');
     }
 
     const data = (await response.json()) as LlamaCompletionResponse;
@@ -346,7 +345,7 @@ ${normalized}`;
     });
 
     if (!response.ok) {
-      throw new Error(`LLM server error: ${response.status} ${response.statusText}`);
+      await this.throwLlmError(response, 'rewriteField');
     }
 
     const data = (await response.json()) as LlamaCompletionResponse;
@@ -499,6 +498,20 @@ ${normalized}`;
     }
   }
 
+  private async throwLlmError(response: Response, context: string): Promise<never> {
+    let detail = '';
+    try {
+      const body = await response.text();
+      if (body) {
+        detail = ` — ${body}`;
+        console.error(`LLM error body [${context}]:`, body);
+      }
+    } catch {
+      // ignore body read error
+    }
+    throw new Error(`LLM server error [${context}]: ${response.status} ${response.statusText}${detail}`);
+  }
+
   private getSystemPrompt(): string {
     return `You are a medical assistant who must STRICTLY structure the doctor's dictation.\n\nRules:\n1) Do NOT add any information not present in the dictation.\n2) If data is missing, return empty strings.\n3) Extract patient age and gender ONLY if explicitly present in the dictation.\n4) Do NOT invent dates, diagnoses, or recommendations.\n5) Remove filler words but keep medical terminology.\n6) Convert numbers from words to digits only if explicitly said.\n\nReturn ONLY JSON, no extra text.`;
   }
@@ -633,7 +646,7 @@ ${normalized}`;
     });
 
     if (!response.ok) {
-      throw new Error(`LLM JSON repair error: ${response.status} ${response.statusText}`);
+      await this.throwLlmError(response, 'repairJson');
     }
 
     const data = (await response.json()) as LlamaCompletionResponse;
@@ -641,29 +654,12 @@ ${normalized}`;
   }
 
   private buildCompletionBody(payload: Record<string, unknown>): string {
-    const slotId = this.getNextSlotId();
     const body: Record<string, unknown> = {
       ...payload,
       model: this.config.model,
     };
 
-    if (slotId !== undefined) {
-      body.id_slot = slotId;
-      body.slot_id = slotId;
-    }
-
     return JSON.stringify(body);
-  }
-
-  private getNextSlotId(): number | undefined {
-    const slots = Math.max(1, this.config.parallelSlots || 1);
-    if (slots <= 1) {
-      return undefined;
-    }
-
-    const slotId = this.slotCursor;
-    this.slotCursor = (this.slotCursor + 1) % slots;
-    return slotId;
   }
 
   private getMockStructuredDocument(rawText: string): MedicalDocument {
