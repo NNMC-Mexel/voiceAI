@@ -30,7 +30,14 @@ function App() {
       const result = await apiClient.processAudio(blob, filenameForBlob(blob, 'recording'));
 
       if (result.success && result.document) {
-        setDocument(result.document);
+        const today = new Date().toISOString().slice(0, 10);
+        setDocument({
+          ...result.document,
+          patient: {
+            ...result.document.patient,
+            complaintDate: result.document.patient.complaintDate || today,
+          },
+        });
         setStep('editing');
       } else {
         throw new Error('Processing failed');
