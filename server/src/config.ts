@@ -54,6 +54,10 @@ export function loadConfig(): ServerConfig {
       requestTimeoutMs: parseIntSafe(process.env.LLM_TIMEOUT_MS, defaultConfig.llm.requestTimeoutMs),
       allowMockOnFailure: parseBoolean(process.env.ALLOW_MOCK_LLM, defaultConfig.llm.allowMockOnFailure),
     },
+    tts: {
+      serverUrl: process.env.TTS_SERVER_URL?.trim() || '',
+      enabled: parseBoolean(process.env.TTS_ENABLED, false),
+    },
     security: {
       corsOrigins: parseCorsOrigins(process.env.CORS_ORIGINS, defaultConfig.security.corsOrigins),
       apiKey: process.env.API_KEY?.trim() || undefined,

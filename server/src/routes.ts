@@ -6,6 +6,7 @@ import { existsSync } from 'fs';
 import path from 'path';
 import { WhisperService } from './services/whisper.js';
 import { LLMService } from './services/llm.js';
+import { TtsService } from './services/tts.js';
 import type { ServerConfig, MedicalDocument } from './types.js';
 
 interface RateState {
@@ -84,7 +85,8 @@ export async function registerRoutes(
   fastify: FastifyInstance,
   config: ServerConfig,
   whisperService: WhisperService,
-  llmService: LLMService
+  llmService: LLMService,
+  ttsService: TtsService
 ): Promise<void> {
   if (!existsSync(config.uploadDir)) {
     await mkdir(config.uploadDir, { recursive: true });
@@ -468,7 +470,32 @@ export async function registerRoutes(
       supportedAudioFormats: ['audio/webm', 'audio/wav', 'audio/mp3', 'audio/ogg'],
       language: config.whisper.language,
       llmModel: config.llm.model,
+      ttsEnabled: ttsService.isEnabled,
     };
+  });
+
+  fastify.post('/api/tts', async (request: FastifyRequest, reply: FastifyReply) => {
+    const body = request.body;
+    const text = isRecord(body) && typeof body.text === 'string' ? body.text.trim() : '';
+
+    if (!text) {
+      return reply.status(400).send({ error: 'text is required' });
+    }
+
+    if (!ttsService.isEnabled) {
+      return reply.status(503).send({ error: 'TTS is not enabled on this server' });
+    }
+
+    try {
+      const audioBase64 = await ttsService.synthesize(text);
+      return { success: true, audio_base64: audioBase64, format: 'wav' };
+    } catch (error) {
+      console.error('TTS error:', error);
+      return reply.status(500).send({
+        error: 'TTS synthesis failed',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
   });
 }
 

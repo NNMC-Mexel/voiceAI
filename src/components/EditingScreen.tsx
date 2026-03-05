@@ -23,6 +23,8 @@
   Sparkles,
   Brain,
   ShieldAlert,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 import type { MedicalDocument, PatientInfo } from '../types';
 import { fieldLabels, patientFieldLabels } from '../types';
@@ -141,7 +143,39 @@ export function EditingScreen({
   const [rewriteLoadingField, setRewriteLoadingField] = useState<RewriteableField | null>(null);
   const [isRecommendationsLoading, setIsRecommendationsLoading] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [ttsEnabled, setTtsEnabled] = useState(false);
+  const [isTtsSpeaking, setIsTtsSpeaking] = useState(false);
   const recommendationsInFlightRef = useRef(false);
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  const playTts = async (text: string) => {
+    try {
+      if (currentAudioRef.current) {
+        currentAudioRef.current.pause();
+        currentAudioRef.current = null;
+      }
+      const audioBase64 = await apiClient.tts(text);
+      const bytes = Uint8Array.from(atob(audioBase64), (c) => c.charCodeAt(0));
+      const blob = new Blob([bytes], { type: 'audio/wav' });
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      currentAudioRef.current = audio;
+      setIsTtsSpeaking(true);
+      audio.onended = () => {
+        setIsTtsSpeaking(false);
+        URL.revokeObjectURL(url);
+        currentAudioRef.current = null;
+      };
+      audio.onerror = () => {
+        setIsTtsSpeaking(false);
+        URL.revokeObjectURL(url);
+        currentAudioRef.current = null;
+      };
+      await audio.play();
+    } catch {
+      setIsTtsSpeaking(false);
+    }
+  };
 
   const handlePatientChange = (field: keyof PatientInfo, value: string) => {
     onDocumentChange({
@@ -287,10 +321,14 @@ export function EditingScreen({
         .slice(-8)
         .map((m) => ({ role: m.role, text: m.text }));
       const result = await apiClient.chat(trimmedQuestion, history, document);
+      const answerText = result.answer || 'Нет ответа';
       setChatMessages((prev) => [
         ...prev,
-        { role: 'assistant', kind: 'chat', text: result.answer || 'Нет ответа' },
+        { role: 'assistant', kind: 'chat', text: answerText },
       ]);
+      if (ttsEnabled) {
+        void playTts(answerText);
+      }
     } catch {
       setChatMessages((prev) => [
         ...prev,
@@ -497,6 +535,22 @@ export function EditingScreen({
             <div className="flex items-center gap-2 mb-3">
               <Bot className="w-4 h-4 text-medical-700" />
               <h2 className="text-sm font-semibold text-medical-900">Чат с ИИ</h2>
+              <button
+                onClick={() => setTtsEnabled((v) => !v)}
+                title={ttsEnabled ? 'Выключить голос ИИ' : 'Включить голос ИИ'}
+                className={`ml-auto flex items-center gap-1 px-2 py-1 rounded-lg text-xs transition-colors ${
+                  ttsEnabled
+                    ? 'bg-medical-100 text-medical-700 hover:bg-medical-200'
+                    : 'text-text-muted hover:text-medical-600 hover:bg-slate-100'
+                }`}
+              >
+                {ttsEnabled ? (
+                  <Volume2 className={`w-3.5 h-3.5 ${isTtsSpeaking ? 'animate-pulse' : ''}`} />
+                ) : (
+                  <VolumeX className="w-3.5 h-3.5" />
+                )}
+                Голос
+              </button>
             </div>
             <div className="mb-3">
               <button

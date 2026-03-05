@@ -10,6 +10,7 @@ import { loadConfig } from './config.js';
 import { registerRoutes } from './routes.js';
 import { WhisperService } from './services/whisper.js';
 import { LLMService } from './services/llm.js';
+import { TtsService } from './services/tts.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -88,8 +89,9 @@ async function main() {
   await whisperService.init();
 
   const llmService = new LLMService(config.llm);
+  const ttsService = new TtsService(config.tts);
 
-  await registerRoutes(fastify, config, whisperService, llmService);
+  await registerRoutes(fastify, config, whisperService, llmService, ttsService);
 
   try {
     await fastify.listen({

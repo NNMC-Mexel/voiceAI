@@ -55,12 +55,18 @@ export interface SecurityConfig {
   rateLimitMaxRequests: number;
 }
 
+export interface TtsConfig {
+  serverUrl: string;
+  enabled: boolean;
+}
+
 export interface ServerConfig {
   port: number;
   host: string;
   uploadDir: string;
   whisper: WhisperConfig;
   llm: LLMConfig;
+  tts: TtsConfig;
   security: SecurityConfig;
 }
 
@@ -81,6 +87,10 @@ export const defaultConfig: ServerConfig = {
     parallelSlots: 15,
     requestTimeoutMs: 120000,
     allowMockOnFailure: false,
+  },
+  tts: {
+    serverUrl: '',
+    enabled: false,
   },
   security: {
     corsOrigins: ['https://localhost:5173', 'http://localhost:5173', 'http://127.0.0.1:5173'],

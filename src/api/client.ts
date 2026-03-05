@@ -229,6 +229,15 @@ class ApiClient {
       body: JSON.stringify({ document, instruction }),
     });
   }
+
+  async tts(text: string): Promise<string> {
+    const result = await this.request<{ success: boolean; audio_base64: string }>('/api/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    return result.audio_base64;
+  }
 }
 
 export const apiClient = new ApiClient();
