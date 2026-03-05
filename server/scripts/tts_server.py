@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
-"""Persistent XTTS v2 HTTP server for МедДок.
+"""Persistent Silero TTS HTTP server for МедДок.
 
-Загружает модель XTTS v2 ОДИН РАЗ при старте.
-Поддерживает клонирование голоса по WAV-семплу или встроенного диктора.
+Загружает модель Silero ОДИН РАЗ при старте.
+Работает офлайн на GPU (PyTorch CUDA).
+
+Установка (один раз):
+  pip install torch --index-url https://download.pytorch.org/whl/cu128
+  pip install soundfile omegaconf
 
 Переменные окружения:
-  TTS_MODEL        Имя модели (default: tts_models/multilingual/multi-dataset/xtts_v2)
-  TTS_SPEAKER_WAV  Путь к WAV-семплу голоса 6-10 сек (опционально, включает клонирование)
-  TTS_SPEAKER      Встроенный диктор, если WAV не указан (default: Ana Florence)
+  TTS_SPEAKER      Голос: xenia|kseniya|baya (женские) aidar|eugene (мужские)
+                   (default: xenia — наиболее естественный)
+  TTS_SAMPLE_RATE  8000 | 24000 | 48000 (default: 48000)
   TTS_SERVER_PORT  HTTP порт (default: 5500)
   TTS_SERVER_HOST  Хост (default: 0.0.0.0)
 
 Endpoints:
-  GET  /health  → {"status":"ok","model":"...","speaker":"..."}
-  POST /tts     → body: {"text":"...","language":"ru"}
-               ← {"audio_base64":"...","format":"wav","elapsed":0.4}
+  GET  /health  → {"status":"ok","speaker":"...","sample_rate":48000}
+  POST /tts     → body: {"text":"..."}
+               ← {"audio_base64":"...","format":"wav","elapsed":0.3}
 """
 
 import sys
 import json
 import os
 import base64
-import tempfile
+import io
+import re
 import time
 import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -35,36 +40,91 @@ logging.basicConfig(
 )
 logger = logging.getLogger("tts-server")
 
-MODEL_NAME   = os.environ.get("TTS_MODEL", "tts_models/multilingual/multi-dataset/xtts_v2")
-SPEAKER_WAV  = os.environ.get("TTS_SPEAKER_WAV", "").strip()
-SPEAKER_NAME = os.environ.get("TTS_SPEAKER", "Ana Florence")
-PORT         = int(os.environ.get("TTS_SERVER_PORT", "5500"))
-HOST         = os.environ.get("TTS_SERVER_HOST", "0.0.0.0")
+SPEAKER     = os.environ.get("TTS_SPEAKER", "xenia")
+SAMPLE_RATE = int(os.environ.get("TTS_SAMPLE_RATE", "48000"))
+PORT        = int(os.environ.get("TTS_SERVER_PORT", "5500"))
+HOST        = os.environ.get("TTS_SERVER_HOST", "0.0.0.0")
 
-logger.info(f"Loading TTS model '{MODEL_NAME}' ...")
+logger.info("Loading Silero TTS model ...")
 t_start = time.time()
 
 try:
-    from TTS.api import TTS  # type: ignore
-    tts = TTS(MODEL_NAME, gpu=True)
-except Exception as exc:
-    logger.error(f"Failed to load TTS model: {exc}")
+    import torch
+    import soundfile as sf  # type: ignore
+except ImportError as exc:
+    logger.error(f"Missing dependency: {exc}")
+    logger.error("Run: pip install torch --index-url https://download.pytorch.org/whl/cu128")
+    logger.error("     pip install soundfile omegaconf")
     sys.exit(1)
 
-logger.info(f"TTS model loaded in {time.time() - t_start:.1f}s — server is ready.")
-if SPEAKER_WAV and os.path.isfile(SPEAKER_WAV):
-    logger.info(f"Voice cloning mode: {SPEAKER_WAV}")
-else:
-    logger.info(f"Built-in speaker mode: {SPEAKER_NAME}")
-    if SPEAKER_WAV:
-        logger.warning(f"TTS_SPEAKER_WAV set but file not found: {SPEAKER_WAV}")
+try:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model, _ = torch.hub.load(  # type: ignore
+        repo_or_dir="snakers4/silero-models",
+        model="silero_tts",
+        language="ru",
+        speaker="v3_1_ru",
+        trust_repo=True,
+    )
+    model.to(device)
+except Exception as exc:
+    logger.error(f"Failed to load Silero model: {exc}")
+    sys.exit(1)
+
+logger.info(f"Silero TTS loaded in {time.time() - t_start:.1f}s — server is ready.")
+logger.info(f"Speaker: {SPEAKER}  |  Sample rate: {SAMPLE_RATE}  |  Device: {device}")
+
+
+def _split_text(text: str, max_len: int = 500) -> list[str]:
+    """Split long text into chunks at sentence boundaries."""
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    chunks: list[str] = []
+    current = ""
+    for sent in sentences:
+        if len(current) + len(sent) + 1 <= max_len:
+            current = (current + " " + sent).strip() if current else sent
+        else:
+            if current:
+                chunks.append(current)
+            # Single sentence longer than max_len — split at comma/space
+            if len(sent) > max_len:
+                for i in range(0, len(sent), max_len):
+                    chunks.append(sent[i : i + max_len])
+            else:
+                current = sent
+    if current:
+        chunks.append(current)
+    return chunks or [text[:max_len]]
+
+
+def _synthesize_wav(text: str) -> bytes:
+    chunks = _split_text(text)
+    parts = []
+    for chunk in chunks:
+        audio = model.apply_tts(  # type: ignore
+            text=chunk,
+            speaker=SPEAKER,
+            sample_rate=SAMPLE_RATE,
+        )
+        parts.append(audio)
+
+    full_audio = torch.cat(parts) if len(parts) > 1 else parts[0]
+
+    buf = io.BytesIO()
+    sf.write(buf, full_audio.numpy(), SAMPLE_RATE, format="wav", subtype="PCM_16")
+    buf.seek(0)
+    return buf.read()
 
 
 class TtsHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/health":
-            speaker = SPEAKER_WAV if (SPEAKER_WAV and os.path.isfile(SPEAKER_WAV)) else SPEAKER_NAME
-            self._send_json(200, {"status": "ok", "model": MODEL_NAME, "speaker": speaker})
+            self._send_json(200, {
+                "status": "ok",
+                "speaker": SPEAKER,
+                "sample_rate": SAMPLE_RATE,
+                "device": str(device),
+            })
         else:
             self._send_json(404, {"error": "Not found"})
 
@@ -84,41 +144,17 @@ class TtsHandler(BaseHTTPRequestHandler):
             return
 
         text = data.get("text", "").strip()
-        language = data.get("language", "ru")
-
         if not text:
             self._send_json(400, {"error": "text is required"})
             return
 
-        tmp_path = None
         try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                tmp_path = tmp.name
-
             t0 = time.time()
-
-            if SPEAKER_WAV and os.path.isfile(SPEAKER_WAV):
-                tts.tts_to_file(
-                    text=text,
-                    file_path=tmp_path,
-                    speaker_wav=SPEAKER_WAV,
-                    language=language,
-                )
-            else:
-                tts.tts_to_file(
-                    text=text,
-                    file_path=tmp_path,
-                    speaker=SPEAKER_NAME,
-                    language=language,
-                )
-
+            wav_bytes = _synthesize_wav(text)
             elapsed = time.time() - t0
 
-            with open(tmp_path, "rb") as f:
-                audio_bytes = f.read()
-
-            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-            logger.info(f"OK  {elapsed:.2f}s | {len(text)} chars | {len(audio_bytes)} bytes wav")
+            audio_b64 = base64.b64encode(wav_bytes).decode("utf-8")
+            logger.info(f"OK  {elapsed:.2f}s | {len(text)} chars | {len(wav_bytes)} bytes wav")
             self._send_json(200, {
                 "audio_base64": audio_b64,
                 "format": "wav",
@@ -127,12 +163,6 @@ class TtsHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             logger.error(f"TTS failed: {exc}", exc_info=True)
             self._send_json(500, {"error": str(exc)})
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
 
     def _send_json(self, code: int, data: dict) -> None:
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
