@@ -154,7 +154,15 @@ export function EditingScreen({
         currentAudioRef.current.pause();
         currentAudioRef.current = null;
       }
-      const audioBase64 = await apiClient.tts(text);
+      // Strip markdown before sending to TTS
+      const clean = text
+        .replace(/\*\*(.+?)\*\*/g, '$1')
+        .replace(/\*(.+?)\*/g, '$1')
+        .replace(/#{1,6}\s+/g, '')
+        .replace(/`[^`]*`/g, '')
+        .replace(/^\s*[-*]\s+/gm, '')
+        .replace(/^\s*\d+\.\s+/gm, '');
+      const audioBase64 = await apiClient.tts(clean);
       const bytes = Uint8Array.from(atob(audioBase64), (c) => c.charCodeAt(0));
       const blob = new Blob([bytes], { type: 'audio/wav' });
       const url = URL.createObjectURL(blob);
