@@ -177,6 +177,14 @@ export function EditingScreen({
     }
   };
 
+  const stopTts = () => {
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current = null;
+    }
+    setIsTtsSpeaking(false);
+  };
+
   const handlePatientChange = (field: keyof PatientInfo, value: string) => {
     onDocumentChange({
       ...document,
@@ -535,22 +543,34 @@ export function EditingScreen({
             <div className="flex items-center gap-2 mb-3">
               <Bot className="w-4 h-4 text-medical-700" />
               <h2 className="text-sm font-semibold text-medical-900">Чат с ИИ</h2>
-              <button
-                onClick={() => setTtsEnabled((v) => !v)}
-                title={ttsEnabled ? 'Выключить голос ИИ' : 'Включить голос ИИ'}
-                className={`ml-auto flex items-center gap-1 px-2 py-1 rounded-lg text-xs transition-colors ${
-                  ttsEnabled
-                    ? 'bg-medical-100 text-medical-700 hover:bg-medical-200'
-                    : 'text-text-muted hover:text-medical-600 hover:bg-slate-100'
-                }`}
-              >
-                {ttsEnabled ? (
-                  <Volume2 className={`w-3.5 h-3.5 ${isTtsSpeaking ? 'animate-pulse' : ''}`} />
-                ) : (
-                  <VolumeX className="w-3.5 h-3.5" />
+              <div className="ml-auto flex items-center gap-1">
+                {isTtsSpeaking && (
+                  <button
+                    onClick={stopTts}
+                    title="Остановить речь"
+                    className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs bg-red-100 text-red-600 hover:bg-red-200 transition-colors"
+                  >
+                    <Square className="w-3 h-3 fill-current" />
+                    Стоп
+                  </button>
                 )}
-                Голос
-              </button>
+                <button
+                  onClick={() => setTtsEnabled((v) => !v)}
+                  title={ttsEnabled ? 'Выключить голос ИИ' : 'Включить голос ИИ'}
+                  className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs transition-colors ${
+                    ttsEnabled
+                      ? 'bg-medical-100 text-medical-700 hover:bg-medical-200'
+                      : 'text-text-muted hover:text-medical-600 hover:bg-slate-100'
+                  }`}
+                >
+                  {ttsEnabled ? (
+                    <Volume2 className={`w-3.5 h-3.5 ${isTtsSpeaking ? 'animate-pulse' : ''}`} />
+                  ) : (
+                    <VolumeX className="w-3.5 h-3.5" />
+                  )}
+                  Голос
+                </button>
+              </div>
             </div>
             <div className="mb-3">
               <button
