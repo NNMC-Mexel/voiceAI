@@ -9,12 +9,14 @@ export interface MedicalDocument {
   patient: PatientInfo;
   complaints: string;
   anamnesis: string;
-  objectiveStatus: string;
-  diagnosis: string;
-  clinicalCourse: string;
-  conclusion: string;
-  recommendations: string;
-  doctorNotes: string;
+  clinicalCourse: string;       // Анамнез жизни
+  allergyHistory: string;       // Аллергологический анамнез
+  objectiveStatus: string;      // Объективные данные
+  neurologicalStatus: string;   // Неврологический статус
+  diagnosis: string;            // Предварительный диагноз (основной)
+  conclusion: string;           // Сопутствующий диагноз
+  recommendations: string;      // План лечения
+  doctorNotes: string;          // Прочее
 }
 
 export interface TranscriptionResult {

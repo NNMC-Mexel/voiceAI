@@ -12,6 +12,19 @@ type MedicalDocumentPatch = Partial<
 
 type RewriteableField = keyof Omit<MedicalDocument, 'patient'>;
 
+const ALL_TEXT_FIELDS: RewriteableField[] = [
+  'complaints',
+  'anamnesis',
+  'clinicalCourse',
+  'allergyHistory',
+  'objectiveStatus',
+  'neurologicalStatus',
+  'diagnosis',
+  'conclusion',
+  'recommendations',
+  'doctorNotes',
+];
+
 export class LLMService {
   private config: LLMConfig;
 
@@ -153,14 +166,17 @@ Return JSON patch only.`;
 
   private getSectionMatchers(): Array<{ field: RewriteableField; pattern: string }> {
     return [
-      { field: 'complaints', pattern: 'жалоб\\S*' },
+      // More specific patterns first to avoid false matches
+      { field: 'clinicalCourse', pattern: 'анамнез\\s+жизни' },
+      { field: 'allergyHistory', pattern: 'аллерг\\S*' },
+      { field: 'neurologicalStatus', pattern: 'неврологическ\\S*' },
       { field: 'anamnesis', pattern: 'анамнез\\S*' },
+      { field: 'complaints', pattern: 'жалоб\\S*' },
       { field: 'objectiveStatus', pattern: 'объектив\\S*' },
       { field: 'diagnosis', pattern: 'диагноз\\S*' },
-      { field: 'clinicalCourse', pattern: 'течени\\S*' },
-      { field: 'conclusion', pattern: 'заключени\\S*' },
-      { field: 'recommendations', pattern: 'рекомендац\\S*' },
-      { field: 'doctorNotes', pattern: '(?:заметк\\S*\\s+врача|заметк\\S*|примечан\\S*)' },
+      { field: 'conclusion', pattern: '(?:сопутствующ\\S*|заключени\\S*)' },
+      { field: 'recommendations', pattern: '(?:план\\s+лечени\\S*|рекомендац\\S*)' },
+      { field: 'doctorNotes', pattern: '(?:прочее|заметк\\S*\\s+врача|заметк\\S*|примечан\\S*)' },
     ];
   }
 
@@ -398,9 +414,11 @@ ${normalized}`;
     for (const key of [
       'complaints',
       'anamnesis',
-      'objectiveStatus',
-      'diagnosis',
       'clinicalCourse',
+      'allergyHistory',
+      'objectiveStatus',
+      'neurologicalStatus',
+      'diagnosis',
       'conclusion',
       'recommendations',
       'doctorNotes',
@@ -463,9 +481,11 @@ ${normalized}`;
     for (const key of [
       'complaints',
       'anamnesis',
-      'objectiveStatus',
-      'diagnosis',
       'clinicalCourse',
+      'allergyHistory',
+      'objectiveStatus',
+      'neurologicalStatus',
+      'diagnosis',
       'conclusion',
       'recommendations',
       'doctorNotes',
@@ -513,11 +533,11 @@ ${normalized}`;
   }
 
   private getSystemPrompt(): string {
-    return `You are a medical assistant who must STRICTLY structure the doctor's dictation.\n\nRules:\n1) Do NOT add any information not present in the dictation.\n2) If data is missing, return empty strings.\n3) Extract patient age and gender ONLY if explicitly present in the dictation.\n4) Do NOT invent dates, diagnoses, or recommendations.\n5) Remove filler words but keep medical terminology.\n6) Convert numbers from words to digits only if explicitly said.\n\nReturn ONLY JSON, no extra text.`;
+    return `You are a medical assistant who must STRICTLY structure the doctor's dictation into a "Первичный осмотр" (initial examination) document.\n\nRules:\n1) Do NOT add any information not present in the dictation.\n2) If data is missing, return empty strings.\n3) Extract patient age and gender ONLY if explicitly present in the dictation.\n4) Do NOT invent dates, diagnoses, or treatment plans.\n5) Remove filler words but keep all medical terminology exactly as spoken.\n6) Convert numbers from words to digits only if explicitly said.\n7) Preserve drug names, dosages, and medical abbreviations exactly.\n\nReturn ONLY JSON, no extra text.`;
   }
 
   private getUserPrompt(rawText: string): string {
-    return `Transform the following dictation into a structured medical document.\n\nTEXT:\n${rawText}\n\nReturn STRICT JSON in this format (use empty strings if missing):\n{\n  "patient": {\n    "fullName": "Patient full name or empty",\n    "age": "Age in Russian format, e.g. 45 лет, or empty",\n    "gender": "мужской | женский | empty",\n    "complaintDate": "YYYY-MM-DD or empty"\n  },\n  "complaints": "Patient complaints",\n  "anamnesis": "History of illness",\n  "objectiveStatus": "Objective status",\n  "diagnosis": "Diagnosis",\n  "clinicalCourse": "Clinical course (if any)",\n  "conclusion": "Conclusion",\n  "recommendations": "Recommendations",\n  "doctorNotes": "Additional doctor notes"\n}\n\nJSON:`;
+    return `Structure the following medical dictation into a "Первичный осмотр" document.\n\nTEXT:\n${rawText}\n\nReturn STRICT JSON (use empty strings if data is missing):\n{\n  "patient": {\n    "fullName": "ФИО пациента или пусто",\n    "age": "Возраст, например 45 лет, или пусто",\n    "gender": "мужской | женский | пусто",\n    "complaintDate": "YYYY-MM-DD или пусто"\n  },\n  "complaints": "Жалобы при поступлении",\n  "anamnesis": "Анамнез заболевания",\n  "clinicalCourse": "Анамнез жизни (перенесённые болезни, операции, хронические заболевания)",\n  "allergyHistory": "Аллергологический анамнез (непереносимость препаратов, пищевых продуктов)",\n  "objectiveStatus": "Объективные данные (осмотр, аускультация, пульс, АД, температура, SpO2)",\n  "neurologicalStatus": "Неврологический статус",\n  "diagnosis": "Предварительный диагноз (основной)",\n  "conclusion": "Сопутствующий диагноз",\n  "recommendations": "План лечения (назначенные препараты и процедуры)",\n  "doctorNotes": "Прочее (план обследования, консультации)"\n}\n\nJSON:`;
   }
 
   private validateAndCleanDocument(doc: MedicalDocument): MedicalDocument {
@@ -532,9 +552,11 @@ ${normalized}`;
       },
       complaints: this.stripSectionPrefix('complaints', doc.complaints || ''),
       anamnesis: this.stripSectionPrefix('anamnesis', doc.anamnesis || ''),
-      objectiveStatus: this.stripSectionPrefix('objectiveStatus', doc.objectiveStatus || ''),
-      diagnosis: this.stripSectionPrefix('diagnosis', doc.diagnosis || ''),
       clinicalCourse: this.stripSectionPrefix('clinicalCourse', doc.clinicalCourse || ''),
+      allergyHistory: this.stripSectionPrefix('allergyHistory', doc.allergyHistory || ''),
+      objectiveStatus: this.stripSectionPrefix('objectiveStatus', doc.objectiveStatus || ''),
+      neurologicalStatus: this.stripSectionPrefix('neurologicalStatus', doc.neurologicalStatus || ''),
+      diagnosis: this.stripSectionPrefix('diagnosis', doc.diagnosis || ''),
       conclusion: this.stripSectionPrefix('conclusion', doc.conclusion || ''),
       recommendations: this.stripSectionPrefix('recommendations', doc.recommendations || ''),
       doctorNotes: this.stripSectionPrefix('doctorNotes', doc.doctorNotes || ''),
@@ -563,16 +585,29 @@ ${normalized}`;
         /^диагноз\S*\s*[:.,-]\s*/iu,        // «Диагноз:» / «Диагноз.»
       ],
       clinicalCourse: [
-        /^(?:клиническое\s+)?течени\S*\s*[:.,-]\s*/iu, // «Течение:» / «Клиническое течение:»
+        /^анамнез\s+жизни\s*[:.,-]?\s*/iu,             // «Анамнез жизни:»
+        /^(?:клиническое\s+)?течени\S*\s*[:.,-]\s*/iu, // «Течение:» / «Клиническое течение:» (старый маркер)
+      ],
+      allergyHistory: [
+        /^аллергологическ\S*\s+анамнез\S*\s*[:.,-]?\s*/iu, // «Аллергологический анамнез:»
+        /^аллерг\S*\s+на\s+/iu,                             // «Аллергия на ...»
+        /^аллерг\S*\s*[:.,-]\s*/iu,                         // «Аллергии:»
+      ],
+      neurologicalStatus: [
+        /^неврологическ\S*\s+статус\S*\s*[:.,-]?\s*/iu, // «Неврологический статус:»
+        /^неврологическ\S*\s*[:.,-]\s*/iu,               // «Неврологически:»
       ],
       conclusion: [
-        /^заключени\S*\s*(?:врача|специалиста)?\s*[:.,-]\s*/iu, // «Заключение:» / «Заключение.»
+        /^сопутствующ\S*\s+диагноз\S*\s*[:.,-]?\s*/iu,             // «Сопутствующий диагноз:»
+        /^заключени\S*\s*(?:врача|специалиста)?\s*[:.,-]\s*/iu,     // «Заключение:» (старый маркер)
       ],
       recommendations: [
-        /^рекомендаци\S*\s*[:.,-]\s*/iu,    // «Рекомендации:»
+        /^план\s+лечени\S*\s*[:.,-]?\s*/iu,              // «План лечения:»
+        /^рекомендаци\S*\s*[:.,-]\s*/iu,                 // «Рекомендации:»
         /^(?:рекомендую|рекомендуется|рекомендует|рекомендуем)\s+/iu, // глагольные формы
       ],
       doctorNotes: [
+        /^прочее\s*[:.,-]?\s*/iu,                                    // «Прочее:»
         /^(?:заметк[иа]\s+врача|заметк[иа]|примечани\S*)\s*[:.,-]\s*/iu, // «Заметки врача:»
       ],
     };
@@ -672,9 +707,11 @@ ${normalized}`;
       },
       complaints: rawText.trim(),
       anamnesis: '',
-      objectiveStatus: '',
-      diagnosis: '',
       clinicalCourse: '',
+      allergyHistory: '',
+      objectiveStatus: '',
+      neurologicalStatus: '',
+      diagnosis: '',
       conclusion: '',
       recommendations: '',
       doctorNotes: '',
@@ -754,14 +791,16 @@ ${normalized}`;
 
   private getFieldLabel(field: RewriteableField): string {
     const labels: Record<RewriteableField, string> = {
-      complaints: 'Жалобы',
-      anamnesis: 'Анамнез',
-      objectiveStatus: 'Объективный статус',
-      diagnosis: 'Диагноз',
-      clinicalCourse: 'Клиническое течение',
-      conclusion: 'Заключение',
-      recommendations: 'Рекомендации',
-      doctorNotes: 'Примечания врача',
+      complaints: 'Жалобы при поступлении',
+      anamnesis: 'Анамнез заболевания',
+      clinicalCourse: 'Анамнез жизни',
+      allergyHistory: 'Аллергологический анамнез',
+      objectiveStatus: 'Объективные данные',
+      neurologicalStatus: 'Неврологический статус',
+      diagnosis: 'Предварительный диагноз (основной)',
+      conclusion: 'Сопутствующий диагноз',
+      recommendations: 'План лечения',
+      doctorNotes: 'Прочее',
     };
     return labels[field];
   }
@@ -783,9 +822,11 @@ ${normalized}`;
         },
         complaints: { type: 'string' },
         anamnesis: { type: 'string' },
-        objectiveStatus: { type: 'string' },
-        diagnosis: { type: 'string' },
         clinicalCourse: { type: 'string' },
+        allergyHistory: { type: 'string' },
+        objectiveStatus: { type: 'string' },
+        neurologicalStatus: { type: 'string' },
+        diagnosis: { type: 'string' },
         conclusion: { type: 'string' },
         recommendations: { type: 'string' },
         doctorNotes: { type: 'string' },
@@ -794,9 +835,11 @@ ${normalized}`;
         'patient',
         'complaints',
         'anamnesis',
-        'objectiveStatus',
-        'diagnosis',
         'clinicalCourse',
+        'allergyHistory',
+        'objectiveStatus',
+        'neurologicalStatus',
+        'diagnosis',
         'conclusion',
         'recommendations',
         'doctorNotes',
@@ -821,9 +864,11 @@ ${normalized}`;
         },
         complaints: { type: 'string' },
         anamnesis: { type: 'string' },
-        objectiveStatus: { type: 'string' },
-        diagnosis: { type: 'string' },
         clinicalCourse: { type: 'string' },
+        allergyHistory: { type: 'string' },
+        objectiveStatus: { type: 'string' },
+        neurologicalStatus: { type: 'string' },
+        diagnosis: { type: 'string' },
         conclusion: { type: 'string' },
         recommendations: { type: 'string' },
         doctorNotes: { type: 'string' },

@@ -1,4 +1,4 @@
-﻿export interface PatientInfo {
+export interface PatientInfo {
   fullName: string;
   age: string;
   gender: string;
@@ -9,12 +9,14 @@ export interface MedicalDocument {
   patient: PatientInfo;
   complaints: string;
   anamnesis: string;
-  objectiveStatus: string;
-  diagnosis: string;
-  clinicalCourse: string;
-  conclusion: string;
-  recommendations: string;
-  doctorNotes: string;
+  clinicalCourse: string;       // Анамнез жизни
+  allergyHistory: string;       // Аллергологический анамнез
+  objectiveStatus: string;      // Объективные данные
+  neurologicalStatus: string;   // Неврологический статус
+  diagnosis: string;            // Предварительный диагноз (основной)
+  conclusion: string;           // Сопутствующий диагноз
+  recommendations: string;      // План лечения
+  doctorNotes: string;          // Прочее
 }
 
 export type AppStep = 'recording' | 'processing' | 'editing' | 'preview';
@@ -35,23 +37,27 @@ export const emptyDocument: MedicalDocument = {
   },
   complaints: '',
   anamnesis: '',
-  objectiveStatus: '',
-  diagnosis: '',
   clinicalCourse: '',
+  allergyHistory: '',
+  objectiveStatus: '',
+  neurologicalStatus: '',
+  diagnosis: '',
   conclusion: '',
   recommendations: '',
   doctorNotes: '',
 };
 
 export const fieldLabels: Record<keyof Omit<MedicalDocument, 'patient'>, string> = {
-  complaints: 'Жалобы',
+  complaints: 'Жалобы при поступлении',
   anamnesis: 'Анамнез заболевания',
-  objectiveStatus: 'Объективный статус',
-  diagnosis: 'Диагноз',
-  clinicalCourse: 'Клиническое течение',
-  conclusion: 'Заключение',
-  recommendations: 'Рекомендации',
-  doctorNotes: 'Заметки врача',
+  clinicalCourse: 'Анамнез жизни',
+  allergyHistory: 'Аллергологический анамнез',
+  objectiveStatus: 'Объективные данные',
+  neurologicalStatus: 'Неврологический статус',
+  diagnosis: 'Предварительный диагноз (основной)',
+  conclusion: 'Сопутствующий диагноз',
+  recommendations: 'План лечения',
+  doctorNotes: 'Прочее',
 };
 
 export const patientFieldLabels: Record<keyof PatientInfo, string> = {

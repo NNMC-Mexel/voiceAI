@@ -21,6 +21,8 @@
   Loader2,
   SendHorizontal,
   Sparkles,
+  Brain,
+  ShieldAlert,
 } from 'lucide-react';
 import type { MedicalDocument, PatientInfo } from '../types';
 import { fieldLabels, patientFieldLabels } from '../types';
@@ -68,11 +70,14 @@ function isDocumentEditInstruction(text: string): boolean {
     'анамн',
     'объектив',
     'диагноз',
-    'течение',
-    'заключ',
+    'аллерг',
+    'неврол',
+    'сопутствующ',
+    'план лечен',
     'рекомендац',
     'заметк',
     'примечан',
+    'прочее',
     'пациент',
   ];
   return sectionHints.some((h) => normalized.includes(h));
@@ -89,9 +94,11 @@ function filenameForBlob(blob: Blob, baseName: string): string {
 const sectionIcons: Record<keyof Omit<MedicalDocument, 'patient'>, React.ReactNode> = {
   complaints: <MessageSquare className="w-4 h-4" />,
   anamnesis: <History className="w-4 h-4" />,
-  objectiveStatus: <Stethoscope className="w-4 h-4" />,
-  diagnosis: <ClipboardList className="w-4 h-4" />,
   clinicalCourse: <Activity className="w-4 h-4" />,
+  allergyHistory: <ShieldAlert className="w-4 h-4" />,
+  objectiveStatus: <Stethoscope className="w-4 h-4" />,
+  neurologicalStatus: <Brain className="w-4 h-4" />,
+  diagnosis: <ClipboardList className="w-4 h-4" />,
   conclusion: <FileCheck className="w-4 h-4" />,
   recommendations: <ListTodo className="w-4 h-4" />,
   doctorNotes: <StickyNote className="w-4 h-4" />,
