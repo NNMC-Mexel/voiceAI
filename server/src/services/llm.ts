@@ -234,7 +234,7 @@ Return JSON patch only.`;
       },
       body: this.buildCompletionBody({
         prompt: `<|im_start|>system\n/no_think\n${systemPrompt}<|im_end|>\n<|im_start|>user\n${userPrompt}<|im_end|>\n<|im_start|>assistant\n`,
-        n_predict: Math.max(1024, this.config.maxTokens),
+        n_predict: Math.max(4096, this.config.maxTokens),
         temperature: 0,
         stop: ['<|im_end|>'],
         json_schema: this.getDocumentJsonSchema(),
@@ -247,7 +247,9 @@ Return JSON patch only.`;
     }
 
     const data = (await response.json()) as LlamaCompletionResponse;
-    const document = await this.parseDocumentWithRepair(data.content);
+    const raw = this.stripThinkingBlocks(data.content);
+    console.log(`LLM structureText response: ${raw.length} chars, stopped: ${(data as any).stop_type ?? (data as any).stopped_eos ?? 'unknown'}`);
+    const document = await this.parseDocumentWithRepair(raw);
     const cleaned = this.validateAndCleanDocument(document);
     return this.enrichPatientFromRawText(cleaned, rawText);
   }
