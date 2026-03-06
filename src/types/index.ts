@@ -9,14 +9,14 @@ export interface MedicalDocument {
   patient: PatientInfo;
   complaints: string;
   anamnesis: string;
-  clinicalCourse: string;       // Анамнез жизни
+  clinicalCourse: string;       // Перенесённые заболевания
   allergyHistory: string;       // Аллергологический анамнез
-  objectiveStatus: string;      // Объективные данные
+  objectiveStatus: string;      // Объективный статус
   neurologicalStatus: string;   // Неврологический статус
-  diagnosis: string;            // Предварительный диагноз (основной)
-  conclusion: string;           // Сопутствующий диагноз
-  recommendations: string;      // План лечения
-  doctorNotes: string;          // Прочее
+  diagnosis: string;            // Диагноз
+  conclusion: string;           // Амбулаторная терапия
+  recommendations: string;      // Рекомендации / План лечения
+  doctorNotes: string;          // План обследования
 }
 
 export type AppStep = 'recording' | 'processing' | 'editing' | 'preview';
@@ -48,16 +48,16 @@ export const emptyDocument: MedicalDocument = {
 };
 
 export const fieldLabels: Record<keyof Omit<MedicalDocument, 'patient'>, string> = {
-  complaints: 'Жалобы при поступлении',
+  complaints: 'Жалобы',
   anamnesis: 'Анамнез заболевания',
-  clinicalCourse: 'Анамнез жизни',
+  clinicalCourse: 'Перенесённые заболевания',
   allergyHistory: 'Аллергологический анамнез',
-  objectiveStatus: 'Объективные данные',
+  objectiveStatus: 'Объективный статус',
   neurologicalStatus: 'Неврологический статус',
-  diagnosis: 'Предварительный диагноз (основной)',
-  conclusion: 'Сопутствующий диагноз',
-  recommendations: 'План лечения',
-  doctorNotes: 'Прочее',
+  diagnosis: 'Диагноз',
+  conclusion: 'Амбулаторная терапия',
+  recommendations: 'Рекомендации / План лечения',
+  doctorNotes: 'План обследования',
 };
 
 export const patientFieldLabels: Record<keyof PatientInfo, string> = {

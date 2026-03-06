@@ -6,9 +6,9 @@
   Stethoscope,
   ClipboardList,
   Activity,
-  FileCheck,
+  Pill,
   ListTodo,
-  StickyNote,
+  FlaskConical,
   Eye,
   ArrowLeft,
   Mic,
@@ -74,12 +74,13 @@ function isDocumentEditInstruction(text: string): boolean {
     'диагноз',
     'аллерг',
     'неврол',
-    'сопутствующ',
+    'амбулаторн',
+    'принимает',
     'план лечен',
     'рекомендац',
-    'заметк',
-    'примечан',
-    'прочее',
+    'план обслед',
+    'направлени',
+    'перенесённ',
     'пациент',
   ];
   return sectionHints.some((h) => normalized.includes(h));
@@ -101,9 +102,9 @@ const sectionIcons: Record<keyof Omit<MedicalDocument, 'patient'>, React.ReactNo
   objectiveStatus: <Stethoscope className="w-4 h-4" />,
   neurologicalStatus: <Brain className="w-4 h-4" />,
   diagnosis: <ClipboardList className="w-4 h-4" />,
-  conclusion: <FileCheck className="w-4 h-4" />,
+  conclusion: <Pill className="w-4 h-4" />,
   recommendations: <ListTodo className="w-4 h-4" />,
-  doctorNotes: <StickyNote className="w-4 h-4" />,
+  doctorNotes: <FlaskConical className="w-4 h-4" />,
 };
 
 export function EditingScreen({
@@ -147,14 +148,41 @@ export function EditingScreen({
   const [isTtsSpeaking, setIsTtsSpeaking] = useState(false);
   const recommendationsInFlightRef = useRef(false);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const ttsUrlRef = useRef<string | null>(null);
+  const ttsGenRef = useRef(0);
 
-  const playTts = async (text: string) => {
-    try {
+  const stopTts = () => {
+    ttsGenRef.current++;
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current = null;
+    }
+    if (ttsUrlRef.current) {
+      URL.revokeObjectURL(ttsUrlRef.current);
+      ttsUrlRef.current = null;
+    }
+    setIsTtsSpeaking(false);
+  };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      ttsGenRef.current++;
       if (currentAudioRef.current) {
         currentAudioRef.current.pause();
         currentAudioRef.current = null;
       }
-      // Strip markdown before sending to TTS
+      if (ttsUrlRef.current) {
+        URL.revokeObjectURL(ttsUrlRef.current);
+        ttsUrlRef.current = null;
+      }
+    };
+  }, []);
+
+  const playTts = async (text: string) => {
+    stopTts();
+    const gen = ++ttsGenRef.current;
+    try {
       const clean = text
         .replace(/\*\*(.+?)\*\*/g, '$1')
         .replace(/\*(.+?)\*/g, '$1')
@@ -163,34 +191,28 @@ export function EditingScreen({
         .replace(/^\s*[-*]\s+/gm, '')
         .replace(/^\s*\d+\.\s+/gm, '');
       const audioBase64 = await apiClient.tts(clean);
+      if (gen !== ttsGenRef.current) return; // stale — a newer call or stop happened
       const bytes = Uint8Array.from(atob(audioBase64), (c) => c.charCodeAt(0));
       const blob = new Blob([bytes], { type: 'audio/wav' });
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
       currentAudioRef.current = audio;
+      ttsUrlRef.current = url;
       setIsTtsSpeaking(true);
-      audio.onended = () => {
-        setIsTtsSpeaking(false);
+      const cleanup = () => {
+        if (ttsGenRef.current === gen) {
+          setIsTtsSpeaking(false);
+          currentAudioRef.current = null;
+        }
         URL.revokeObjectURL(url);
-        currentAudioRef.current = null;
+        ttsUrlRef.current = null;
       };
-      audio.onerror = () => {
-        setIsTtsSpeaking(false);
-        URL.revokeObjectURL(url);
-        currentAudioRef.current = null;
-      };
+      audio.onended = cleanup;
+      audio.onerror = cleanup;
       await audio.play();
     } catch {
-      setIsTtsSpeaking(false);
+      if (gen === ttsGenRef.current) setIsTtsSpeaking(false);
     }
-  };
-
-  const stopTts = () => {
-    if (currentAudioRef.current) {
-      currentAudioRef.current.pause();
-      currentAudioRef.current = null;
-    }
-    setIsTtsSpeaking(false);
   };
 
   const handlePatientChange = (field: keyof PatientInfo, value: string) => {

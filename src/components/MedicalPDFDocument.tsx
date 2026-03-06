@@ -128,23 +128,23 @@ export function MedicalPDFDocument({ document }: MedicalPDFDocumentProps) {
   };
 
   const sections = [
-    { title: 'Жалобы при поступлении', content: document.complaints },
+    { title: 'Жалобы', content: document.complaints },
     { title: 'Анамнез заболевания', content: document.anamnesis },
-    { title: 'Анамнез жизни', content: document.clinicalCourse },
+    { title: 'Перенесённые заболевания', content: document.clinicalCourse },
     { title: 'Аллергологический анамнез', content: document.allergyHistory },
-    { title: 'Объективные данные', content: document.objectiveStatus },
+    { title: 'Объективный статус', content: document.objectiveStatus },
     { title: 'Неврологический статус', content: document.neurologicalStatus },
-    { title: 'Предварительный диагноз (основной)', content: document.diagnosis },
-    { title: 'Сопутствующий диагноз', content: document.conclusion },
-    { title: 'План лечения', content: document.recommendations },
-    { title: 'Прочее', content: document.doctorNotes },
+    { title: 'Диагноз', content: document.diagnosis },
+    { title: 'Амбулаторная терапия', content: document.conclusion },
+    { title: 'Рекомендации / План лечения', content: document.recommendations },
+    { title: 'План обследования', content: document.doctorNotes },
   ].filter((s) => s.content);
 
   return (
     <Document>
       <Page size="A4" style={styles.page}>
         <View style={styles.header}>
-          <Text style={styles.title}>ПЕРВИЧНЫЙ ОСМОТР</Text>
+          <Text style={styles.title}>КОНСУЛЬТАЦИЯ</Text>
           <Text style={styles.subtitle}>Дата составления: {formatDate(new Date().toISOString())}</Text>
         </View>
 

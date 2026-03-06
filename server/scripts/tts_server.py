@@ -29,6 +29,7 @@ import io
 import re
 import time
 import logging
+import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
@@ -73,6 +74,9 @@ except Exception as exc:
 
 logger.info(f"Silero TTS loaded in {time.time() - t_start:.1f}s — server is ready.")
 logger.info(f"Speaker: {SPEAKER}  |  Sample rate: {SAMPLE_RATE}  |  Device: {device}")
+
+# Lock to serialize model inference — PyTorch GPU ops are NOT thread-safe
+_model_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +181,7 @@ def _split_text(text: str, max_len: int = 500) -> list[str]:
             if len(sent) > max_len:
                 for i in range(0, len(sent), max_len):
                     chunks.append(sent[i : i + max_len])
+                current = ""
             else:
                 current = sent
     if current:
@@ -187,16 +192,17 @@ def _split_text(text: str, max_len: int = 500) -> list[str]:
 def _synthesize_wav(text: str) -> bytes:
     text = _preprocess(text)
     chunks = _split_text(text)
-    parts = []
-    for chunk in chunks:
-        audio = model.apply_tts(  # type: ignore
-            text=chunk,
-            speaker=SPEAKER,
-            sample_rate=SAMPLE_RATE,
-        )
-        parts.append(audio)
 
-    full_audio = torch.cat(parts) if len(parts) > 1 else parts[0]
+    with _model_lock:
+        parts = []
+        for chunk in chunks:
+            audio = model.apply_tts(  # type: ignore
+                text=chunk,
+                speaker=SPEAKER,
+                sample_rate=SAMPLE_RATE,
+            )
+            parts.append(audio)
+        full_audio = torch.cat(parts) if len(parts) > 1 else parts[0]
 
     buf = io.BytesIO()
     sf.write(buf, full_audio.numpy(), SAMPLE_RATE, format="wav", subtype="PCM_16")

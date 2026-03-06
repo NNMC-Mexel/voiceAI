@@ -93,7 +93,7 @@ Return JSON patch only.`;
       },
       body: this.buildCompletionBody({
         prompt: `<|im_start|>system\n/no_think\n${systemPrompt}<|im_end|>\n<|im_start|>user\n${userPrompt}<|im_end|>\n<|im_start|>assistant\n`,
-        n_predict: this.config.maxTokens,
+        n_predict: Math.max(768, this.config.maxTokens),
         temperature: this.config.temperature,
         stop: ['<|im_end|>'],
         json_schema: this.getAddendumPatchJsonSchema(),
@@ -145,7 +145,7 @@ Return JSON patch only.`;
       },
       body: this.buildCompletionBody({
         prompt: `<|im_start|>system\n/no_think\n${systemPrompt}<|im_end|>\n<|im_start|>user\n${userPrompt}<|im_end|>\n<|im_start|>assistant\n`,
-        n_predict: this.config.maxTokens,
+        n_predict: Math.max(768, this.config.maxTokens),
         temperature: this.config.temperature,
         stop: ['<|im_end|>'],
         json_schema: this.getAddendumPatchJsonSchema(),
@@ -167,16 +167,16 @@ Return JSON patch only.`;
   private getSectionMatchers(): Array<{ field: RewriteableField; pattern: string }> {
     return [
       // More specific patterns first to avoid false matches
-      { field: 'clinicalCourse', pattern: 'анамнез\\s+жизни' },
+      { field: 'clinicalCourse', pattern: '(?:перенесённ\\S*\\s+заболевани\\S*|анамнез\\s+жизни)' },
       { field: 'allergyHistory', pattern: 'аллерг\\S*' },
       { field: 'neurologicalStatus', pattern: 'неврологическ\\S*' },
       { field: 'anamnesis', pattern: 'анамнез\\S*' },
       { field: 'complaints', pattern: 'жалоб\\S*' },
       { field: 'objectiveStatus', pattern: 'объектив\\S*' },
       { field: 'diagnosis', pattern: 'диагноз\\S*' },
-      { field: 'conclusion', pattern: '(?:сопутствующ\\S*|заключени\\S*)' },
-      { field: 'recommendations', pattern: '(?:план\\s+лечени\\S*|рекомендац\\S*)' },
-      { field: 'doctorNotes', pattern: '(?:прочее|заметк\\S*\\s+врача|заметк\\S*|примечан\\S*)' },
+      { field: 'conclusion', pattern: '(?:амбулаторн\\S*\\s+терапи\\S*|амбулаторно\\s+принимает|сопутствующ\\S*)' },
+      { field: 'recommendations', pattern: '(?:рекомендац\\S*|план\\s+лечени\\S*)' },
+      { field: 'doctorNotes', pattern: '(?:план\\s+обследовани\\S*|направлени\\S*|прочее|заметк\\S*)' },
     ];
   }
 
@@ -234,7 +234,7 @@ Return JSON patch only.`;
       },
       body: this.buildCompletionBody({
         prompt: `<|im_start|>system\n/no_think\n${systemPrompt}<|im_end|>\n<|im_start|>user\n${userPrompt}<|im_end|>\n<|im_start|>assistant\n`,
-        n_predict: this.config.maxTokens,
+        n_predict: Math.max(1024, this.config.maxTokens),
         temperature: 0,
         stop: ['<|im_end|>'],
         json_schema: this.getDocumentJsonSchema(),
@@ -533,11 +533,11 @@ ${normalized}`;
   }
 
   private getSystemPrompt(): string {
-    return `You are a medical assistant who must STRICTLY structure the doctor's dictation into a "Первичный осмотр" (initial examination) document.\n\nRules:\n1) Do NOT add any information not present in the dictation.\n2) If data is missing, return empty strings.\n3) Extract patient age and gender ONLY if explicitly present in the dictation.\n4) Do NOT invent dates, diagnoses, or treatment plans.\n5) Remove filler words but keep all medical terminology exactly as spoken.\n6) Convert numbers from words to digits only if explicitly said.\n7) Preserve drug names, dosages, and medical abbreviations exactly.\n\nReturn ONLY JSON, no extra text.`;
+    return `You are a medical assistant who must STRICTLY structure the doctor's dictation into a medical consultation document.\n\nRules:\n1) Do NOT add any information not present in the dictation.\n2) If data is missing, return empty strings.\n3) Extract patient age and gender ONLY if explicitly present in the dictation.\n4) Do NOT invent dates, diagnoses, or treatment plans.\n5) Remove filler words but keep all medical terminology exactly as spoken.\n6) Convert numbers from words to digits only if explicitly said.\n7) Preserve drug names, dosages, and medical abbreviations exactly.\n8) Put current medications (what patient takes at home) into "conclusion" field.\n9) Put investigation plan (labs, imaging orders) into "doctorNotes" field.\n10) Put past medical history (surgeries, TB, hepatitis, family history, habits) into "clinicalCourse" field.\n\nReturn ONLY JSON, no extra text.`;
   }
 
   private getUserPrompt(rawText: string): string {
-    return `Structure the following medical dictation into a "Первичный осмотр" document.\n\nTEXT:\n${rawText}\n\nReturn STRICT JSON (use empty strings if data is missing):\n{\n  "patient": {\n    "fullName": "ФИО пациента или пусто",\n    "age": "Возраст, например 45 лет, или пусто",\n    "gender": "мужской | женский | пусто",\n    "complaintDate": "YYYY-MM-DD или пусто"\n  },\n  "complaints": "Жалобы при поступлении",\n  "anamnesis": "Анамнез заболевания",\n  "clinicalCourse": "Анамнез жизни (перенесённые болезни, операции, хронические заболевания)",\n  "allergyHistory": "Аллергологический анамнез (непереносимость препаратов, пищевых продуктов)",\n  "objectiveStatus": "Объективные данные (осмотр, аускультация, пульс, АД, температура, SpO2)",\n  "neurologicalStatus": "Неврологический статус",\n  "diagnosis": "Предварительный диагноз (основной)",\n  "conclusion": "Сопутствующий диагноз",\n  "recommendations": "План лечения (назначенные препараты и процедуры)",\n  "doctorNotes": "Прочее (план обследования, консультации)"\n}\n\nJSON:`;
+    return `Structure the following medical dictation into a consultation document.\n\nTEXT:\n${rawText}\n\nReturn STRICT JSON (use empty strings if data is missing):\n{\n  "patient": {\n    "fullName": "ФИО пациента или пусто",\n    "age": "Возраст, например 45 лет, или пусто",\n    "gender": "мужской | женский | пусто",\n    "complaintDate": "YYYY-MM-DD или пусто"\n  },\n  "complaints": "Жалобы",\n  "anamnesis": "Анамнез заболевания (история болезни, хронология, данные обследований)",\n  "clinicalCourse": "Перенесённые заболевания (туберкулёз, гепатиты, операции, травмы, наследственность, вредные привычки)",\n  "allergyHistory": "Аллергологический анамнез (непереносимость препаратов, пищевых продуктов)",\n  "objectiveStatus": "Объективный статус (осмотр, аускультация, пульс, АД, температура, ИМТ, SpO2)",\n  "neurologicalStatus": "Неврологический статус",\n  "diagnosis": "Диагноз (с кодом МКБ-10 если озвучен)",\n  "conclusion": "Амбулаторная терапия (препараты которые пациент принимает амбулаторно + данные амбулаторных исследований)",\n  "recommendations": "Рекомендации / План лечения (назначенные препараты, дозировки, режим приёма)",\n  "doctorNotes": "План обследования (направления на анализы, ЭКГ, ЭхоКГ, ХМЭКГ, консультации специалистов)"\n}\n\nJSON:`;
   }
 
   private validateAndCleanDocument(doc: MedicalDocument): MedicalDocument {
@@ -585,8 +585,9 @@ ${normalized}`;
         /^диагноз\S*\s*[:.,-]\s*/iu,        // «Диагноз:» / «Диагноз.»
       ],
       clinicalCourse: [
-        /^анамнез\s+жизни\s*[:.,-]?\s*/iu,             // «Анамнез жизни:»
-        /^(?:клиническое\s+)?течени\S*\s*[:.,-]\s*/iu, // «Течение:» / «Клиническое течение:» (старый маркер)
+        /^перенесённ\S*\s+заболевани\S*\s*[:.,-]?\s*/iu,  // «Перенесённые заболевания:»
+        /^анамнез\s+жизни\s*[:.,-]?\s*/iu,                 // «Анамнез жизни:»
+        /^(?:клиническое\s+)?течени\S*\s*[:.,-]\s*/iu,     // «Течение:» (старый маркер)
       ],
       allergyHistory: [
         /^аллергологическ\S*\s+анамнез\S*\s*[:.,-]?\s*/iu, // «Аллергологический анамнез:»
@@ -598,17 +599,21 @@ ${normalized}`;
         /^неврологическ\S*\s*[:.,-]\s*/iu,               // «Неврологически:»
       ],
       conclusion: [
-        /^сопутствующ\S*\s+диагноз\S*\s*[:.,-]?\s*/iu,             // «Сопутствующий диагноз:»
-        /^заключени\S*\s*(?:врача|специалиста)?\s*[:.,-]\s*/iu,     // «Заключение:» (старый маркер)
+        /^амбулаторн\S*\s+терапи\S*\s*[:.,-]?\s*/iu,                // «Амбулаторная терапия:»
+        /^амбулаторно\s+принимает\s*[:.,-]?\s*/iu,                   // «Амбулаторно принимает:»
+        /^текущ\S*\s+(?:терапи\S*|лечени\S*)\s*[:.,-]?\s*/iu,       // «Текущая терапия:»
+        /^сопутствующ\S*\s+диагноз\S*\s*[:.,-]?\s*/iu,              // «Сопутствующий диагноз:» (старый)
       ],
       recommendations: [
-        /^план\s+лечени\S*\s*[:.,-]?\s*/iu,              // «План лечения:»
         /^рекомендаци\S*\s*[:.,-]\s*/iu,                 // «Рекомендации:»
-        /^(?:рекомендую|рекомендуется|рекомендует|рекомендуем)\s+/iu, // глагольные формы
+        /^план\s+лечени\S*\s*[:.,-]?\s*/iu,              // «План лечения:»
+        /^(?:рекомендую|рекомендуется|рекомендует|рекомендуем)\s+/iu,
       ],
       doctorNotes: [
-        /^прочее\s*[:.,-]?\s*/iu,                                    // «Прочее:»
-        /^(?:заметк[иа]\s+врача|заметк[иа]|примечани\S*)\s*[:.,-]\s*/iu, // «Заметки врача:»
+        /^план\s+обследовани\S*\s*[:.,-]?\s*/iu,                     // «План обследования:»
+        /^направлени\S*\s+на\s+обследовани\S*\s*[:.,-]?\s*/iu,      // «Направления на обследования:»
+        /^прочее\s*[:.,-]?\s*/iu,                                     // «Прочее:» (старый)
+        /^(?:заметк[иа]\s+врача|заметк[иа]|примечани\S*)\s*[:.,-]\s*/iu,
       ],
     };
 
@@ -791,16 +796,16 @@ ${normalized}`;
 
   private getFieldLabel(field: RewriteableField): string {
     const labels: Record<RewriteableField, string> = {
-      complaints: 'Жалобы при поступлении',
+      complaints: 'Жалобы',
       anamnesis: 'Анамнез заболевания',
-      clinicalCourse: 'Анамнез жизни',
+      clinicalCourse: 'Перенесённые заболевания',
       allergyHistory: 'Аллергологический анамнез',
-      objectiveStatus: 'Объективные данные',
+      objectiveStatus: 'Объективный статус',
       neurologicalStatus: 'Неврологический статус',
-      diagnosis: 'Предварительный диагноз (основной)',
-      conclusion: 'Сопутствующий диагноз',
-      recommendations: 'План лечения',
-      doctorNotes: 'Прочее',
+      diagnosis: 'Диагноз',
+      conclusion: 'Амбулаторная терапия',
+      recommendations: 'Рекомендации / План лечения',
+      doctorNotes: 'План обследования',
     };
     return labels[field];
   }

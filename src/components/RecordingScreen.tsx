@@ -1,7 +1,9 @@
-﻿import { useState, useEffect } from 'react';
-import { Mic, Pause, Play, Square, AlertCircle, CheckCircle, RotateCcw } from 'lucide-react';
+﻿import { useState, useEffect, useRef } from 'react';
+import { Mic, Pause, Play, Square, AlertCircle, CheckCircle, RotateCcw, Upload } from 'lucide-react';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { WaveformVisualizer } from './WaveformVisualizer';
+
+const isDev = import.meta.env.DEV;
 
 interface RecordingScreenProps {
   onRecordingComplete: (audioBlob: Blob) => void;
@@ -23,6 +25,14 @@ export function RecordingScreen({ onRecordingComplete, error: externalError }: R
 
   const [error, setError] = useState<string | null>(null);
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    onRecordingComplete(file);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
 
   useEffect(() => {
     const mediaDevices = navigator.mediaDevices;
@@ -177,14 +187,34 @@ export function RecordingScreen({ onRecordingComplete, error: externalError }: R
 
           <div className="flex items-center justify-center gap-4">
             {!isRecording && !audioBlob && (
-              <button
-                onClick={handleStart}
-                disabled={hasPermission === false}
-                className="btn-primary flex items-center gap-3 text-lg px-8 py-4 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Mic className="w-6 h-6" />
-                Начать запись
-              </button>
+              <>
+                <button
+                  onClick={handleStart}
+                  disabled={hasPermission === false}
+                  className="btn-primary flex items-center gap-3 text-lg px-8 py-4 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Mic className="w-6 h-6" />
+                  Начать запись
+                </button>
+                {isDev && (
+                  <>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="audio/*"
+                      onChange={handleFileUpload}
+                      className="hidden"
+                    />
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="btn-secondary flex items-center gap-2 text-sm"
+                    >
+                      <Upload className="w-4 h-4" />
+                      Загрузить файл
+                    </button>
+                  </>
+                )}
+              </>
             )}
 
             {isRecording && (
