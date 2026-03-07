@@ -61,6 +61,7 @@ export function loadConfig(): ServerConfig {
     security: {
       corsOrigins: parseCorsOrigins(process.env.CORS_ORIGINS, defaultConfig.security.corsOrigins),
       apiKey: process.env.API_KEY?.trim() || undefined,
+      authPassword: process.env.AUTH_PASSWORD?.trim() || undefined,
       rateLimitWindowMs: parseIntSafe(process.env.RATE_LIMIT_WINDOW_MS, defaultConfig.security.rateLimitWindowMs),
       rateLimitMaxRequests: parseIntSafe(process.env.RATE_LIMIT_MAX_REQUESTS, defaultConfig.security.rateLimitMaxRequests),
     },

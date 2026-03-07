@@ -72,17 +72,79 @@ class ApiClient {
     this.baseUrl = baseUrl;
   }
 
+  getToken(): string | null {
+    return localStorage.getItem('auth_token');
+  }
+
+  setToken(token: string): void {
+    localStorage.setItem('auth_token', token);
+  }
+
+  clearToken(): void {
+    localStorage.removeItem('auth_token');
+  }
+
+  async login(password: string): Promise<boolean> {
+    const response = await fetch(`${this.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    });
+    if (!response.ok) return false;
+    const data = (await response.json()) as { success: boolean; token: string };
+    if (data.success && data.token) {
+      this.setToken(data.token);
+      return true;
+    }
+    return false;
+  }
+
+  async checkAuth(): Promise<boolean> {
+    const token = this.getToken();
+    if (!token) return false;
+    try {
+      const response = await fetch(`${this.baseUrl}/api/auth/check`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async logout(): Promise<void> {
+    const token = this.getToken();
+    if (token) {
+      await fetch(`${this.baseUrl}/api/auth/logout`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => {});
+    }
+    this.clearToken();
+  }
+
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), API_TIMEOUT_MS);
 
+    const token = this.getToken();
+    const headers = new Headers(init?.headers);
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`);
+    }
+
     try {
       const response = await fetch(`${this.baseUrl}${path}`, {
         ...init,
+        headers,
         signal: controller.signal,
       });
 
       if (!response.ok) {
+        if (response.status === 401) {
+          this.clearToken();
+          window.dispatchEvent(new Event('auth:logout'));
+        }
         let errorMessage = `Request failed: ${response.status}`;
         try {
           const err = await response.json();

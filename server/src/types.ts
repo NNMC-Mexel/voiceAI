@@ -51,6 +51,7 @@ export interface LLMConfig {
 export interface SecurityConfig {
   corsOrigins: string[];
   apiKey?: string;
+  authPassword?: string;
   rateLimitWindowMs: number;
   rateLimitMaxRequests: number;
 }

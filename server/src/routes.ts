@@ -4,6 +4,7 @@ import { createWriteStream } from 'fs';
 import { mkdir, unlink } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import { WhisperService } from './services/whisper.js';
 import { LLMService } from './services/llm.js';
 import { TtsService } from './services/tts.js';
@@ -93,11 +94,24 @@ export async function registerRoutes(
   }
 
   const rateMap = new Map<string, RateState>();
+  const authTokens = new Set<string>();
 
   fastify.addHook('onRequest', async (request, reply) => {
     const url = request.url;
     if (url.startsWith('/api/health')) return;
+    if (url.startsWith('/api/auth/')) return;
 
+    // Auth by password (session token)
+    if (config.security.authPassword) {
+      const auth = request.headers.authorization;
+      const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+
+      if (!token || !authTokens.has(token)) {
+        return reply.status(401).send({ error: 'Unauthorized' });
+      }
+    }
+
+    // Legacy API key auth
     if (config.security.apiKey) {
       const rawApiKey = request.headers['x-api-key'];
       const headerApiKey = typeof rawApiKey === 'string' ? rawApiKey : '';
@@ -123,6 +137,43 @@ export async function registerRoutes(
     if (state.count > config.security.rateLimitMaxRequests) {
       return reply.status(429).send({ error: 'Too many requests' });
     }
+  });
+
+  // --- Auth endpoint ---
+  fastify.post('/api/auth/login', async (request, reply) => {
+    if (!config.security.authPassword) {
+      return { success: true, token: 'no-auth' };
+    }
+
+    const body = request.body as Record<string, unknown> | null;
+    const password = typeof body?.password === 'string' ? body.password : '';
+
+    if (password !== config.security.authPassword) {
+      return reply.status(401).send({ error: 'Неверный пароль' });
+    }
+
+    const token = randomUUID();
+    authTokens.add(token);
+    return { success: true, token };
+  });
+
+  fastify.post('/api/auth/logout', async (request) => {
+    const auth = request.headers.authorization;
+    const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+    if (token) authTokens.delete(token);
+    return { success: true };
+  });
+
+  fastify.get('/api/auth/check', async (request, reply) => {
+    if (!config.security.authPassword) {
+      return { authenticated: true };
+    }
+    const auth = request.headers.authorization;
+    const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+    if (!token || !authTokens.has(token)) {
+      return reply.status(401).send({ authenticated: false });
+    }
+    return { authenticated: true };
   });
 
   fastify.get('/api/health', async () => {

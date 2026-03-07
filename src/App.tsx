@@ -1,6 +1,7 @@
-﻿import { useState, useCallback, useRef } from 'react';
+﻿import { useState, useCallback, useRef, useEffect } from 'react';
 import type { AppStep, MedicalDocument } from './types';
 import { emptyDocument } from './types';
+import { LoginScreen } from './components/LoginScreen';
 import { RecordingScreen } from './components/RecordingScreen';
 import { ProcessingScreen } from './components/ProcessingScreen';
 import { EditingScreen } from './components/EditingScreen';
@@ -16,10 +17,21 @@ function filenameForBlob(blob: Blob, baseName: string): string {
 }
 
 function App() {
+  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [step, setStep] = useState<AppStep>('recording');
   const [document, setDocument] = useState<MedicalDocument>(emptyDocument);
   const [error, setError] = useState<string | null>(null);
   const audioBlobRef = useRef<Blob | null>(null);
+
+  useEffect(() => {
+    apiClient.checkAuth().then(setAuthenticated);
+  }, []);
+
+  useEffect(() => {
+    const onLogout = () => setAuthenticated(false);
+    window.addEventListener('auth:logout', onLogout);
+    return () => window.removeEventListener('auth:logout', onLogout);
+  }, []);
 
   const handleRecordingComplete = useCallback(async (blob: Blob) => {
     audioBlobRef.current = blob;
@@ -72,6 +84,14 @@ function App() {
     setError(null);
     setStep('recording');
   }, []);
+
+  if (authenticated === null) {
+    return <div className="min-h-screen flex items-center justify-center"><p className="text-text-muted">Загрузка...</p></div>;
+  }
+
+  if (!authenticated) {
+    return <LoginScreen onLogin={() => setAuthenticated(true)} />;
+  }
 
   return (
     <div className="min-h-screen">
