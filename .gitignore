@@ -26,6 +26,10 @@ dist-ssr
 # Claude Code session files
 .claude/
 
+# Environment files
+.env
+*.env.local
+
 # Runtime dirs (создаются на сервере)
 uploads/
 temp/
