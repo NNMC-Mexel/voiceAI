@@ -26,9 +26,10 @@
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import type { MedicalDocument, PatientInfo } from '../types';
-import { fieldLabels, patientFieldLabels } from '../types';
+import type { MedicalDocument, PatientInfo, RiskAssessment } from '../types';
+import { fieldLabels, patientFieldLabels, riskAssessmentLabels } from '../types';
 import { CollapsibleSection } from './CollapsibleSection';
+import { TermCorrectionPopup } from './TermCorrectionPopup';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { WaveformVisualizer } from './WaveformVisualizer';
 import { apiClient } from '../api/client';
@@ -94,17 +95,18 @@ function filenameForBlob(blob: Blob, baseName: string): string {
   return `${baseName}.webm`;
 }
 
-const sectionIcons: Record<keyof Omit<MedicalDocument, 'patient'>, React.ReactNode> = {
+const sectionIcons: Record<keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>, React.ReactNode> = {
   complaints: <MessageSquare className="w-4 h-4" />,
   anamnesis: <History className="w-4 h-4" />,
+  outpatientExams: <FlaskConical className="w-4 h-4" />,
   clinicalCourse: <Activity className="w-4 h-4" />,
   allergyHistory: <ShieldAlert className="w-4 h-4" />,
   objectiveStatus: <Stethoscope className="w-4 h-4" />,
   neurologicalStatus: <Brain className="w-4 h-4" />,
   diagnosis: <ClipboardList className="w-4 h-4" />,
   conclusion: <Pill className="w-4 h-4" />,
-  recommendations: <ListTodo className="w-4 h-4" />,
   doctorNotes: <FlaskConical className="w-4 h-4" />,
+  recommendations: <ListTodo className="w-4 h-4" />,
 };
 
 export function EditingScreen({
@@ -146,6 +148,14 @@ export function EditingScreen({
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [ttsEnabled, setTtsEnabled] = useState(false);
   const [isTtsSpeaking, setIsTtsSpeaking] = useState(false);
+  const [correctionPopup, setCorrectionPopup] = useState<{
+    position: { x: number; y: number };
+    selectedText: string;
+    fieldKey: keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>;
+    selectionStart: number;
+    selectionEnd: number;
+  } | null>(null);
+  const savedSelectionRef = useRef<{ start: number; end: number; text: string } | null>(null);
   const recommendationsInFlightRef = useRef(false);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsUrlRef = useRef<string | null>(null);
@@ -226,13 +236,84 @@ export function EditingScreen({
   };
 
   const handleFieldChange = (
-    field: keyof Omit<MedicalDocument, 'patient'>,
+    field: keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>,
     value: string
   ) => {
     onDocumentChange({
       ...document,
       [field]: value,
     });
+  };
+
+  const handleRiskChange = (field: keyof RiskAssessment, value: string) => {
+    onDocumentChange({
+      ...document,
+      riskAssessment: {
+        ...document.riskAssessment,
+        [field]: value,
+      },
+    });
+  };
+
+  const handleTextareaMouseDown = (
+    e: React.MouseEvent<HTMLTextAreaElement>,
+  ) => {
+    // Save current selection before right-click potentially resets it
+    if (e.button === 2) {
+      const textarea = e.currentTarget;
+      const text = textarea.value.substring(textarea.selectionStart, textarea.selectionEnd).trim();
+      if (text) {
+        savedSelectionRef.current = { start: textarea.selectionStart, end: textarea.selectionEnd, text };
+      } else {
+        savedSelectionRef.current = null;
+      }
+    }
+  };
+
+  const handleTextareaContextMenu = (
+    e: React.MouseEvent<HTMLTextAreaElement>,
+    fieldKey: keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>
+  ) => {
+    // Try current selection first, fall back to saved selection
+    const textarea = e.currentTarget;
+    let selected = textarea.value.substring(textarea.selectionStart, textarea.selectionEnd).trim();
+    let selStart = textarea.selectionStart;
+    let selEnd = textarea.selectionEnd;
+
+    if (!selected && savedSelectionRef.current) {
+      selected = savedSelectionRef.current.text;
+      selStart = savedSelectionRef.current.start;
+      selEnd = savedSelectionRef.current.end;
+    }
+
+    if (!selected) return; // Ничего не выделено — стандартное контекстное меню
+    e.preventDefault();
+    setCorrectionPopup({
+      position: { x: e.clientX, y: e.clientY },
+      selectedText: selected,
+      fieldKey,
+      selectionStart: selStart,
+      selectionEnd: selEnd,
+    });
+    savedSelectionRef.current = null;
+  };
+
+  const handleCorrectionSave = async (wrong: string, correct: string, remember: boolean) => {
+    if (!correctionPopup) return;
+    // Заменяем текст в поле
+    const { fieldKey, selectionStart, selectionEnd } = correctionPopup;
+    const currentText = document[fieldKey];
+    const newText = currentText.substring(0, selectionStart) + correct + currentText.substring(selectionEnd);
+    handleFieldChange(fieldKey, newText);
+    // Если «Запомнить» — отправляем на сервер
+    if (remember) {
+      try {
+        await apiClient.addCorrection(wrong, correct);
+      } catch (err) {
+        console.warn('Failed to save correction:', err);
+      }
+    }
+    setCorrectionPopup(null);
   };
 
   const refreshRecommendationsInChat = async () => {
@@ -856,6 +937,55 @@ export function EditingScreen({
               </CollapsibleSection>
             </div>
 
+            <div className="mb-6 slide-up" style={{ animationDelay: '0.12s' }}>
+              <CollapsibleSection title="Оценка риска (шкала Морзе)" icon={<ShieldAlert className="w-4 h-4" />} defaultOpen={true}>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {(['fallInLast3Months', 'dizzinessOrWeakness', 'needsEscort'] as const).map((field) => (
+                    <div key={field}>
+                      <label className="block text-sm font-medium text-text-secondary mb-2">
+                        {riskAssessmentLabels[field]}
+                      </label>
+                      <div className="flex gap-2">
+                        {['нет', 'да'].map((option) => (
+                          <button
+                            key={option}
+                            onClick={() => handleRiskChange(field, option)}
+                            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                              document.riskAssessment[field] === option
+                                ? option === 'да'
+                                  ? 'bg-red-100 text-red-700 border-2 border-red-300'
+                                  : 'bg-medical-100 text-medical-700 border-2 border-medical-300'
+                                : 'bg-slate-100 text-text-muted border-2 border-transparent hover:bg-slate-200'
+                            }`}
+                          >
+                            {option === 'да' ? 'Да' : 'Нет'}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                  <div>
+                    <label className="block text-sm font-medium text-text-secondary mb-2">
+                      {riskAssessmentLabels.painScore} (0-10)
+                    </label>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="range"
+                        min="0"
+                        max="10"
+                        value={parseInt(document.riskAssessment.painScore) || 0}
+                        onChange={(e) => handleRiskChange('painScore', e.target.value)}
+                        className="flex-1 accent-medical-600"
+                      />
+                      <span className="text-lg font-bold text-medical-700 min-w-[3ch] text-center">
+                        {document.riskAssessment.painScore}б
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </CollapsibleSection>
+            </div>
+
             <div className="space-y-4">
               {(Object.keys(fieldLabels) as Array<keyof typeof fieldLabels>).map((field, index) => (
                 <div key={field} className="slide-up" style={{ animationDelay: `${0.15 + index * 0.05}s` }}>
@@ -884,6 +1014,8 @@ export function EditingScreen({
                     <textarea
                       value={document[field]}
                       onChange={(e) => handleFieldChange(field, e.target.value)}
+                      onMouseDown={handleTextareaMouseDown}
+                      onContextMenu={(e) => handleTextareaContextMenu(e, field)}
                       placeholder={`Введите ${fieldLabels[field].toLowerCase()}...`}
                       className="textarea-field"
                       rows={field === 'recommendations' || field === 'anamnesis' ? 4 : 3}
@@ -902,6 +1034,15 @@ export function EditingScreen({
           </div>
         </div>
       </div>
+
+      {correctionPopup && (
+        <TermCorrectionPopup
+          position={correctionPopup.position}
+          selectedText={correctionPopup.selectedText}
+          onSave={handleCorrectionSave}
+          onClose={() => setCorrectionPopup(null)}
+        />
+      )}
     </div>
   );
 }

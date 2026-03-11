@@ -5,18 +5,27 @@
   complaintDate: string;
 }
 
+export interface RiskAssessment {
+  fallInLast3Months: string;   // "да" | "нет"
+  dizzinessOrWeakness: string; // "да" | "нет"
+  needsEscort: string;         // "да" | "нет"
+  painScore: string;           // "0", "1", ... "10"
+}
+
 export interface MedicalDocument {
   patient: PatientInfo;
+  riskAssessment: RiskAssessment;
   complaints: string;
   anamnesis: string;
+  outpatientExams: string;      // Амбулаторные обследования
   clinicalCourse: string;       // Анамнез жизни
   allergyHistory: string;       // Аллергологический анамнез
   objectiveStatus: string;      // Объективные данные
   neurologicalStatus: string;   // Неврологический статус
   diagnosis: string;            // Предварительный диагноз (основной)
   conclusion: string;           // Сопутствующий диагноз
+  doctorNotes: string;          // План обследования
   recommendations: string;      // План лечения
-  doctorNotes: string;          // Прочее
 }
 
 export interface TranscriptionResult {

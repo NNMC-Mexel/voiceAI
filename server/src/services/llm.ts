@@ -1,28 +1,37 @@
-﻿import type { MedicalDocument, StructureResult, LLMConfig } from '../types.js';
+﻿import type { MedicalDocument, RiskAssessment, StructureResult, LLMConfig } from '../types.js';
+
+const DEFAULT_RISK_ASSESSMENT: RiskAssessment = {
+  fallInLast3Months: 'нет',
+  dizzinessOrWeakness: 'нет',
+  needsEscort: 'нет',
+  painScore: '0',
+};
 
 interface LlamaCompletionResponse {
   content: string;
 }
 
 type MedicalDocumentPatch = Partial<
-  Omit<MedicalDocument, 'patient'> & {
+  Omit<MedicalDocument, 'patient' | 'riskAssessment'> & {
     patient: Partial<MedicalDocument['patient']>;
+    riskAssessment: Partial<RiskAssessment>;
   }
 >;
 
-type RewriteableField = keyof Omit<MedicalDocument, 'patient'>;
+type RewriteableField = keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>;
 
 const ALL_TEXT_FIELDS: RewriteableField[] = [
   'complaints',
   'anamnesis',
+  'outpatientExams',
   'clinicalCourse',
   'allergyHistory',
   'objectiveStatus',
   'neurologicalStatus',
   'diagnosis',
   'conclusion',
-  'recommendations',
   'doctorNotes',
+  'recommendations',
 ];
 
 export class LLMService {
@@ -167,6 +176,7 @@ Return JSON patch only.`;
   private getSectionMatchers(): Array<{ field: RewriteableField; pattern: string }> {
     return [
       // More specific patterns first to avoid false matches
+      { field: 'outpatientExams', pattern: '(?:амбулаторн\\S*\\s+(?:данн\\S*|обследовани\\S*)|амбулаторн\\S*\\s+результат\\S*)' },
       { field: 'clinicalCourse', pattern: '(?:перенесённ\\S*\\s+заболевани\\S*|анамнез\\s+жизни)' },
       { field: 'allergyHistory', pattern: 'аллерг\\S*' },
       { field: 'neurologicalStatus', pattern: 'неврологическ\\S*' },
@@ -396,6 +406,9 @@ ${normalized}`;
       patient: {
         ...base.patient,
       },
+      riskAssessment: {
+        ...base.riskAssessment,
+      },
     };
 
     let changed = false;
@@ -413,17 +426,28 @@ ${normalized}`;
       }
     }
 
+    if (patch.riskAssessment && typeof patch.riskAssessment === 'object') {
+      for (const key of ['fallInLast3Months', 'dizzinessOrWeakness', 'needsEscort', 'painScore'] as const) {
+        const value = patch.riskAssessment[key];
+        if (typeof value === 'string' && value.trim().length > 0) {
+          merged.riskAssessment[key] = value.trim();
+          changed = true;
+        }
+      }
+    }
+
     for (const key of [
       'complaints',
       'anamnesis',
+      'outpatientExams',
       'clinicalCourse',
       'allergyHistory',
       'objectiveStatus',
       'neurologicalStatus',
       'diagnosis',
       'conclusion',
-      'recommendations',
       'doctorNotes',
+      'recommendations',
     ] as const) {
       const value = patch[key];
       if (typeof value === 'string' && value.trim().length > 0) {
@@ -469,6 +493,9 @@ ${normalized}`;
       patient: {
         ...base.patient,
       },
+      riskAssessment: {
+        ...base.riskAssessment,
+      },
     };
 
     if (patch.patient && typeof patch.patient === 'object') {
@@ -480,17 +507,27 @@ ${normalized}`;
       }
     }
 
+    if (patch.riskAssessment && typeof patch.riskAssessment === 'object') {
+      for (const key of ['fallInLast3Months', 'dizzinessOrWeakness', 'needsEscort', 'painScore'] as const) {
+        const value = patch.riskAssessment[key];
+        if (typeof value === 'string') {
+          merged.riskAssessment[key] = value.trim();
+        }
+      }
+    }
+
     for (const key of [
       'complaints',
       'anamnesis',
+      'outpatientExams',
       'clinicalCourse',
       'allergyHistory',
       'objectiveStatus',
       'neurologicalStatus',
       'diagnosis',
       'conclusion',
-      'recommendations',
       'doctorNotes',
+      'recommendations',
     ] as const) {
       const value = patch[key];
       if (typeof value === 'string') {
@@ -535,11 +572,34 @@ ${normalized}`;
   }
 
   private getSystemPrompt(): string {
-    return `You are a medical assistant who must STRICTLY structure the doctor's dictation into a medical consultation document.\n\nRules:\n1) Do NOT add any information not present in the dictation.\n2) If data is missing, return empty strings.\n3) Extract patient age and gender ONLY if explicitly present in the dictation.\n4) Do NOT invent dates, diagnoses, or treatment plans.\n5) Remove filler words but keep all medical terminology exactly as spoken.\n6) Convert numbers from words to digits only if explicitly said.\n7) Preserve drug names, dosages, and medical abbreviations exactly.\n8) Put current medications (what patient takes at home) into "conclusion" field.\n9) Put investigation plan (labs, imaging orders) into "doctorNotes" field.\n10) Put past medical history (surgeries, TB, hepatitis, family history, habits) into "clinicalCourse" field.\n\nReturn ONLY JSON, no extra text.`;
+    return `You are a medical assistant who must STRICTLY structure the doctor's dictation into a medical consultation document.\n\nRules:\n1) Do NOT add any information not present in the dictation.\n2) If data is missing, return empty strings.\n3) Extract patient age and gender ONLY if explicitly present in the dictation.\n4) Do NOT invent dates, diagnoses, or treatment plans.\n5) Remove filler words but keep all medical terminology exactly as spoken.\n6) Convert numbers from words to digits only if explicitly said.\n7) Preserve drug names, dosages, and medical abbreviations exactly.\n8) Put current medications (what patient takes at home) into "conclusion" field.\n9) Put investigation plan (labs, imaging orders) into "doctorNotes" field.\n10) Put past medical history (surgeries, TB, hepatitis, family history, habits) into "clinicalCourse" field.\n11) Put outpatient exam results (ЭКГ, ЭхоКГ, ХМЭКГ, lab results with dates, ЧПЭхоКГ, проверка ЭКС) into "outpatientExams" field.\n12) Extract risk assessment (Morse fall scale): "fallInLast3Months" (да/нет), "dizzinessOrWeakness" (да/нет), "needsEscort" (да/нет), "painScore" (число 0-10). Default all to "нет"/"0" if not mentioned.\n13) Fix punctuation: remove excessive commas that Whisper inserts on speech pauses. Keep only grammatically correct punctuation.\n14) Fix spelling errors in medical terms (e.g. "фибриляция" → "фибрилляция", "гипертензея" → "гипертензия").\n15) Use Roman numerals for: functional class (ФК I-IV), NYHA (I-IV), CCS (I-IV), EHRA (I-IV), hypertension stages (ГБ I-III), AV-block degrees (I-III), valve insufficiency degrees (I-IV). Use Arabic numerals for diabetes types: СД 1 типа, СД 2 типа.\n\nReturn ONLY JSON, no extra text.`;
   }
 
   private getUserPrompt(rawText: string): string {
-    return `Structure the following medical dictation into a consultation document.\n\nTEXT:\n${rawText}\n\nReturn STRICT JSON (use empty strings if data is missing):\n{\n  "patient": {\n    "fullName": "ФИО пациента или пусто",\n    "age": "Возраст, например 45 лет, или пусто",\n    "gender": "мужской | женский | пусто",\n    "complaintDate": "YYYY-MM-DD или пусто"\n  },\n  "complaints": "Жалобы",\n  "anamnesis": "Анамнез заболевания (история болезни, хронология, данные обследований)",\n  "clinicalCourse": "Перенесённые заболевания (туберкулёз, гепатиты, операции, травмы, наследственность, вредные привычки)",\n  "allergyHistory": "Аллергологический анамнез (непереносимость препаратов, пищевых продуктов)",\n  "objectiveStatus": "Объективный статус (осмотр, аускультация, пульс, АД, температура, ИМТ, SpO2)",\n  "neurologicalStatus": "Неврологический статус",\n  "diagnosis": "Диагноз (с кодом МКБ-10 если озвучен)",\n  "conclusion": "Амбулаторная терапия (препараты которые пациент принимает амбулаторно + данные амбулаторных исследований)",\n  "recommendations": "Рекомендации / План лечения (назначенные препараты, дозировки, режим приёма)",\n  "doctorNotes": "План обследования (направления на анализы, ЭКГ, ЭхоКГ, ХМЭКГ, консультации специалистов)"\n}\n\nJSON:`;
+    return `Structure the following medical dictation into a consultation document.\n\nTEXT:\n${rawText}\n\nReturn STRICT JSON (use empty strings if data is missing):\n{\n  "patient": {\n    "fullName": "ФИО пациента или пусто",\n    "age": "Возраст, например 45 лет, или пусто",\n    "gender": "мужской | женский | пусто",\n    "complaintDate": "YYYY-MM-DD или пусто"\n  },\n  "riskAssessment": {\n    "fallInLast3Months": "да | нет (по шкале Морзе: падал ли в последние 3 месяца)",\n    "dizzinessOrWeakness": "да | нет (головокружение или слабость на момент осмотра)",\n    "needsEscort": "да | нет (нужно ли сопровождение)",\n    "painScore": "число от 0 до 10 (оценка боли в баллах, по умолчанию 0)"\n  },\n  "complaints": "Жалобы",\n  "anamnesis": "Анамнез заболевания (история болезни, хронология)",\n  "outpatientExams": "Амбулаторные обследования (ЭКГ, ЭхоКГ, ХМЭКГ, анализы крови, проверка ЭКС — с датами и результатами)",\n  "clinicalCourse": "Перенесённые заболевания (туберкулёз, гепатиты, операции, травмы, наследственность, вредные привычки)",\n  "allergyHistory": "Аллергологический анамнез (непереносимость препаратов, пищевых продуктов)",\n  "objectiveStatus": "Объективный статус (осмотр, аускультация, пульс, АД, температура, ИМТ, SpO2)",\n  "neurologicalStatus": "Неврологический статус",\n  "diagnosis": "Диагноз (с кодом МКБ-10 если озвучен)",\n  "conclusion": "Амбулаторная терапия (препараты которые пациент принимает амбулаторно + данные амбулаторных исследований)",\n  "doctorNotes": "План обследования (направления на анализы, ЭКГ, ЭхоКГ, ХМЭКГ, консультации специалистов)",\n  "recommendations": "Рекомендации / План лечения (назначенные препараты, дозировки, режим приёма)"\n}\n\nJSON:`;
+  }
+
+  private normalizeYesNo(value: string): string {
+    const v = (value || '').trim().toLowerCase();
+    if (/^(да|yes|true|1)$/i.test(v)) return 'да';
+    return 'нет';
+  }
+
+  private normalizePainScore(value: string): string {
+    const v = (value || '').trim().replace(/[бb]/gi, '');
+    const num = parseInt(v, 10);
+    if (isNaN(num) || num < 0) return '0';
+    if (num > 10) return '10';
+    return String(num);
+  }
+
+  private validateRiskAssessment(ra: Partial<RiskAssessment> | undefined): RiskAssessment {
+    return {
+      fallInLast3Months: this.normalizeYesNo(ra?.fallInLast3Months || ''),
+      dizzinessOrWeakness: this.normalizeYesNo(ra?.dizzinessOrWeakness || ''),
+      needsEscort: this.normalizeYesNo(ra?.needsEscort || ''),
+      painScore: this.normalizePainScore(ra?.painScore || '0'),
+    };
   }
 
   private validateAndCleanDocument(doc: MedicalDocument): MedicalDocument {
@@ -552,16 +612,18 @@ ${normalized}`;
         gender: this.normalizeGender(rawGender),
         complaintDate: doc.patient?.complaintDate || '',
       },
+      riskAssessment: this.validateRiskAssessment(doc.riskAssessment),
       complaints: this.stripSectionPrefix('complaints', doc.complaints || ''),
       anamnesis: this.stripSectionPrefix('anamnesis', doc.anamnesis || ''),
+      outpatientExams: this.stripSectionPrefix('outpatientExams', doc.outpatientExams || ''),
       clinicalCourse: this.stripSectionPrefix('clinicalCourse', doc.clinicalCourse || ''),
       allergyHistory: this.stripSectionPrefix('allergyHistory', doc.allergyHistory || ''),
       objectiveStatus: this.stripSectionPrefix('objectiveStatus', doc.objectiveStatus || ''),
       neurologicalStatus: this.stripSectionPrefix('neurologicalStatus', doc.neurologicalStatus || ''),
       diagnosis: this.stripSectionPrefix('diagnosis', doc.diagnosis || ''),
       conclusion: this.stripSectionPrefix('conclusion', doc.conclusion || ''),
-      recommendations: this.stripSectionPrefix('recommendations', doc.recommendations || ''),
       doctorNotes: this.stripSectionPrefix('doctorNotes', doc.doctorNotes || ''),
+      recommendations: this.stripSectionPrefix('recommendations', doc.recommendations || ''),
     };
   }
 
@@ -585,6 +647,12 @@ ${normalized}`;
       ],
       diagnosis: [
         /^диагноз\S*\s*[:.,-]\s*/iu,        // «Диагноз:» / «Диагноз.»
+      ],
+      outpatientExams: [
+        /^амбулаторн\S*\s+данн\S*\s*[:.,-]?\s*/iu,             // «Амбулаторные данные:»
+        /^амбулаторн\S*\s+обследовани\S*\s*[:.,-]?\s*/iu,      // «Амбулаторные обследования:»
+        /^(?:данные|результаты)\s+обследовани\S*\s*[:.,-]?\s*/iu, // «Данные обследований:»
+        /^(?:проведённ\S*|выполненн\S*)\s+(?:обследовани\S*|исследовани\S*)\s*[:.,-]?\s*/iu,
       ],
       clinicalCourse: [
         /^перенесённ\S*\s+заболевани\S*\s*[:.,-]?\s*/iu,  // «Перенесённые заболевания:»
@@ -712,16 +780,18 @@ ${normalized}`;
         gender: '',
         complaintDate: '',
       },
+      riskAssessment: { ...DEFAULT_RISK_ASSESSMENT },
       complaints: rawText.trim(),
       anamnesis: '',
+      outpatientExams: '',
       clinicalCourse: '',
       allergyHistory: '',
       objectiveStatus: '',
       neurologicalStatus: '',
       diagnosis: '',
       conclusion: '',
-      recommendations: '',
       doctorNotes: '',
+      recommendations: '',
     };
   }
 
@@ -730,6 +800,9 @@ ${normalized}`;
       ...document,
       patient: {
         ...document.patient,
+      },
+      riskAssessment: {
+        ...(document.riskAssessment || DEFAULT_RISK_ASSESSMENT),
       },
     };
 
@@ -800,16 +873,31 @@ ${normalized}`;
     const labels: Record<RewriteableField, string> = {
       complaints: 'Жалобы',
       anamnesis: 'Анамнез заболевания',
+      outpatientExams: 'Амбулаторные обследования',
       clinicalCourse: 'Перенесённые заболевания',
       allergyHistory: 'Аллергологический анамнез',
       objectiveStatus: 'Объективный статус',
       neurologicalStatus: 'Неврологический статус',
       diagnosis: 'Диагноз',
       conclusion: 'Амбулаторная терапия',
-      recommendations: 'Рекомендации / План лечения',
       doctorNotes: 'План обследования',
+      recommendations: 'Рекомендации / План лечения',
     };
     return labels[field];
+  }
+
+  private getRiskAssessmentJsonSchema(): object {
+    return {
+      type: 'object',
+      properties: {
+        fallInLast3Months: { type: 'string' },
+        dizzinessOrWeakness: { type: 'string' },
+        needsEscort: { type: 'string' },
+        painScore: { type: 'string' },
+      },
+      required: ['fallInLast3Months', 'dizzinessOrWeakness', 'needsEscort', 'painScore'],
+      additionalProperties: false,
+    };
   }
 
   private getDocumentJsonSchema(): object {
@@ -827,29 +915,33 @@ ${normalized}`;
           required: ['fullName', 'age', 'gender', 'complaintDate'],
           additionalProperties: false,
         },
+        riskAssessment: this.getRiskAssessmentJsonSchema(),
         complaints: { type: 'string' },
         anamnesis: { type: 'string' },
+        outpatientExams: { type: 'string' },
         clinicalCourse: { type: 'string' },
         allergyHistory: { type: 'string' },
         objectiveStatus: { type: 'string' },
         neurologicalStatus: { type: 'string' },
         diagnosis: { type: 'string' },
         conclusion: { type: 'string' },
-        recommendations: { type: 'string' },
         doctorNotes: { type: 'string' },
+        recommendations: { type: 'string' },
       },
       required: [
         'patient',
+        'riskAssessment',
         'complaints',
         'anamnesis',
+        'outpatientExams',
         'clinicalCourse',
         'allergyHistory',
         'objectiveStatus',
         'neurologicalStatus',
         'diagnosis',
         'conclusion',
-        'recommendations',
         'doctorNotes',
+        'recommendations',
       ],
       additionalProperties: false,
     };
@@ -869,16 +961,27 @@ ${normalized}`;
           },
           additionalProperties: false,
         },
+        riskAssessment: {
+          type: 'object',
+          properties: {
+            fallInLast3Months: { type: 'string' },
+            dizzinessOrWeakness: { type: 'string' },
+            needsEscort: { type: 'string' },
+            painScore: { type: 'string' },
+          },
+          additionalProperties: false,
+        },
         complaints: { type: 'string' },
         anamnesis: { type: 'string' },
+        outpatientExams: { type: 'string' },
         clinicalCourse: { type: 'string' },
         allergyHistory: { type: 'string' },
         objectiveStatus: { type: 'string' },
         neurologicalStatus: { type: 'string' },
         diagnosis: { type: 'string' },
         conclusion: { type: 'string' },
-        recommendations: { type: 'string' },
         doctorNotes: { type: 'string' },
+        recommendations: { type: 'string' },
       },
       additionalProperties: false,
     };
