@@ -48,7 +48,7 @@ interface ChatMessage {
   kind?: 'recommendations' | 'chat';
 }
 
-type RewriteableField = keyof Omit<MedicalDocument, 'patient'>;
+type RewriteableField = keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>;
 
 function isDocumentEditInstruction(text: string): boolean {
   const normalized = text.toLowerCase();

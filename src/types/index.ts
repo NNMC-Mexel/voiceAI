@@ -65,7 +65,7 @@ export const emptyDocument: MedicalDocument = {
   recommendations: '',
 };
 
-export const fieldLabels: Record<keyof Omit<MedicalDocument, 'patient'>, string> = {
+export const fieldLabels: Record<keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>, string> = {
   complaints: 'Жалобы',
   anamnesis: 'Анамнез заболевания',
   outpatientExams: 'Амбулаторные обследования',
