@@ -3,12 +3,25 @@ import { readFile, writeFile, unlink, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
 import type { TranscriptionResult, WhisperConfig } from '../types.js';
+import { applyMedicalDictionary, DICTIONARY_RULE_COUNT } from './medical-dictionary.js';
 
 interface WhisperServerResponse {
   text: string;
   language: string;
   elapsed: number;
 }
+
+const MEDICAL_INITIAL_PROMPT = `Консультация кардиолога. Риск падения по шкале Морзе. Оценка боли. ` +
+  `АД, ЧСС, ИМТ, SpO2, ЭКГ, ЭхоКГ, ХМЭКГ, КАГ, ПМЖВ, ПКА, ОВ ЛКА, РСДЛА, ФВ, NYHA, CCS, EHRA, ` +
+  `CHADS2 VASc, МКБ-10, ИБС, ХСН, СССУ, НРС, ОНМК, ДГПЖ, АИТ, ДН, ` +
+  `фибрилляция предсердий, стенокардия напряжения, артериальная гипертензия, ` +
+  `стентирование, имплантация ЭКС, электрокардиостимулятор, ` +
+  `бисопролол, кантаб, физиотенз, моксонидин, кандесартан, розувастатин, аторвастатин, ` +
+  `ксарелто, ривароксабан, дабигатран, прадакса, каптоприл, нитроглицерин, ` +
+  `этацизин, кордарон, дилтиазем, джардинс, форсига, эплеренон, эспиро, индапамид, ` +
+  `тромбопол, кардиомагнил, нолипрел, валодип, илпио, L-тироксин, ` +
+  `мм.рт.ст., уд/мин, мкг, мг, мкмоль/л, ммоль/л, г/л, пмоль/л, мкМЕ/мл, ` +
+  `гипотиреоз, гипокалиемия, гемотрансфузия, бронхиальная астма, сахарный диабет`;
 
 export class WhisperService {
   private config: WhisperConfig;
@@ -45,7 +58,13 @@ export class WhisperService {
     await writeFile(tempAudioPath, audioBuffer);
 
     try {
-      return await this.transcribeFile(tempAudioPath, filename);
+      const result = await this.transcribeFile(tempAudioPath, filename);
+      // Постобработка: исправляем медицинские термины
+      const corrected = applyMedicalDictionary(result.text);
+      if (corrected !== result.text) {
+        console.log(`[medical-dictionary] Applied corrections (${DICTIONARY_RULE_COUNT} rules)`);
+      }
+      return { ...result, text: corrected };
     } finally {
       try {
         await unlink(tempAudioPath);
@@ -134,6 +153,7 @@ export class WhisperService {
         body: JSON.stringify({
           audio_base64: audioBase64,
           language: this.config.language,
+          initial_prompt: MEDICAL_INITIAL_PROMPT,
         }),
         signal: controller.signal,
       });
@@ -223,7 +243,7 @@ start = time.time()
 model = WhisperModel(${modelName}, device="${device}", compute_type="${computeType}", device_index=${deviceIndex})
 load_time = time.time() - start
 print(json.dumps({"event": "whisper_model_loaded", "device": "${device}", "compute_type": "${computeType}", "load_time_sec": load_time}), file=sys.stderr)
-segments, info = model.transcribe(${audioPathLiteral}, language="${this.config.language}", beam_size=${beamSize})
+segments, info = model.transcribe(${audioPathLiteral}, language="${this.config.language}", beam_size=${beamSize}, initial_prompt=${JSON.stringify(MEDICAL_INITIAL_PROMPT)})
 text = " ".join([segment.text for segment in segments])
 print(json.dumps({"text": text, "language": info.language}))
 `;

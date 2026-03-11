@@ -1,7 +1,7 @@
 ﻿import type { MedicalDocument } from '../types';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
-const API_TIMEOUT_MS = Number.parseInt(import.meta.env.VITE_API_TIMEOUT_MS || '120000', 10);
+const API_TIMEOUT_MS = Number.parseInt(import.meta.env.VITE_API_TIMEOUT_MS || '30000', 10);
 
 interface UploadResponse {
   success: boolean;
@@ -123,9 +123,12 @@ class ApiClient {
     this.clearToken();
   }
 
-  private async request<T>(path: string, init?: RequestInit): Promise<T> {
+  private async request<T>(path: string, init?: RequestInit, timeoutMs?: number): Promise<T> {
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+    const effectiveTimeout = timeoutMs ?? API_TIMEOUT_MS;
+    const timeout = effectiveTimeout > 0
+      ? window.setTimeout(() => controller.abort(), effectiveTimeout)
+      : null;
 
     const token = this.getToken();
     const headers = new Headers(init?.headers);
@@ -160,11 +163,11 @@ class ApiClient {
       return (await response.json()) as T;
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error(`Запрос превысил таймаут ${Math.round(API_TIMEOUT_MS / 1000)}с`);
+        throw new Error(`Запрос превысил таймаут ${Math.round(effectiveTimeout / 1000)}с`);
       }
       throw error;
     } finally {
-      window.clearTimeout(timeout);
+      if (timeout !== null) window.clearTimeout(timeout);
     }
   }
 
@@ -213,7 +216,7 @@ class ApiClient {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ document, text }),
-    });
+    }, 0);
   }
 
   async processAudio(audioBlob: Blob, filename: string = 'recording.webm'): Promise<ProcessResponse> {
@@ -223,7 +226,7 @@ class ApiClient {
     return this.request('/api/process', {
       method: 'POST',
       body: formData,
-    });
+    }, 0);
   }
 
   async processAddendum(
@@ -255,7 +258,7 @@ class ApiClient {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ document }),
-    });
+    }, 0);
   }
 
   async chat(
@@ -289,7 +292,7 @@ class ApiClient {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ document, instruction }),
-    });
+    }, 0);
   }
 
   async tts(text: string): Promise<string> {
@@ -299,6 +302,26 @@ class ApiClient {
       body: JSON.stringify({ text }),
     });
     return result.audio_base64;
+  }
+
+  // ─── Corrections API ────────────────────────────────────────────────────────
+
+  async addCorrection(wrong: string, correct: string): Promise<{ success: boolean; id: string; totalCorrections: number }> {
+    return this.request('/api/corrections', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ wrong, correct }),
+    });
+  }
+
+  async getCorrections(): Promise<{ corrections: Array<{ id: string; wrong: string; correct: string; createdAt: string }>; total: number }> {
+    return this.request('/api/corrections');
+  }
+
+  async deleteCorrection(id: string): Promise<{ success: boolean }> {
+    return this.request(`/api/corrections/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
   }
 }
 

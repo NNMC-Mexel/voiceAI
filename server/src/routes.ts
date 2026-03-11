@@ -8,6 +8,11 @@ import { randomUUID } from 'crypto';
 import { WhisperService } from './services/whisper.js';
 import { LLMService } from './services/llm.js';
 import { TtsService } from './services/tts.js';
+import {
+  getUserCorrections,
+  addUserCorrection,
+  deleteUserCorrection,
+} from './services/medical-dictionary.js';
 import type { ServerConfig, MedicalDocument } from './types.js';
 
 interface RateState {
@@ -547,6 +552,58 @@ export async function registerRoutes(
         message: error instanceof Error ? error.message : 'Unknown error',
       });
     }
+  });
+
+  // ─── Corrections API (пользовательские замены медицинского словаря) ────────
+
+  fastify.get('/api/corrections', async () => {
+    const corrections = getUserCorrections();
+    return { corrections, total: corrections.length };
+  });
+
+  fastify.post('/api/corrections', async (request: FastifyRequest, reply: FastifyReply) => {
+    const body = request.body;
+    if (!isRecord(body)) {
+      return reply.status(400).send({ error: 'Invalid request body' });
+    }
+
+    const wrong = typeof body.wrong === 'string' ? body.wrong.trim() : '';
+    const correct = typeof body.correct === 'string' ? body.correct.trim() : '';
+
+    if (!wrong || !correct) {
+      return reply.status(400).send({ error: "Поля 'wrong' и 'correct' обязательны" });
+    }
+
+    if (wrong === correct) {
+      return reply.status(400).send({ error: 'Значения должны отличаться' });
+    }
+
+    try {
+      const correction = await addUserCorrection(wrong, correct);
+      const all = getUserCorrections();
+      return { success: true, id: correction.id, totalCorrections: all.length };
+    } catch (error) {
+      console.error('Add correction error:', error);
+      return reply.status(500).send({
+        error: 'Failed to add correction',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  });
+
+  fastify.delete('/api/corrections/:id', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+
+    if (!id) {
+      return reply.status(400).send({ error: 'ID is required' });
+    }
+
+    const deleted = await deleteUserCorrection(id);
+    if (!deleted) {
+      return reply.status(404).send({ error: 'Замена не найдена' });
+    }
+
+    return { success: true };
   });
 }
 

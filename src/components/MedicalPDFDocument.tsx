@@ -130,14 +130,15 @@ export function MedicalPDFDocument({ document }: MedicalPDFDocumentProps) {
   const sections = [
     { title: 'Жалобы', content: document.complaints },
     { title: 'Анамнез заболевания', content: document.anamnesis },
+    { title: 'Амбулаторные обследования', content: document.outpatientExams },
     { title: 'Перенесённые заболевания', content: document.clinicalCourse },
     { title: 'Аллергологический анамнез', content: document.allergyHistory },
     { title: 'Объективный статус', content: document.objectiveStatus },
     { title: 'Неврологический статус', content: document.neurologicalStatus },
     { title: 'Диагноз', content: document.diagnosis },
     { title: 'Амбулаторная терапия', content: document.conclusion },
-    { title: 'Рекомендации / План лечения', content: document.recommendations },
     { title: 'План обследования', content: document.doctorNotes },
+    { title: 'Рекомендации / План лечения', content: document.recommendations },
   ].filter((s) => s.content);
 
   return (
@@ -166,6 +167,28 @@ export function MedicalPDFDocument({ document }: MedicalPDFDocumentProps) {
             <Text style={styles.patientValue}>{formatDate(document.patient.complaintDate) || '-'}</Text>
           </View>
         </View>
+
+        {document.riskAssessment && (
+          <View style={styles.patientBlock}>
+            <Text style={{ ...styles.sectionTitle, marginBottom: 8 }}>Оценка риска (шкала Морзе)</Text>
+            <View style={styles.patientRow}>
+              <Text style={styles.patientLabel}>Падал (3 мес.):</Text>
+              <Text style={styles.patientValue}>{document.riskAssessment.fallInLast3Months || 'нет'}</Text>
+            </View>
+            <View style={styles.patientRow}>
+              <Text style={styles.patientLabel}>Головокружение:</Text>
+              <Text style={styles.patientValue}>{document.riskAssessment.dizzinessOrWeakness || 'нет'}</Text>
+            </View>
+            <View style={styles.patientRow}>
+              <Text style={styles.patientLabel}>Сопровождение:</Text>
+              <Text style={styles.patientValue}>{document.riskAssessment.needsEscort || 'нет'}</Text>
+            </View>
+            <View style={styles.patientRow}>
+              <Text style={styles.patientLabel}>Оценка боли:</Text>
+              <Text style={styles.patientValue}>{document.riskAssessment.painScore || '0'}б</Text>
+            </View>
+          </View>
+        )}
 
         {sections.map((section, index) => (
           <View key={index} style={styles.section}>

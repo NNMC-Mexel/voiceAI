@@ -11,6 +11,7 @@ import { registerRoutes } from './routes.js';
 import { WhisperService } from './services/whisper.js';
 import { LLMService } from './services/llm.js';
 import { TtsService } from './services/tts.js';
+import { loadUserCorrections } from './services/medical-dictionary.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -84,6 +85,9 @@ async function main() {
   } catch {
     fastify.log.info('No static files to serve (frontend not built yet)');
   }
+
+  // Загружаем пользовательские замены медицинского словаря
+  await loadUserCorrections();
 
   const whisperService = new WhisperService(config.whisper);
   await whisperService.init();
