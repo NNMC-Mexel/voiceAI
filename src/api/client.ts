@@ -49,7 +49,7 @@ interface ChatResponse {
   answer: string;
 }
 
-type RewriteableField = keyof Omit<MedicalDocument, 'patient'>;
+type RewriteableField = keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>;
 
 interface InstructResponse {
   success: boolean;
