@@ -103,6 +103,8 @@ export async function registerRoutes(
 
   fastify.addHook('onRequest', async (request, reply) => {
     const url = request.url;
+    // Only protect API routes; let static files (frontend) pass through
+    if (!url.startsWith('/api/')) return;
     if (url.startsWith('/api/health')) return;
     if (url.startsWith('/api/auth/')) return;
 
