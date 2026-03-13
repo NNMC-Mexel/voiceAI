@@ -22,10 +22,12 @@ export interface MedicalDocument {
   allergyHistory: string;       // Аллергологический анамнез
   objectiveStatus: string;      // Объективные данные
   neurologicalStatus: string;   // Неврологический статус
-  diagnosis: string;            // Предварительный диагноз (основной)
+  diagnosis: string;            // Предварительный диагноз
+  finalDiagnosis: string;       // Заключительный диагноз
   conclusion: string;           // Сопутствующий диагноз
   doctorNotes: string;          // План обследования
   recommendations: string;      // План лечения
+  diet: string;                 // Диета
 }
 
 export interface TranscriptionResult {

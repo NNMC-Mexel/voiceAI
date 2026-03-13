@@ -28,9 +28,12 @@ const rewriteableFields = [
   'objectiveStatus',
   'neurologicalStatus',
   'diagnosis',
+  'finalDiagnosis',
   'conclusion',
   'recommendations',
   'doctorNotes',
+  'outpatientExams',
+  'diet',
 ] as const;
 
 type RewriteableField = (typeof rewriteableFields)[number];
@@ -70,14 +73,17 @@ export function isValidMedicalDocument(doc: unknown): doc is MedicalDocument {
   const textKeys = [
     'complaints',
     'anamnesis',
+    'outpatientExams',
     'clinicalCourse',
     'allergyHistory',
     'objectiveStatus',
     'neurologicalStatus',
     'diagnosis',
+    'finalDiagnosis',
     'conclusion',
-    'recommendations',
     'doctorNotes',
+    'recommendations',
+    'diet',
   ];
 
   for (const key of textKeys) {
