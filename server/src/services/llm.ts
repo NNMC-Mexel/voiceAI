@@ -29,9 +29,11 @@ const ALL_TEXT_FIELDS: RewriteableField[] = [
   'objectiveStatus',
   'neurologicalStatus',
   'diagnosis',
+  'finalDiagnosis',
   'conclusion',
   'doctorNotes',
   'recommendations',
+  'diet',
 ];
 
 export class LLMService {
@@ -85,7 +87,11 @@ Rules:
 3) If addendum contradicts previous data, patch with addendum value.
 4) Do NOT invent new information.
 5) If no changes, return {}.
-6) Output STRICT JSON only.`;
+6) Output STRICT JSON only.
+7) PRESERVE ALL dictated text — do not omit, summarize or shorten any information.
+8) Each piece of information goes to EXACTLY ONE field. Do not duplicate between fields.
+9) When the doctor names a section explicitly (e.g. "анамнез жизни:", "диета:"), put ALL following text into that section only.
+10) Medications patient currently takes → "conclusion". New prescriptions → "recommendations". Past medications → "clinicalCourse". Diet → "diet".`;
 
     const userPrompt = `Current document (JSON):
 ${JSON.stringify(document, null, 2)}
@@ -137,7 +143,9 @@ Rules:
 3) If instruction says rewrite/fix a section, return the full final text for that section.
 4) Preserve clinical facts; do not invent new facts.
 5) If no changes are needed, return {}.
-6) Output STRICT JSON only.`;
+6) Output STRICT JSON only.
+7) PRESERVE ALL text — do not omit or shorten any information.
+8) Each piece of information goes to EXACTLY ONE field. Do not duplicate between fields.`;
 
     const userPrompt = `Current document (JSON):
 ${JSON.stringify(document, null, 2)}
@@ -183,10 +191,12 @@ Return JSON patch only.`;
       { field: 'anamnesis', pattern: 'анамнез\\S*' },
       { field: 'complaints', pattern: 'жалоб\\S*' },
       { field: 'objectiveStatus', pattern: 'объектив\\S*' },
-      { field: 'diagnosis', pattern: 'диагноз\\S*' },
+      { field: 'finalDiagnosis', pattern: '(?:заключительн\\S*\\s+диагноз\\S*|окончательн\\S*\\s+диагноз\\S*)' },
+      { field: 'diagnosis', pattern: '(?:предварительн\\S*\\s+диагноз\\S*|диагноз\\S*)' },
       { field: 'conclusion', pattern: '(?:амбулаторн\\S*\\s+терапи\\S*|амбулаторно\\s+принимает|сопутствующ\\S*)' },
       { field: 'recommendations', pattern: '(?:рекомендац\\S*|план\\s+лечени\\S*)' },
       { field: 'doctorNotes', pattern: '(?:план\\s+обследовани\\S*|направлени\\S*|прочее|заметк\\S*)' },
+      { field: 'diet', pattern: '(?:диет\\S*|стол\\s+\\d+|питани\\S*)' },
     ];
   }
 
@@ -436,19 +446,7 @@ ${normalized}`;
       }
     }
 
-    for (const key of [
-      'complaints',
-      'anamnesis',
-      'outpatientExams',
-      'clinicalCourse',
-      'allergyHistory',
-      'objectiveStatus',
-      'neurologicalStatus',
-      'diagnosis',
-      'conclusion',
-      'doctorNotes',
-      'recommendations',
-    ] as const) {
+    for (const key of ALL_TEXT_FIELDS) {
       const value = patch[key];
       if (typeof value === 'string' && value.trim().length > 0) {
         const nextValue = value.trim();
@@ -516,19 +514,7 @@ ${normalized}`;
       }
     }
 
-    for (const key of [
-      'complaints',
-      'anamnesis',
-      'outpatientExams',
-      'clinicalCourse',
-      'allergyHistory',
-      'objectiveStatus',
-      'neurologicalStatus',
-      'diagnosis',
-      'conclusion',
-      'doctorNotes',
-      'recommendations',
-    ] as const) {
+    for (const key of ALL_TEXT_FIELDS) {
       const value = patch[key];
       if (typeof value === 'string') {
         merged[key] = value.trim();
@@ -572,11 +558,86 @@ ${normalized}`;
   }
 
   private getSystemPrompt(): string {
-    return `You are a medical assistant who must STRICTLY structure the doctor's dictation into a medical consultation document.\n\nRules:\n1) Do NOT add any information not present in the dictation.\n2) If data is missing, return empty strings.\n3) Extract patient age and gender ONLY if explicitly present in the dictation.\n4) Do NOT invent dates, diagnoses, or treatment plans.\n5) Remove filler words but keep all medical terminology exactly as spoken.\n6) Convert numbers from words to digits only if explicitly said.\n7) Preserve drug names, dosages, and medical abbreviations exactly.\n8) Put current medications (what patient takes at home) into "conclusion" field.\n9) Put investigation plan (labs, imaging orders) into "doctorNotes" field.\n10) Put past medical history (surgeries, TB, hepatitis, family history, habits) into "clinicalCourse" field.\n11) Put outpatient exam results (ЭКГ, ЭхоКГ, ХМЭКГ, lab results with dates, ЧПЭхоКГ, проверка ЭКС) into "outpatientExams" field.\n12) Extract risk assessment (Morse fall scale): "fallInLast3Months" (да/нет), "dizzinessOrWeakness" (да/нет), "needsEscort" (да/нет), "painScore" (число 0-10). Default all to "нет"/"0" if not mentioned.\n13) Fix punctuation: remove excessive commas that Whisper inserts on speech pauses. Keep only grammatically correct punctuation.\n14) Fix spelling errors in medical terms (e.g. "фибриляция" → "фибрилляция", "гипертензея" → "гипертензия").\n15) Use Roman numerals for: functional class (ФК I-IV), NYHA (I-IV), CCS (I-IV), EHRA (I-IV), hypertension stages (ГБ I-III), AV-block degrees (I-III), valve insufficiency degrees (I-IV). Use Arabic numerals for diabetes types: СД 1 типа, СД 2 типа.\n\nReturn ONLY JSON, no extra text.`;
+    return `You are a medical assistant who must STRICTLY structure the doctor's dictation into a medical consultation document.
+
+CRITICAL RULES — NEVER VIOLATE:
+A) PRESERVE ALL DICTATED TEXT. Do NOT omit, summarize, shorten, or rephrase any information the doctor said. Every fact, every detail, every sentence must appear in the output. If the doctor said it, it MUST be in the JSON. You are a transcription structuring tool, not an editor.
+B) SECTION BOUNDARIES ARE STRICT. When the doctor explicitly names a section (e.g. "анамнез жизни:", "диагноз:", "диета:", "жалобы:", "амбулаторная терапия:"), ALL subsequent text belongs ONLY to that section until the doctor names a different section. Do NOT copy or duplicate text between sections.
+C) EACH PIECE OF INFORMATION GOES TO EXACTLY ONE FIELD. Never put the same fact into multiple fields. Choose the most appropriate field based on section markers or clinical context.
+
+Field assignment rules:
+1) "complaints" — patient complaints (жалобы). Only what the patient complains about.
+2) "anamnesis" — disease history (анамнез заболевания). Timeline and course of current illness.
+3) "outpatientExams" — outpatient exam results (ЭКГ, ЭхоКГ, ХМЭКГ, lab results with dates, ЧПЭхоКГ, проверка ЭКС). Only test results with dates.
+4) "clinicalCourse" — past medical history / life history (анамнез жизни / перенесённые заболевания). Surgeries, TB, hepatitis, injuries, family history, habits, comorbidities. Medications the patient PREVIOUSLY took or USED TO take go here.
+5) "allergyHistory" — allergy history. Drug/food allergies or "отрицает".
+6) "objectiveStatus" — physical examination findings (осмотр, аускультация, пульс, АД, температура, ИМТ, SpO2).
+7) "neurologicalStatus" — neurological examination findings.
+8) "diagnosis" — preliminary diagnosis (предварительный диагноз) with ICD-10 code if mentioned. This is the initial diagnosis before investigations.
+8a) "finalDiagnosis" — final diagnosis (заключительный диагноз). If the doctor explicitly says "заключительный диагноз" or "окончательный диагноз", put it here. Otherwise leave empty.
+9) "conclusion" — outpatient therapy (амбулаторная терапия). Medications the patient CURRENTLY takes at home. Not what the doctor prescribes now — only what patient already takes.
+10) "doctorNotes" — investigation plan (план обследования). Lab orders, imaging orders, specialist consultations the doctor orders NOW.
+11) "recommendations" — treatment plan (рекомендации / план лечения). Medications, dosages, regimens the doctor PRESCRIBES NOW. New prescriptions go here, not into "conclusion".
+12) "diet" — diet recommendations. If the doctor mentions a diet number (e.g. "диета 1а", "стол 5", "диета при диабете") or describes dietary restrictions, put it here. ONLY diet-related information.
+
+Distinguishing medications:
+- Medications patient ALREADY takes → "conclusion" (амбулаторная терапия)
+- Medications doctor PRESCRIBES NOW → "recommendations" (план лечения)
+- Medications patient TOOK IN THE PAST (history) → "clinicalCourse" (анамнез жизни)
+Do NOT mix these. If the doctor says "амбулаторно принимает X" → conclusion. If the doctor says "назначаю Y" or "рекомендую Z" → recommendations.
+
+General rules:
+13) Do NOT add any information not present in the dictation.
+14) If data is missing, return empty strings.
+15) Extract patient age and gender ONLY if explicitly present.
+16) Do NOT invent dates, diagnoses, or treatment plans.
+17) Remove filler words (ну, вот, значит, так) but keep ALL medical content exactly as spoken.
+18) Preserve drug names, dosages, and medical abbreviations exactly.
+19) Extract risk assessment (Morse fall scale): "fallInLast3Months" (да/нет), "dizzinessOrWeakness" (да/нет), "needsEscort" (да/нет), "painScore" (число 0-10). Default all to "нет"/"0" if not mentioned.
+20) Fix punctuation: remove excessive commas from speech pauses. Keep only grammatically correct punctuation.
+21) Fix spelling errors in medical terms (e.g. "фибриляция" → "фибрилляция", "гипертензея" → "гипертензия").
+22) Use Roman numerals for: functional class (ФК I-IV), NYHA (I-IV), CCS (I-IV), EHRA (I-IV), hypertension stages (ГБ I-III), AV-block degrees (I-III), valve insufficiency degrees (I-IV). Use Arabic numerals for diabetes types: СД 1 типа, СД 2 типа.
+
+Return ONLY JSON, no extra text.`;
   }
 
   private getUserPrompt(rawText: string): string {
-    return `Structure the following medical dictation into a consultation document.\n\nTEXT:\n${rawText}\n\nReturn STRICT JSON (use empty strings if data is missing):\n{\n  "patient": {\n    "fullName": "ФИО пациента или пусто",\n    "age": "Возраст, например 45 лет, или пусто",\n    "gender": "мужской | женский | пусто",\n    "complaintDate": "YYYY-MM-DD или пусто"\n  },\n  "riskAssessment": {\n    "fallInLast3Months": "да | нет (по шкале Морзе: падал ли в последние 3 месяца)",\n    "dizzinessOrWeakness": "да | нет (головокружение или слабость на момент осмотра)",\n    "needsEscort": "да | нет (нужно ли сопровождение)",\n    "painScore": "число от 0 до 10 (оценка боли в баллах, по умолчанию 0)"\n  },\n  "complaints": "Жалобы",\n  "anamnesis": "Анамнез заболевания (история болезни, хронология)",\n  "outpatientExams": "Амбулаторные обследования (ЭКГ, ЭхоКГ, ХМЭКГ, анализы крови, проверка ЭКС — с датами и результатами)",\n  "clinicalCourse": "Перенесённые заболевания (туберкулёз, гепатиты, операции, травмы, наследственность, вредные привычки)",\n  "allergyHistory": "Аллергологический анамнез (непереносимость препаратов, пищевых продуктов)",\n  "objectiveStatus": "Объективный статус (осмотр, аускультация, пульс, АД, температура, ИМТ, SpO2)",\n  "neurologicalStatus": "Неврологический статус",\n  "diagnosis": "Диагноз (с кодом МКБ-10 если озвучен)",\n  "conclusion": "Амбулаторная терапия (препараты которые пациент принимает амбулаторно + данные амбулаторных исследований)",\n  "doctorNotes": "План обследования (направления на анализы, ЭКГ, ЭхоКГ, ХМЭКГ, консультации специалистов)",\n  "recommendations": "Рекомендации / План лечения (назначенные препараты, дозировки, режим приёма)"\n}\n\nJSON:`;
+    return `Structure the following medical dictation into a consultation document.
+IMPORTANT: Preserve ALL dictated text. Do NOT omit any details. Each fact goes to exactly ONE field — no duplication.
+
+TEXT:
+${rawText}
+
+Return STRICT JSON (use empty strings if data is missing):
+{
+  "patient": {
+    "fullName": "ФИО пациента или пусто",
+    "age": "Возраст, например 45 лет, или пусто",
+    "gender": "мужской | женский | пусто",
+    "complaintDate": "YYYY-MM-DD или пусто"
+  },
+  "riskAssessment": {
+    "fallInLast3Months": "да | нет (по шкале Морзе: падал ли в последние 3 месяца)",
+    "dizzinessOrWeakness": "да | нет (головокружение или слабость на момент осмотра)",
+    "needsEscort": "да | нет (нужно ли сопровождение)",
+    "painScore": "число от 0 до 10 (оценка боли в баллах, по умолчанию 0)"
+  },
+  "complaints": "Жалобы пациента",
+  "anamnesis": "Анамнез заболевания (история текущей болезни, хронология)",
+  "outpatientExams": "Амбулаторные обследования (ЭКГ, ЭхоКГ, ХМЭКГ, анализы крови — с датами и результатами)",
+  "clinicalCourse": "Анамнез жизни (перенесённые заболевания: туберкулёз, гепатиты, операции, травмы, наследственность, вредные привычки, сопутствующая патология, препараты которые принимал РАНЕЕ)",
+  "allergyHistory": "Аллергологический анамнез (непереносимость препаратов, пищевых продуктов)",
+  "objectiveStatus": "Объективный статус (осмотр, аускультация, пульс, АД, температура, ИМТ, SpO2)",
+  "neurologicalStatus": "Неврологический статус",
+  "diagnosis": "Предварительный диагноз (с кодом МКБ-10 если озвучен)",
+  "finalDiagnosis": "Заключительный диагноз (если озвучен отдельно, иначе пусто)",
+  "conclusion": "Амбулаторная терапия (ТОЛЬКО препараты которые пациент СЕЙЧАС принимает амбулаторно)",
+  "doctorNotes": "План обследования (направления на анализы, ЭКГ, ЭхоКГ, консультации специалистов)",
+  "recommendations": "Рекомендации / План лечения (НОВЫЕ назначения врача: препараты, дозировки, режим приёма)",
+  "diet": "Диета (номер диеты или описание диетических рекомендаций, если озвучены)"
+}
+
+JSON:`;
   }
 
   private normalizeYesNo(value: string): string {
@@ -621,9 +682,11 @@ ${normalized}`;
       objectiveStatus: this.stripSectionPrefix('objectiveStatus', doc.objectiveStatus || ''),
       neurologicalStatus: this.stripSectionPrefix('neurologicalStatus', doc.neurologicalStatus || ''),
       diagnosis: this.stripSectionPrefix('diagnosis', doc.diagnosis || ''),
+      finalDiagnosis: this.stripSectionPrefix('finalDiagnosis', doc.finalDiagnosis || ''),
       conclusion: this.stripSectionPrefix('conclusion', doc.conclusion || ''),
       doctorNotes: this.stripSectionPrefix('doctorNotes', doc.doctorNotes || ''),
       recommendations: this.stripSectionPrefix('recommendations', doc.recommendations || ''),
+      diet: this.stripSectionPrefix('diet', doc.diet || ''),
     };
   }
 
@@ -646,7 +709,13 @@ ${normalized}`;
         /^осмотр\S*\s*[:.,-]\s*/iu,                    // «Осмотр:»
       ],
       diagnosis: [
-        /^диагноз\S*\s*[:.,-]\s*/iu,        // «Диагноз:» / «Диагноз.»
+        /^предварительн\S*\s+диагноз\S*\s*[:.,-]?\s*/iu, // «Предварительный диагноз:»
+        /^диагноз\S*\s*[:.,-]\s*/iu,                       // «Диагноз:» / «Диагноз.»
+      ],
+      finalDiagnosis: [
+        /^заключительн\S*\s+диагноз\S*\s*[:.,-]?\s*/iu,   // «Заключительный диагноз:»
+        /^окончательн\S*\s+диагноз\S*\s*[:.,-]?\s*/iu,    // «Окончательный диагноз:»
+        /^диагноз\S*\s*[:.,-]\s*/iu,                       // «Диагноз:» (fallback)
       ],
       outpatientExams: [
         /^амбулаторн\S*\s+данн\S*\s*[:.,-]?\s*/iu,             // «Амбулаторные данные:»
@@ -684,6 +753,11 @@ ${normalized}`;
         /^направлени\S*\s+на\s+обследовани\S*\s*[:.,-]?\s*/iu,      // «Направления на обследования:»
         /^прочее\s*[:.,-]?\s*/iu,                                     // «Прочее:» (старый)
         /^(?:заметк[иа]\s+врача|заметк[иа]|примечани\S*)\s*[:.,-]\s*/iu,
+      ],
+      diet: [
+        /^диет\S*\s*[:.,-]?\s*/iu,                                    // «Диета:» / «Диета 5:»
+        /^стол\s*\d+\S*\s*[:.,-]?\s*/iu,                              // «Стол 5:»
+        /^питани\S*\s*[:.,-]?\s*/iu,                                   // «Питание:»
       ],
     };
 
@@ -789,9 +863,11 @@ ${normalized}`;
       objectiveStatus: '',
       neurologicalStatus: '',
       diagnosis: '',
+      finalDiagnosis: '',
       conclusion: '',
       doctorNotes: '',
       recommendations: '',
+      diet: '',
     };
   }
 
@@ -874,14 +950,16 @@ ${normalized}`;
       complaints: 'Жалобы',
       anamnesis: 'Анамнез заболевания',
       outpatientExams: 'Амбулаторные обследования',
-      clinicalCourse: 'Перенесённые заболевания',
+      clinicalCourse: 'Анамнез жизни',
       allergyHistory: 'Аллергологический анамнез',
       objectiveStatus: 'Объективный статус',
       neurologicalStatus: 'Неврологический статус',
-      diagnosis: 'Диагноз',
+      diagnosis: 'Предварительный диагноз',
+      finalDiagnosis: 'Заключительный диагноз',
       conclusion: 'Амбулаторная терапия',
       doctorNotes: 'План обследования',
       recommendations: 'Рекомендации / План лечения',
+      diet: 'Диета',
     };
     return labels[field];
   }
@@ -924,9 +1002,11 @@ ${normalized}`;
         objectiveStatus: { type: 'string' },
         neurologicalStatus: { type: 'string' },
         diagnosis: { type: 'string' },
+        finalDiagnosis: { type: 'string' },
         conclusion: { type: 'string' },
         doctorNotes: { type: 'string' },
         recommendations: { type: 'string' },
+        diet: { type: 'string' },
       },
       required: [
         'patient',
@@ -939,9 +1019,11 @@ ${normalized}`;
         'objectiveStatus',
         'neurologicalStatus',
         'diagnosis',
+        'finalDiagnosis',
         'conclusion',
         'doctorNotes',
         'recommendations',
+        'diet',
       ],
       additionalProperties: false,
     };
@@ -979,9 +1061,11 @@ ${normalized}`;
         objectiveStatus: { type: 'string' },
         neurologicalStatus: { type: 'string' },
         diagnosis: { type: 'string' },
+        finalDiagnosis: { type: 'string' },
         conclusion: { type: 'string' },
         doctorNotes: { type: 'string' },
         recommendations: { type: 'string' },
+        diet: { type: 'string' },
       },
       additionalProperties: false,
     };

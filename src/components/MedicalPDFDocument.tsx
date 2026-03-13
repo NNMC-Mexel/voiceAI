@@ -131,14 +131,16 @@ export function MedicalPDFDocument({ document }: MedicalPDFDocumentProps) {
     { title: 'Жалобы', content: document.complaints },
     { title: 'Анамнез заболевания', content: document.anamnesis },
     { title: 'Амбулаторные обследования', content: document.outpatientExams },
-    { title: 'Перенесённые заболевания', content: document.clinicalCourse },
+    { title: 'Анамнез жизни', content: document.clinicalCourse },
     { title: 'Аллергологический анамнез', content: document.allergyHistory },
     { title: 'Объективный статус', content: document.objectiveStatus },
     { title: 'Неврологический статус', content: document.neurologicalStatus },
-    { title: 'Диагноз', content: document.diagnosis },
-    { title: 'Амбулаторная терапия', content: document.conclusion },
+    { title: 'Предварительный диагноз', content: document.diagnosis },
+    { title: 'Заключительный диагноз', content: document.finalDiagnosis },
     { title: 'План обследования', content: document.doctorNotes },
     { title: 'Рекомендации / План лечения', content: document.recommendations },
+    { title: 'Амбулаторная терапия', content: document.conclusion },
+    { title: 'Диета', content: document.diet },
   ].filter((s) => s.content);
 
   return (

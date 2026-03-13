@@ -25,6 +25,8 @@
   ShieldAlert,
   Volume2,
   VolumeX,
+  UtensilsCrossed,
+  ChevronDown,
 } from 'lucide-react';
 import type { MedicalDocument, PatientInfo, RiskAssessment } from '../types';
 import { fieldLabels, patientFieldLabels, riskAssessmentLabels } from '../types';
@@ -33,7 +35,8 @@ import { TermCorrectionPopup } from './TermCorrectionPopup';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { WaveformVisualizer } from './WaveformVisualizer';
 import { apiClient } from '../api/client';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { dietTemplates } from '../data/dietTemplates';
 
 interface EditingScreenProps {
   document: MedicalDocument;
@@ -83,6 +86,8 @@ function isDocumentEditInstruction(text: string): boolean {
     'направлени',
     'перенесённ',
     'пациент',
+    'диет',
+    'заключительн',
   ];
   return sectionHints.some((h) => normalized.includes(h));
 }
@@ -104,10 +109,15 @@ const sectionIcons: Record<keyof Omit<MedicalDocument, 'patient' | 'riskAssessme
   objectiveStatus: <Stethoscope className="w-4 h-4" />,
   neurologicalStatus: <Brain className="w-4 h-4" />,
   diagnosis: <ClipboardList className="w-4 h-4" />,
+  finalDiagnosis: <ClipboardList className="w-4 h-4" />,
   conclusion: <Pill className="w-4 h-4" />,
   doctorNotes: <FlaskConical className="w-4 h-4" />,
   recommendations: <ListTodo className="w-4 h-4" />,
+  diet: <UtensilsCrossed className="w-4 h-4" />,
 };
+
+const MIN_TEXTAREA_HEIGHT = 100;
+const MAX_TEXTAREA_HEIGHT = 420;
 
 export function EditingScreen({
   document,
@@ -148,6 +158,7 @@ export function EditingScreen({
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [ttsEnabled, setTtsEnabled] = useState(false);
   const [isTtsSpeaking, setIsTtsSpeaking] = useState(false);
+  const [isDietListOpen, setIsDietListOpen] = useState(false);
   const [correctionPopup, setCorrectionPopup] = useState<{
     position: { x: number; y: number };
     selectedText: string;
@@ -160,6 +171,28 @@ export function EditingScreen({
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsUrlRef = useRef<string | null>(null);
   const ttsGenRef = useRef(0);
+  const textareaRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
+
+  const resizeTextarea = useCallback((textarea: HTMLTextAreaElement | null) => {
+    if (!textarea) return;
+
+    textarea.style.height = 'auto';
+    const nextHeight = Math.min(
+      Math.max(textarea.scrollHeight, MIN_TEXTAREA_HEIGHT),
+      MAX_TEXTAREA_HEIGHT
+    );
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > MAX_TEXTAREA_HEIGHT ? 'auto' : 'hidden';
+  }, []);
+
+  const bindTextareaRef = (key: string) => (textarea: HTMLTextAreaElement | null) => {
+    textareaRefs.current[key] = textarea;
+    resizeTextarea(textarea);
+  };
+
+  const handleTextareaInput = (e: React.FormEvent<HTMLTextAreaElement>) => {
+    resizeTextarea(e.currentTarget);
+  };
 
   const stopTts = () => {
     ttsGenRef.current++;
@@ -188,6 +221,14 @@ export function EditingScreen({
       }
     };
   }, []);
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      Object.values(textareaRefs.current).forEach((textarea) => resizeTextarea(textarea));
+    });
+
+    return () => cancelAnimationFrame(frame);
+  }, [document, resizeTextarea]);
 
   const playTts = async (text: string) => {
     stopTts();
@@ -987,9 +1028,15 @@ export function EditingScreen({
             </div>
 
             <div className="space-y-4">
-              {(Object.keys(fieldLabels) as Array<keyof typeof fieldLabels>).map((field, index) => (
+              {(Object.keys(fieldLabels) as Array<keyof typeof fieldLabels>)
+                .filter((field) => field !== 'finalDiagnosis')
+                .map((field, index) => (
                 <div key={field} className="slide-up" style={{ animationDelay: `${0.15 + index * 0.05}s` }}>
-                  <CollapsibleSection title={fieldLabels[field]} icon={sectionIcons[field]} defaultOpen={index < 4}>
+                  <CollapsibleSection
+                    title={field === 'diagnosis' ? 'Диагноз' : fieldLabels[field]}
+                    icon={sectionIcons[field]}
+                    defaultOpen={index < 4}
+                  >
                     {field === 'complaints' && (
                       <div className="mb-3 flex justify-end">
                         <button
@@ -1011,15 +1058,90 @@ export function EditingScreen({
                         </button>
                       </div>
                     )}
-                    <textarea
-                      value={document[field]}
-                      onChange={(e) => handleFieldChange(field, e.target.value)}
-                      onMouseDown={handleTextareaMouseDown}
-                      onContextMenu={(e) => handleTextareaContextMenu(e, field)}
-                      placeholder={`Введите ${fieldLabels[field].toLowerCase()}...`}
-                      className="textarea-field"
-                      rows={field === 'recommendations' || field === 'anamnesis' ? 4 : 3}
-                    />
+                    {field === 'diagnosis' ? (
+                      <div className="space-y-3">
+                        <div>
+                          <label className="block text-sm font-medium text-text-secondary mb-1">Предварительный диагноз</label>
+                          <textarea
+                            ref={bindTextareaRef('diagnosis')}
+                            value={document.diagnosis}
+                            onChange={(e) => handleFieldChange('diagnosis', e.target.value)}
+                            onInput={handleTextareaInput}
+                            onMouseDown={handleTextareaMouseDown}
+                            onContextMenu={(e) => handleTextareaContextMenu(e, 'diagnosis')}
+                            placeholder="Введите предварительный диагноз..."
+                            className="textarea-field"
+                            rows={3}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-text-secondary mb-1">Заключительный диагноз</label>
+                          <textarea
+                            ref={bindTextareaRef('finalDiagnosis')}
+                            value={document.finalDiagnosis}
+                            onChange={(e) => handleFieldChange('finalDiagnosis', e.target.value)}
+                            onInput={handleTextareaInput}
+                            onMouseDown={handleTextareaMouseDown}
+                            onContextMenu={(e) => handleTextareaContextMenu(e, 'finalDiagnosis')}
+                            placeholder="Введите заключительный диагноз..."
+                            className="textarea-field"
+                            rows={3}
+                          />
+                        </div>
+                      </div>
+                    ) : field === 'diet' ? (
+                      <div className="space-y-3">
+                        <textarea
+                          ref={bindTextareaRef('diet')}
+                          value={document.diet}
+                          onChange={(e) => handleFieldChange('diet', e.target.value)}
+                          onInput={handleTextareaInput}
+                          onMouseDown={handleTextareaMouseDown}
+                          onContextMenu={(e) => handleTextareaContextMenu(e, 'diet')}
+                          placeholder="Введите диету..."
+                          className="textarea-field"
+                          rows={3}
+                        />
+                        <div>
+                          <button
+                            onClick={() => setIsDietListOpen((v) => !v)}
+                            className="flex items-center gap-2 text-sm font-medium text-medical-700 hover:text-medical-900 transition-colors"
+                          >
+                            <ChevronDown className={`w-4 h-4 transition-transform ${isDietListOpen ? 'rotate-180' : ''}`} />
+                            Выбрать диету из списка
+                          </button>
+                          {isDietListOpen && (
+                            <div className="mt-2 max-h-60 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 divide-y divide-slate-200">
+                              {dietTemplates.map((diet) => (
+                                <button
+                                  key={diet.id}
+                                  onClick={() => {
+                                    handleFieldChange('diet', diet.description);
+                                    setIsDietListOpen(false);
+                                  }}
+                                  className="w-full text-left px-3 py-2 hover:bg-medical-50 transition-colors"
+                                >
+                                  <span className="text-sm font-medium text-medical-800">{diet.name}</span>
+                                  <p className="text-xs text-text-muted line-clamp-2 mt-0.5">{diet.description}</p>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <textarea
+                        ref={bindTextareaRef(field)}
+                        value={document[field]}
+                        onChange={(e) => handleFieldChange(field, e.target.value)}
+                        onInput={handleTextareaInput}
+                        onMouseDown={handleTextareaMouseDown}
+                        onContextMenu={(e) => handleTextareaContextMenu(e, field)}
+                        placeholder={`Введите ${fieldLabels[field].toLowerCase()}...`}
+                        className="textarea-field"
+                        rows={field === 'recommendations' || field === 'anamnesis' ? 4 : 3}
+                      />
+                    )}
                   </CollapsibleSection>
                 </div>
               ))}

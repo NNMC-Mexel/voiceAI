@@ -22,10 +22,12 @@ export interface MedicalDocument {
   allergyHistory: string;       // Аллергологический анамнез
   objectiveStatus: string;      // Объективный статус
   neurologicalStatus: string;   // Неврологический статус
-  diagnosis: string;            // Диагноз
+  diagnosis: string;            // Предварительный диагноз
+  finalDiagnosis: string;       // Заключительный диагноз
   conclusion: string;           // Амбулаторная терапия
   doctorNotes: string;          // План обследования
   recommendations: string;      // Рекомендации / План лечения
+  diet: string;                 // Диета
 }
 
 export type AppStep = 'recording' | 'processing' | 'editing' | 'preview';
@@ -60,23 +62,27 @@ export const emptyDocument: MedicalDocument = {
   objectiveStatus: '',
   neurologicalStatus: '',
   diagnosis: '',
+  finalDiagnosis: '',
   conclusion: '',
   doctorNotes: '',
   recommendations: '',
+  diet: '',
 };
 
 export const fieldLabels: Record<keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>, string> = {
   complaints: 'Жалобы',
   anamnesis: 'Анамнез заболевания',
   outpatientExams: 'Амбулаторные обследования',
-  clinicalCourse: 'Перенесённые заболевания',
+  clinicalCourse: 'Анамнез жизни',
   allergyHistory: 'Аллергологический анамнез',
   objectiveStatus: 'Объективный статус',
   neurologicalStatus: 'Неврологический статус',
-  diagnosis: 'Диагноз',
-  conclusion: 'Амбулаторная терапия',
+  diagnosis: 'Предварительный диагноз',
+  finalDiagnosis: 'Заключительный диагноз',
   doctorNotes: 'План обследования',
   recommendations: 'Рекомендации / План лечения',
+  conclusion: 'Амбулаторная терапия',
+  diet: 'Диета',
 };
 
 export const patientFieldLabels: Record<keyof PatientInfo, string> = {
