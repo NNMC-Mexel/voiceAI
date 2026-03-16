@@ -3,7 +3,6 @@ import { Mic, Pause, Play, Square, AlertCircle, CheckCircle, RotateCcw, Upload }
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { WaveformVisualizer } from './WaveformVisualizer';
 
-const isDev = import.meta.env.DEV;
 
 interface RecordingScreenProps {
   onRecordingComplete: (audioBlob: Blob) => void;
@@ -196,24 +195,20 @@ export function RecordingScreen({ onRecordingComplete, error: externalError }: R
                   <Mic className="w-6 h-6" />
                   Начать запись
                 </button>
-                {isDev && (
-                  <>
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      accept="audio/*"
-                      onChange={handleFileUpload}
-                      className="hidden"
-                    />
-                    <button
-                      onClick={() => fileInputRef.current?.click()}
-                      className="btn-secondary flex items-center gap-2 text-sm"
-                    >
-                      <Upload className="w-4 h-4" />
-                      Загрузить файл
-                    </button>
-                  </>
-                )}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="audio/*"
+                  onChange={handleFileUpload}
+                  className="hidden"
+                />
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="btn-secondary flex items-center gap-2 text-sm"
+                >
+                  <Upload className="w-4 h-4" />
+                  Загрузить файл
+                </button>
               </>
             )}
 
