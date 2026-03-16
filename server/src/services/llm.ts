@@ -1,4 +1,5 @@
 ﻿import type { MedicalDocument, RiskAssessment, StructureResult, LLMConfig } from '../types.js';
+import { findExamTemplate, formatExamLine } from '../data/examTemplates.js';
 
 const DEFAULT_RISK_ASSESSMENT: RiskAssessment = {
   fallInLast3Months: 'нет',
@@ -568,7 +569,17 @@ C) EACH PIECE OF INFORMATION GOES TO EXACTLY ONE FIELD. Never put the same fact 
 Field assignment rules:
 1) "complaints" — patient complaints (жалобы). Only what the patient complains about.
 2) "anamnesis" — disease history (анамнез заболевания). Timeline and course of current illness.
-3) "outpatientExams" — outpatient exam results (ЭКГ, ЭхоКГ, ХМЭКГ, lab results with dates, ЧПЭхоКГ, проверка ЭКС). Only test results with dates.
+3) "outpatientExams" — outpatient exam results (ОАК, Б/х, ОАМ, ЭКГ, ЭхоКГ, ХМЭКГ, ЧПЭхоКГ, проверка ЭКС, рентген, УЗИ, СМАД, УЗДГ БЦА). Only test results with dates.
+   FORMATTING RULES for outpatientExams:
+   - Output as NUMBERED LIST (1. 2. 3. ...), each exam on a new line.
+   - For lab tests with parameters, use format: "ExamName от DATE: param1 - value unit, param2 - value unit."
+   - ALWAYS include measurement units even if the doctor did not say them:
+     ОАК: Hb - г/л, Эр - *10¹²/л, Л - *10⁹/л, Тр - *10⁹/л, СОЭ - мм/ч.
+     Б/х: общий белок - г/л, креатинин - мкмоль/л, СКФ - (по формуле CKD-EPI) мл/мин/1,73 м², глюкоза - ммоль/л, АЛТ - МЕ/л, АСТ - МЕ/л, общий билирубин - мкмоль/л, прямой билирубин - мкмоль/л, ХС - общий ммоль/л, ХС - ЛПВП ммоль/л, ХС ЛПНП - ммоль/л, ТГ - ммоль/л, мочевая кислота - мкмоль/л, калий - ммоль/л, натрий - ммоль/л, железо - мкмоль/л, ферритин - нг/мл, КНТЖ - %.
+     ОАМ: отн. плотность - , белок - г/л, Л - в п/з, Эр - в п/з.
+   - For exams WITHOUT parameters (ЭКГ, ЭХОКГ, рентген, УЗИ, Холтер, СМАД, УЗДГ БЦА): "ExamName от DATE: description"
+   - If doctor gives values, fill them in next to units. If no value given, leave blank before unit.
+   - If doctor says "ОАК" or "общий анализ крови", output the FULL template with ALL parameters and units.
 4) "clinicalCourse" — past medical history / life history (анамнез жизни / перенесённые заболевания). Surgeries, TB, hepatitis, injuries, family history, habits, comorbidities. Medications the patient PREVIOUSLY took or USED TO take go here.
 5) "allergyHistory" — allergy history. Drug/food allergies or "отрицает".
 6) "objectiveStatus" — physical examination findings (осмотр, аускультация, пульс, АД, температура, ИМТ, SpO2).
@@ -624,7 +635,7 @@ Return STRICT JSON (use empty strings if data is missing):
   },
   "complaints": "Жалобы пациента",
   "anamnesis": "Анамнез заболевания (история текущей болезни, хронология)",
-  "outpatientExams": "Амбулаторные обследования (ЭКГ, ЭхоКГ, ХМЭКГ, анализы крови — с датами и результатами)",
+  "outpatientExams": "Данные имеющихся дополнительных исследований — НУМЕРОВАННЫЙ СПИСОК. Каждое обследование с датой и единицами измерения. Формат: 1. ОАК от дата: Hb - значение г/л, Эр - значение *10¹²/л, ... 2. Б/х анализ крови от дата: ... Всегда подставлять единицы измерения.",
   "clinicalCourse": "Анамнез жизни (перенесённые заболевания: туберкулёз, гепатиты, операции, травмы, наследственность, вредные привычки, сопутствующая патология, препараты которые принимал РАНЕЕ)",
   "allergyHistory": "Аллергологический анамнез (непереносимость препаратов, пищевых продуктов)",
   "objectiveStatus": "Объективный статус (осмотр, аускультация, пульс, АД, температура, ИМТ, SpO2)",
@@ -676,7 +687,7 @@ JSON:`;
       riskAssessment: this.validateRiskAssessment(doc.riskAssessment),
       complaints: this.stripSectionPrefix('complaints', doc.complaints || ''),
       anamnesis: this.stripSectionPrefix('anamnesis', doc.anamnesis || ''),
-      outpatientExams: this.stripSectionPrefix('outpatientExams', doc.outpatientExams || ''),
+      outpatientExams: this.postProcessOutpatientExams(this.stripSectionPrefix('outpatientExams', doc.outpatientExams || '')),
       clinicalCourse: this.stripSectionPrefix('clinicalCourse', doc.clinicalCourse || ''),
       allergyHistory: this.stripSectionPrefix('allergyHistory', doc.allergyHistory || ''),
       objectiveStatus: this.stripSectionPrefix('objectiveStatus', doc.objectiveStatus || ''),
@@ -688,6 +699,57 @@ JSON:`;
       recommendations: this.stripSectionPrefix('recommendations', doc.recommendations || ''),
       diet: this.stripSectionPrefix('diet', doc.diet || ''),
     };
+  }
+
+  /**
+   * Пост-обработка поля outpatientExams:
+   * - Распознаёт названия обследований (ОАК, Б/х, ОАМ, ЭКГ и т.д.)
+   * - Подставляет единицы измерения для параметров, если LLM их пропустила
+   * - Форматирует нумерованным списком
+   */
+  private postProcessOutpatientExams(text: string): string {
+    if (!text.trim()) return '';
+
+    // Разбиваем на строки/элементы списка
+    const lines = text
+      .split(/\n/)
+      .map((l) => l.replace(/^\s*\d+[\.\)]\s*/, '').trim()) // убираем существующую нумерацию
+      .filter((l) => l.length > 0);
+
+    if (lines.length === 0) return text;
+
+    const processed = lines.map((line) => {
+      // Пытаемся найти шаблон обследования по строке
+      const template = findExamTemplate(line);
+      if (!template || template.parameters.length === 0) {
+        return line; // обследования без параметров (ЭКГ, УЗИ) оставляем как есть
+      }
+
+      // Извлекаем дату если есть
+      const dateMatch = line.match(/от\s+([\d_.]+\s*(?:г\.?|года?)?)/iu);
+      const date = dateMatch ? dateMatch[1] : undefined;
+
+      // Извлекаем значения параметров из текста
+      const values: Record<string, string> = {};
+      for (const param of template.parameters) {
+        // Ищем паттерн: "paramName - value" или "paramName value"
+        const escapedName = param.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // Ищем значение: число (возможно с запятой/точкой), может быть отрицательным
+        const valuePattern = new RegExp(
+          `${escapedName}\\s*[-–—:]\\s*([\\d.,]+)`,
+          'iu'
+        );
+        const match = line.match(valuePattern);
+        if (match) {
+          values[param.name] = match[1];
+        }
+      }
+
+      return formatExamLine(template, values, date);
+    });
+
+    // Нумеруем
+    return processed.map((line, i) => `${i + 1}. ${line}`).join('\n');
   }
 
   // Убирает слова-маркеры разделов с начала текста (например «Рекомендую», «Заключение.»)
