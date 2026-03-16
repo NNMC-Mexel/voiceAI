@@ -37,6 +37,7 @@ import { WaveformVisualizer } from './WaveformVisualizer';
 import { apiClient } from '../api/client';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { dietTemplates } from '../data/dietTemplates';
+import { examTemplates, formatExamTemplate } from '../data/examTemplates';
 
 interface EditingScreenProps {
   document: MedicalDocument;
@@ -159,6 +160,7 @@ export function EditingScreen({
   const [ttsEnabled, setTtsEnabled] = useState(false);
   const [isTtsSpeaking, setIsTtsSpeaking] = useState(false);
   const [isDietListOpen, setIsDietListOpen] = useState(false);
+  const [isExamListOpen, setIsExamListOpen] = useState(false);
   const [correctionPopup, setCorrectionPopup] = useState<{
     position: { x: number; y: number };
     selectedText: string;
@@ -1058,7 +1060,57 @@ export function EditingScreen({
                         </button>
                       </div>
                     )}
-                    {field === 'diagnosis' ? (
+                    {field === 'outpatientExams' ? (
+                      <div className="space-y-3">
+                        <textarea
+                          ref={bindTextareaRef('outpatientExams')}
+                          value={document.outpatientExams}
+                          onChange={(e) => handleFieldChange('outpatientExams', e.target.value)}
+                          onInput={handleTextareaInput}
+                          onMouseDown={handleTextareaMouseDown}
+                          onContextMenu={(e) => handleTextareaContextMenu(e, 'outpatientExams')}
+                          placeholder="Введите данные обследований..."
+                          className="textarea-field"
+                          rows={6}
+                        />
+                        <div>
+                          <button
+                            onClick={() => setIsExamListOpen((v) => !v)}
+                            className="flex items-center gap-2 text-sm font-medium text-medical-700 hover:text-medical-900 transition-colors"
+                          >
+                            <ChevronDown className={`w-4 h-4 transition-transform ${isExamListOpen ? 'rotate-180' : ''}`} />
+                            Добавить обследование из шаблона
+                          </button>
+                          {isExamListOpen && (
+                            <div className="mt-2 max-h-60 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 divide-y divide-slate-200">
+                              {examTemplates.map((exam) => (
+                                <button
+                                  key={exam.id}
+                                  onClick={() => {
+                                    const templateLine = formatExamTemplate(exam);
+                                    const current = document.outpatientExams.trim();
+                                    // Определяем следующий номер в списке
+                                    const existingLines = current ? current.split('\n').filter((l) => l.trim()) : [];
+                                    const nextNum = existingLines.length + 1;
+                                    const newLine = `${nextNum}. ${templateLine}`;
+                                    const newValue = current ? `${current}\n${newLine}` : newLine;
+                                    handleFieldChange('outpatientExams', newValue);
+                                  }}
+                                  className="w-full text-left px-3 py-2 hover:bg-medical-50 transition-colors"
+                                >
+                                  <span className="text-sm font-medium text-medical-800">{exam.name}</span>
+                                  {exam.parameters.length > 0 && (
+                                    <p className="text-xs text-text-muted mt-0.5">
+                                      {exam.parameters.map((p) => p.name).join(', ')}
+                                    </p>
+                                  )}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ) : field === 'diagnosis' ? (
                       <div className="space-y-3">
                         <div>
                           <label className="block text-sm font-medium text-text-secondary mb-1">Предварительный диагноз</label>
