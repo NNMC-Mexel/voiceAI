@@ -255,7 +255,7 @@ Return JSON patch only.`;
       },
       body: this.buildCompletionBody({
         prompt: `<|im_start|>system\n/no_think\n${systemPrompt}<|im_end|>\n<|im_start|>user\n${userPrompt}<|im_end|>\n<|im_start|>assistant\n`,
-        n_predict: Math.max(4096, this.config.maxTokens),
+        n_predict: Math.max(16384, this.config.maxTokens),
         temperature: 0,
         stop: ['<|im_end|>'],
         json_schema: this.getDocumentJsonSchema(),
@@ -269,7 +269,12 @@ Return JSON patch only.`;
 
     const data = (await response.json()) as LlamaCompletionResponse;
     const raw = this.stripThinkingBlocks(data.content);
-    console.log(`LLM structureText response: ${raw.length} chars, stopped: ${(data as any).stop_type ?? (data as any).stopped_eos ?? 'unknown'}`);
+    const stoppedEos = (data as any).stop_type === 'eos' || (data as any).stopped_eos === true;
+    const truncated = !stoppedEos && raw.length > 0;
+    console.log(`LLM structureText response: ${raw.length} chars, stopped_eos: ${stoppedEos}, truncated: ${truncated}`);
+    if (truncated) {
+      console.warn(`[LLM] WARNING: Response may be truncated (no EOS). Input was ${rawText.length} chars. Consider increasing n_predict.`);
+    }
     const document = await this.parseDocumentWithRepair(raw);
     const cleaned = this.validateAndCleanDocument(document);
     return this.enrichPatientFromRawText(cleaned, rawText);
@@ -587,8 +592,14 @@ Field assignment rules:
 8) "diagnosis" — preliminary diagnosis (предварительный диагноз) with ICD-10 code if mentioned. This is the initial diagnosis before investigations.
 8a) "finalDiagnosis" — final diagnosis (заключительный диагноз). If the doctor explicitly says "заключительный диагноз" or "окончательный диагноз", put it here. Otherwise leave empty.
 9) "conclusion" — outpatient therapy (амбулаторная терапия). Medications the patient CURRENTLY takes at home. Not what the doctor prescribes now — only what patient already takes.
+   FORMATTING: List medications as a numbered list (1. 2. 3. ...) each on a new line.
 10) "doctorNotes" — investigation plan (план обследования). Lab orders, imaging orders, specialist consultations the doctor orders NOW.
 11) "recommendations" — treatment plan (рекомендации / план лечения). Medications, dosages, regimens the doctor PRESCRIBES NOW. New prescriptions go here, not into "conclusion".
+   FORMATTING RULES for recommendations:
+   - When medications are listed, output as NUMBERED LIST (1. 2. 3. ...), each medication on a new line.
+   - Format: "1. Таб.название дозировка по X таб. X раз(а) в день внутрь в TIME, описание;"
+   - Include dosage, frequency, route of administration, time of day if mentioned.
+   - Preserve all details about side effects, risks of discontinuation, and monitoring instructions.
 12) "diet" — diet recommendations. If the doctor mentions a diet number (e.g. "диета 1а", "стол 5", "диета при диабете") or describes dietary restrictions, put it here. ONLY diet-related information.
 
 Distinguishing medications:
@@ -596,6 +607,10 @@ Distinguishing medications:
 - Medications doctor PRESCRIBES NOW → "recommendations" (план лечения)
 - Medications patient TOOK IN THE PAST (history) → "clinicalCourse" (анамнез жизни)
 Do NOT mix these. If the doctor says "амбулаторно принимает X" → conclusion. If the doctor says "назначаю Y" or "рекомендую Z" → recommendations.
+
+Section boundary rules:
+D) When the doctor finishes a section with a period (full stop / "точка") followed by silence or a new topic, that section is CLOSED. Subsequent text belongs to the NEXT appropriate section, NOT to the previous one. For example: "Жалобы на головокружение, нестабильность АД." — after this period, the next dictated text should NOT go into "complaints" but into the next relevant section.
+E) The unit "мм рт.ст." should ALWAYS be abbreviated as "мм рт.ст." — never write it out as "миллиметров ртутного столба" or other variations.
 
 General rules:
 13) Do NOT add any information not present in the dictation.
@@ -642,9 +657,9 @@ Return STRICT JSON (use empty strings if data is missing):
   "neurologicalStatus": "Неврологический статус",
   "diagnosis": "Предварительный диагноз (с кодом МКБ-10 если озвучен)",
   "finalDiagnosis": "Заключительный диагноз (если озвучен отдельно, иначе пусто)",
-  "conclusion": "Амбулаторная терапия (ТОЛЬКО препараты которые пациент СЕЙЧАС принимает амбулаторно)",
+  "conclusion": "Амбулаторная терапия (ТОЛЬКО препараты которые пациент СЕЙЧАС принимает амбулаторно — НУМЕРОВАННЫЙ СПИСОК)",
   "doctorNotes": "План обследования (направления на анализы, ЭКГ, ЭхоКГ, консультации специалистов)",
-  "recommendations": "Рекомендации / План лечения (НОВЫЕ назначения врача: препараты, дозировки, режим приёма)",
+  "recommendations": "Рекомендации / План лечения (НОВЫЕ назначения: НУМЕРОВАННЫЙ СПИСОК. 1. Таб.название дозировка по ... в день; 2. ...)",
   "diet": "Диета (номер диеты или описание диетических рекомендаций, если озвучены)"
 }
 
@@ -677,7 +692,7 @@ JSON:`;
   private validateAndCleanDocument(doc: MedicalDocument): MedicalDocument {
     const rawAge = doc.patient?.age || '';
     const rawGender = doc.patient?.gender || '';
-    return {
+    const result: MedicalDocument = {
       patient: {
         fullName: doc.patient?.fullName || '',
         age: this.normalizeAge(rawAge),
@@ -699,6 +714,14 @@ JSON:`;
       recommendations: this.stripSectionPrefix('recommendations', doc.recommendations || ''),
       diet: this.stripSectionPrefix('diet', doc.diet || ''),
     };
+
+    // Пост-обработка: перемещение контента с секционными маркерами в правильные поля
+    this.redistributeMisplacedSections(result);
+
+    // Пост-обработка: дедупликация диеты из recommendations/conclusion
+    this.deduplicateDiet(result);
+
+    return result;
   }
 
   /**
@@ -750,6 +773,92 @@ JSON:`;
 
     // Нумеруем
     return processed.map((line, i) => `${i + 1}. ${line}`).join('\n');
+  }
+
+  /**
+   * Ищет в текстовых полях секционные маркеры, попавшие не в то поле.
+   * Например, если в complaints есть "Анамнез жизни: ...", перемещает этот фрагмент в clinicalCourse.
+   * Мутирует объект doc напрямую.
+   */
+  private redistributeMisplacedSections(doc: MedicalDocument): void {
+    // Маркеры секций: regex → целевое поле
+    const sectionMarkers: Array<{ pattern: RegExp; target: RewriteableField }> = [
+      { pattern: /анамнез\s+жизни\s*[:.,-]?\s*/iu, target: 'clinicalCourse' },
+      { pattern: /перенесённ\S*\s+заболевани\S*\s*[:.,-]?\s*/iu, target: 'clinicalCourse' },
+      { pattern: /анамнез\s+заболевания\s*[:.,-]?\s*/iu, target: 'anamnesis' },
+      { pattern: /аллерг\S*\s+анамнез\S*\s*[:.,-]?\s*/iu, target: 'allergyHistory' },
+      { pattern: /объектив\S*\s+статус\S*\s*[:.,-]?\s*/iu, target: 'objectiveStatus' },
+      { pattern: /амбулаторн\S*\s+терапи\S*\s*[:.,-]?\s*/iu, target: 'conclusion' },
+      { pattern: /амбулаторно\s+принимает\s*[:.,-]?\s*/iu, target: 'conclusion' },
+      { pattern: /(?:рекомендаци\S*|план\s+лечени\S*)\s*[:.,-]?\s*/iu, target: 'recommendations' },
+      { pattern: /диет\S*\s*(?:№?\s*\d+\S*)?\s*[:.,-]?\s*/iu, target: 'diet' },
+      { pattern: /(?:предварительн\S*\s+)?диагноз\S*\s*[:.,-]?\s*/iu, target: 'diagnosis' },
+      { pattern: /план\s+обследовани\S*\s*[:.,-]?\s*/iu, target: 'doctorNotes' },
+    ];
+
+    for (const field of ALL_TEXT_FIELDS) {
+      const text = doc[field];
+      if (!text) continue;
+
+      // Разбиваем текст по строкам/абзацам и ищем маркеры
+      // Ищем маркер ВНУТРИ текста (не в начале — начало уже обработано stripSectionPrefix)
+      for (const { pattern, target } of sectionMarkers) {
+        if (target === field) continue; // маркер в правильном поле — пропускаем
+
+        // Ищем маркер в середине или конце текста
+        const markerIdx = text.search(new RegExp(`(?:^|\\n)\\s*${pattern.source}`, 'iu'));
+        if (markerIdx < 0) continue;
+
+        // Вырезаем всё от маркера до конца (или до следующего маркера)
+        const beforeMarker = text.substring(0, markerIdx).trim();
+        const fromMarker = text.substring(markerIdx).trim();
+
+        // Убираем сам маркер из перемещаемого текста
+        const cleanedFragment = fromMarker.replace(pattern, '').trim();
+        if (!cleanedFragment) continue;
+
+        // Обновляем поля
+        doc[field] = beforeMarker;
+        const existing = doc[target].trim();
+        doc[target] = existing
+          ? `${existing}\n\n${cleanedFragment}`.trim()
+          : cleanedFragment;
+
+        console.log(`[postprocess] Moved "${cleanedFragment.substring(0, 50)}..." from ${field} → ${target}`);
+        break; // один маркер за раз на поле
+      }
+    }
+  }
+
+  /**
+   * Убирает дублирование диеты: если diet не пустое и та же информация есть
+   * в recommendations или conclusion — убирает её оттуда.
+   */
+  private deduplicateDiet(doc: MedicalDocument): void {
+    const diet = doc.diet.trim();
+    if (!diet) return;
+
+    // Паттерны для обнаружения диетной информации в других полях
+    const dietPatterns = [
+      /диет\S*\s*(?:№?\s*\d+\S*)?[^.]*\.?\s*/giu,
+      /стол\s*(?:№?\s*)?\d+\S*[^.]*\.?\s*/giu,
+    ];
+
+    for (const field of ['recommendations', 'conclusion'] as RewriteableField[]) {
+      let text = doc[field];
+      if (!text) continue;
+
+      for (const pattern of dietPatterns) {
+        const before = text;
+        text = text.replace(pattern, '').trim();
+        if (text !== before) {
+          console.log(`[postprocess] Removed duplicate diet info from ${field}`);
+        }
+      }
+
+      // Убираем пустые строки оставшиеся после удаления
+      doc[field] = text.replace(/\n{3,}/g, '\n\n').trim();
+    }
   }
 
   // Убирает слова-маркеры разделов с начала текста (например «Рекомендую», «Заключение.»)
