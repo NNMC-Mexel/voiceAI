@@ -39,9 +39,10 @@ export function useVoiceRecorder() {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
-          sampleRate: 16000,
+          sampleRate: 48000,
           echoCancellation: true,
           noiseSuppression: true,
+          autoGainControl: true,
         },
       });
 
@@ -49,7 +50,11 @@ export function useVoiceRecorder() {
       chunksRef.current = [];
 
       const mimeType = pickSupportedMimeType();
-      const mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      const recorderOptions: MediaRecorderOptions = {};
+      if (mimeType) recorderOptions.mimeType = mimeType;
+      // Повышаем битрейт для лучшего качества распознавания речи
+      recorderOptions.audioBitsPerSecond = 128000;
+      const mediaRecorder = new MediaRecorder(stream, recorderOptions);
 
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {

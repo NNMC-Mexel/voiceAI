@@ -370,8 +370,15 @@ const DRUG_NAME_CORRECTIONS: ReplacementRule[] = [
 // ─── 4. Единицы измерения ────────────────────────────────────────────────────
 
 const UNITS_CORRECTIONS: ReplacementRule[] = [
-  regexRule(/мм\s*рт\.?\s*ст/giu, 'мм рт.ст.'),
+  // мм рт.ст. — все возможные вариации Whisper
+  regexRule(/мм\s*рт\.?\s*ст\.?/giu, 'мм рт.ст.'),
   regexRule(/миллиметров?\s+ртутного\s+столба/giu, 'мм рт.ст.'),
+  regexRule(/мм\s*ртутного\s*столба/giu, 'мм рт.ст.'),
+  regexRule(/(?<![а-яёa-z])мм\s*р\s*т\s*с\s*т(?![а-яёa-z])/giu, 'мм рт.ст.'),
+  regexRule(/мм\.\s*рт\.\s*ст\.\s*\./giu, 'мм рт.ст.'),
+  regexRule(/(?<![а-яёa-z])ммртст(?![а-яёa-z])/giu, 'мм рт.ст.'),
+  regexRule(/мм\s+рт\s+ст/giu, 'мм рт.ст.'),
+  regexRule(/миллиметры?\s+ртутного/giu, 'мм рт.ст.'),
   regexRule(/уд(?:аров)?\s*(?:в|\/)\s*мин(?:уту)?/giu, 'уд/мин'),
   regexRule(/(?<![а-яёa-z])мкг(?![а-яёa-z])/giu, 'мкг'),
   regexRule(/микрограмм/giu, 'мкг'),
