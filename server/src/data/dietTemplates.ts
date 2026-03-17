@@ -97,7 +97,8 @@ export const dietTemplates: DietTemplate[] = [
  * Возвращает шаблон если найден, undefined если нет.
  */
 export function findDietTemplate(text: string): DietTemplate | undefined {
-  const trimmed = text.trim().toLowerCase();
+  // Убираем пробелы и завершающую пунктуацию (точка, запятая и т.д.)
+  const trimmed = text.trim().replace(/[.,;:!?\s]+$/g, '').toLowerCase();
 
   // Прямой поиск по id/shortName
   for (const t of dietTemplates) {
