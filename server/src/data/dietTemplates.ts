@@ -117,5 +117,16 @@ export function findDietTemplate(text: string): DietTemplate | undefined {
     }
   }
 
+  // Фолбэк: голый номер с/без "№" — "№11", "№ 11", "номер 11", "11"
+  const bareMatch = trimmed.match(/^(?:№\s*|номер\s*)?(\d+\s*[абвг]?)$/iu);
+  if (bareMatch) {
+    const num = bareMatch[1].replace(/\s+/g, '').toLowerCase();
+    for (const t of dietTemplates) {
+      if (t.id === num || t.shortName.toLowerCase() === num) {
+        return t;
+      }
+    }
+  }
+
   return undefined;
 }
