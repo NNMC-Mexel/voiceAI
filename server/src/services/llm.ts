@@ -285,7 +285,16 @@ Return JSON patch only.`;
     }
     const document = await this.parseDocumentWithRepair(raw);
     const cleaned = this.validateAndCleanDocument(document);
-    return this.enrichPatientFromRawText(cleaned, rawText);
+    const enriched = this.enrichPatientFromRawText(cleaned, rawText);
+
+    // Пре-экстракция: спасаем данные обследований из исходного текста,
+    // которые LLM мог потерять
+    this.rescueExamsFromRawText(enriched, rawText);
+
+    // Спасаем диагноз если LLM его обрезал
+    this.rescueDiagnosisFromRawText(enriched, rawText);
+
+    return enriched;
   }
 
   async generateRecommendations(document: MedicalDocument): Promise<string> {
@@ -962,6 +971,88 @@ JSON:`;
       const combined = existing ? `${existing}\n${newExams}` : newExams;
       // Перезапускаем постобработку чтобы перенумеровать
       doc.outpatientExams = this.postProcessOutpatientExams(combined);
+    }
+  }
+
+  /**
+   * Спасает данные обследований из исходного текста (raw), которые LLM мог потерять.
+   * Сравнивает найденные в raw-тексте обследования с тем, что LLM вернул в outpatientExams.
+   * Если обследование есть в raw но отсутствует в результате — добавляет его.
+   */
+  private rescueExamsFromRawText(doc: MedicalDocument, rawText: string): void {
+    // Паттерны для извлечения полных блоков обследований из сырого текста
+    const examBlockPatterns: Array<{ label: string; pattern: RegExp }> = [
+      { label: 'ОАК', pattern: /(?:ОАК|общий анализ крови)[^.]*?(?:\.|$)/gimu },
+      { label: 'Б/х', pattern: /(?:Б\/х|биохими\S+\s+анализ\s+крови|биохимия)[^.]*?(?:\.|$)/gimu },
+      { label: 'ОАМ', pattern: /(?:ОАМ|общий анализ мочи|анализ мочи)[^.]*?(?:\.|$)/gimu },
+      { label: 'коагулограмма', pattern: /(?:коагулограмма|гемостазиограмма)[^.]*?(?:\.|$)/gimu },
+      { label: 'гликированный', pattern: /(?:гликированный гемоглобин|гликозилированный гемоглобин|HbA1c)[^.]*?(?:\.|$)/gimu },
+      { label: '25-ОН', pattern: /(?:25-?ОН|витамин\s*[ДD]|вит\.?\s*[ДD])\s+[^.]*?(?:\.|$)/gimu },
+      { label: 'ЭКГ', pattern: /(?:ЭКГ|электрокардиограмма)\s+(?:от\s+)?[^.]*?(?:\.|$)/gimu },
+      { label: 'ЭхоКГ', pattern: /(?:ЭхоКГ|ЭХОКГ|эхокардиография)\s+(?:от\s+)?[^.]*?(?:\.|$)/gimu },
+      { label: 'ХМЭКГ', pattern: /(?:ХМЭКГ|холтер\S*\s+мониторирование|холтер)\s+(?:от\s+)?[^.]*?(?:\.|$)/gimu },
+      { label: 'СМАД', pattern: /(?:СМАД)\s+(?:от\s+)?[^.]*?(?:\.|$)/gimu },
+      { label: 'УЗДГ', pattern: /(?:УЗДГ|УЗДС)\s+[^.]*?(?:\.|$)/gimu },
+      { label: 'УЗИ', pattern: /(?:УЗИ)\s+[^.]*?(?:\.|$)/gimu },
+      { label: 'рентген', pattern: /(?:рентген\S*)\s+[^.]*?(?:\.|$)/gimu },
+      { label: 'МРТ', pattern: /(?:МРТ|КТ|МСКТ)\s+[^.]*?(?:\.|$)/gimu },
+      { label: 'ФГДС', pattern: /(?:ФГДС|гастроскопия)\s+(?:от\s+)?[^.]*?(?:\.|$)/gimu },
+      { label: 'тропонин', pattern: /(?:тропонин\S*)\s+[^.]*?(?:\.|$)/gimu },
+      { label: 'D-димер', pattern: /(?:D-димер|д-димер)\s+[^.]*?(?:\.|$)/gimu },
+      { label: 'BNP', pattern: /(?:BNP|NT-proBNP|про-БНП)\s+[^.]*?(?:\.|$)/gimu },
+      { label: 'ферритин', pattern: /(?:ферритин)\s+[^.]*?(?:\.|$)/gimu },
+      { label: 'ПСА', pattern: /(?:ПСА|PSA)\s+[^.]*?(?:\.|$)/gimu },
+    ];
+
+    const currentExams = doc.outpatientExams.toLowerCase();
+    const rescued: string[] = [];
+
+    for (const { label, pattern } of examBlockPatterns) {
+      // Проверяем: есть ли этот тип обследования уже в результате?
+      if (currentExams.includes(label.toLowerCase())) continue;
+
+      // Ищем в сыром тексте
+      pattern.lastIndex = 0;
+      const matches = rawText.match(pattern);
+      if (!matches) continue;
+
+      for (const match of matches) {
+        const cleaned = match.trim();
+        // Минимальная валидация: должно содержать дату или числовое значение
+        if (cleaned.length > 10 && (/\d/.test(cleaned))) {
+          rescued.push(cleaned);
+          console.log(`[postprocess] Rescued from raw text: "${cleaned.substring(0, 60)}..." (${label})`);
+        }
+      }
+    }
+
+    if (rescued.length > 0) {
+      const existing = doc.outpatientExams.trim();
+      const newExams = rescued.join('\n');
+      const combined = existing ? `${existing}\n${newExams}` : newExams;
+      doc.outpatientExams = this.postProcessOutpatientExams(combined);
+      console.log(`[postprocess] rescueExamsFromRawText: added ${rescued.length} exam(s) from raw text`);
+    }
+  }
+
+  /**
+   * Спасает диагноз из сырого текста, если LLM его обрезал.
+   * Ищет блок "диагноз:" в raw-тексте и сравнивает длину с тем что вернул LLM.
+   */
+  private rescueDiagnosisFromRawText(doc: MedicalDocument, rawText: string): void {
+    // Ищем блок диагноза в исходном тексте
+    const diagMatch = rawText.match(
+      /(?:предварительный\s+)?диагноз\s*[:.]?\s*([\s\S]*?)(?=\n\s*(?:план\s+(?:обследовани|лечени)|рекомендо|назначени|диета|питани|объективн|анамнез|жалоб|аллерг)|$)/iu
+    );
+    if (!diagMatch) return;
+
+    const rawDiag = diagMatch[1].trim().replace(/\n{2,}/g, ' ').replace(/\s{2,}/g, ' ');
+    const currentDiag = doc.diagnosis.trim();
+
+    // Если диагноз из raw значительно длиннее (LLM обрезал) — заменяем
+    if (rawDiag.length > 20 && rawDiag.length > currentDiag.length * 1.5) {
+      console.log(`[postprocess] Diagnosis rescued from raw text: LLM had ${currentDiag.length} chars, raw has ${rawDiag.length} chars`);
+      doc.diagnosis = rawDiag;
     }
   }
 
