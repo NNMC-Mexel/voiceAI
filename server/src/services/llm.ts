@@ -582,17 +582,17 @@ C) EACH PIECE OF INFORMATION GOES TO EXACTLY ONE FIELD. Never put the same fact 
 Field assignment rules:
 1) "complaints" — patient complaints (жалобы). Only what the patient complains about.
 2) "anamnesis" — disease history (анамнез заболевания). Timeline and course of current illness.
-3) "outpatientExams" — outpatient exam results (ОАК, Б/х, ОАМ, ЭКГ, ЭхоКГ, ХМЭКГ, ЧПЭхоКГ, проверка ЭКС, рентген, УЗИ, СМАД, УЗДГ БЦА). Only test results with dates.
+3) "outpatientExams" — ALL outpatient exam results and lab tests. This includes standard exams (ОАК, Б/х, ОАМ, ЭКГ, ЭхоКГ, ХМЭКГ, ЧПЭхоКГ, проверка ЭКС, рентген, УЗИ, СМАД, УЗДГ БЦА) AND any non-standard or specialized tests (тропонин, D-димер, BNP, NT-proBNP, липидный профиль, гликированный гемоглобин, гормоны щитовидной железы, ферритин, ПСА, иммунограмма, посевы, etc.). ANY test result with a date and/or numeric values belongs here.
    FORMATTING RULES for outpatientExams:
    - Output as NUMBERED LIST (1. 2. 3. ...), each exam on a new line.
    - For lab tests with parameters, use format: "ExamName от DATE: param1 - value unit, param2 - value unit."
-   - ALWAYS include measurement units even if the doctor did not say them:
-     ОАК: Hb - г/л, Эр - *10¹²/л, Л - *10⁹/л, Тр - *10⁹/л, СОЭ - мм/ч.
-     Б/х: общий белок - г/л, креатинин - мкмоль/л, СКФ - (по формуле CKD-EPI) мл/мин/1,73 м², глюкоза - ммоль/л, АЛТ - МЕ/л, АСТ - МЕ/л, общий билирубин - мкмоль/л, прямой билирубин - мкмоль/л, ХС - общий ммоль/л, ХС - ЛПВП ммоль/л, ХС ЛПНП - ммоль/л, ТГ - ммоль/л, мочевая кислота - мкмоль/л, калий - ммоль/л, натрий - ммоль/л, железо - мкмоль/л, ферритин - нг/мл, КНТЖ - %.
-     ОАМ: отн. плотность - , белок - г/л, Л - в п/з, Эр - в п/з.
+   - Include ONLY the parameters the doctor actually dictated. Do NOT add parameters that were not mentioned.
+   - Add measurement units for the dictated parameters:
+     ОАК units: Hb - г/л, Эр - *10¹²/л, Л - *10⁹/л, Тр - *10⁹/л, СОЭ - мм/ч.
+     Б/х units: общий белок - г/л, креатинин - мкмоль/л, СКФ - мл/мин/1,73 м², глюкоза - ммоль/л, АЛТ - МЕ/л, АСТ - МЕ/л, билирубин - мкмоль/л, ХС - ммоль/л, ЛПВП - ммоль/л, ЛПНП - ммоль/л, ТГ - ммоль/л, мочевая кислота - мкмоль/л, калий - ммоль/л, натрий - ммоль/л, железо - мкмоль/л, ферритин - нг/мл, КНТЖ - %.
+     ОАМ units: отн. плотность, белок - г/л, Л - в п/з, Эр - в п/з.
    - For exams WITHOUT parameters (ЭКГ, ЭХОКГ, рентген, УЗИ, Холтер, СМАД, УЗДГ БЦА): "ExamName от DATE: description"
-   - If doctor gives values, fill them in next to units. If no value given, leave blank before unit.
-   - If doctor says "ОАК" or "общий анализ крови", output the FULL template with ALL parameters and units.
+   - If doctor says only partial data (e.g. "ОАК Hb 149, эритроциты 5.4"), output ONLY those parameters with units — do NOT fill in a full template with empty values.
 4) "clinicalCourse" — past medical history / life history (анамнез жизни / перенесённые заболевания). Surgeries, TB, hepatitis, injuries, family history, habits, comorbidities. Medications the patient PREVIOUSLY took or USED TO take go here.
 5) "allergyHistory" — allergy history. Drug/food allergies or "отрицает".
 6) "objectiveStatus" — physical examination findings (осмотр, аускультация, пульс, АД, температура, ИМТ, SpO2).
@@ -881,21 +881,48 @@ JSON:`;
    * и перемещает их в outpatientExams.
    */
   private rescueExamData(doc: MedicalDocument): void {
-    // Паттерны для обнаружения данных обследований
+    // Паттерны для обнаружения данных обследований.
+    // Включает стандартные и расширенные анализы.
     const examPatterns = [
-      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ОАК|общий анализ крови)\s+от\s+[^]*?(?=\n\s*(?:\d+\.|$))/gimu,
-      /(?:^|\n)\s*(?:\d+\.\s*)?(?:Б\/х|биохимия|биохимический анализ)\s+[^]*?(?=\n\s*(?:\d+\.|$))/gimu,
-      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ОАМ|общий анализ мочи)\s+[^]*?(?=\n\s*(?:\d+\.|$))/gimu,
-      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ЭКГ|электрокардиограмма)\s+от\s+[^\n]*/gimu,
-      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ЭхоКГ|ЭХОКГ|эхокардиография)\s+от\s+[^\n]*/gimu,
-      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ХМЭКГ|холтер\S*)\s+от\s+[^\n]*/gimu,
-      /(?:^|\n)\s*(?:\d+\.\s*)?(?:СМАД)\s+от\s+[^\n]*/gimu,
-      /(?:^|\n)\s*(?:\d+\.\s*)?(?:УЗДГ|УЗДС)\s+[^\n]*/gimu,
+      // ── Стандартные лабораторные ──
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ОАК|общий анализ крови)\s+(?:от\s+)?[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:Б\/х|биохимия|биохимический анализ)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ОАМ|общий анализ мочи|анализ мочи)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:коагулограмма|гемостазиограмма)\s+[^\n]*/gimu,
+
+      // ── Инструментальные ──
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ЭКГ|электрокардиограмма)\s+(?:от\s+)?[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ЭхоКГ|ЭХОКГ|эхокардиография)\s+(?:от\s+)?[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ХМЭКГ|холтер\S*)\s+(?:от\s+)?[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ЧПЭхоКГ)\s+(?:от\s+)?[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:СМАД)\s+(?:от\s+)?[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:УЗДГ|УЗДС|дуплекс)\s+[^\n]*/gimu,
       /(?:^|\n)\s*(?:\d+\.\s*)?(?:УЗИ)\s+[^\n]*/gimu,
       /(?:^|\n)\s*(?:\d+\.\s*)?(?:рентген\S*)\s+[^\n]*/gimu,
       /(?:^|\n)\s*(?:\d+\.\s*)?(?:МРТ|КТ|МСКТ)\s+[^\n]*/gimu,
-      /(?:^|\n)\s*(?:\d+\.\s*)?(?:коагулограмма)\s+[^\n]*/gimu,
-      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ЧПЭхоКГ)\s+от\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ФГДС|гастроскопия|фиброгастроскопия)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ЭЭГ|электроэнцефалограмма)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:проверка ЭКС)\s+[^\n]*/gimu,
+
+      // ── Расширенные лабораторные ──
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:тропонин\S*)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:D-димер|д-димер|Д-димер)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:BNP|NT-proBNP|про-БНП)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:гормон\S*\s+щитовидной|тиреоидн\S*\s+профиль)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:липидн\S*\s+(?:профиль|спектр)|липидограмма)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:гликированный гемоглобин|HbA1c|гликогемоглобин)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:СРБ|С-реактивный белок)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:МНО|АЧТВ|ПТИ|протромбин\S*)\s+(?:от\s+|[-–—]\s*\d)[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:КФК|КФК-МБ|ЛДГ|миоглобин)\s+(?:от\s+|[-–—]\s*\d)[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ферритин|железо\s+сыворот\S*|КНТЖ|трансферрин)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:мочевая кислота|мочевина)\s+(?:от\s+|[-–—]\s*\d)[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:иммунограмма|иммунологическ\S*)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:посев\S*|бак\.\s*посев|бакпосев)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ПСА|PSA)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:анализ\s+крови\s+на\s+\S+)\s+[^\n]*/gimu,
+
+      // ── Универсальный: "НазваниеАнализа от ДД.ММ.ГГГГ: параметр - значение ед.изм."
+      /(?:^|\n)\s*(?:\d+\.\s*)?\S+\s+от\s+\d{1,2}[.,]\d{2}[.,]\d{2,4}\S*\s*:?\s*\S+\s*[-–—]\s*[\d.,]+\s*(?:г\/л|ммоль\/л|мкмоль\/л|мл\/мин|мм\/ч|МЕ\/л|мкг|мг|%|нг\/мл|пмоль\/л|мкМЕ\/мл)[^\n]*/gimu,
     ];
 
     // Поля из которых спасаем (не ищем в outpatientExams и doctorNotes)
