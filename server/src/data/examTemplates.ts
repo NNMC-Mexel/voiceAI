@@ -150,11 +150,20 @@ export function formatExamLine(
     return `${template.name}${datePart}:${desc ? ' ' + desc : ''}`;
   }
 
-  const params = template.parameters.map((p) => {
-    const val = values?.[p.name] || '';
-    const unitStr = p.unit ? ` ${p.unit}` : '';
-    return `${p.name} - ${val}${unitStr}`;
-  });
+  // Если есть значения — выводим только параметры с данными + единицы измерения
+  const hasAnyValue = values && Object.keys(values).length > 0;
+
+  const params = hasAnyValue
+    ? template.parameters
+        .filter((p) => values[p.name]) // только параметры с значениями
+        .map((p) => {
+          const unitStr = p.unit ? ` ${p.unit}` : '';
+          return `${p.name} - ${values[p.name]}${unitStr}`;
+        })
+    : template.parameters.map((p) => {
+        const unitStr = p.unit ? ` ${p.unit}` : '';
+        return `${p.name} - ${unitStr}`;
+      });
 
   return `${template.name}${datePart}: ${params.join(', ')}.`;
 }
