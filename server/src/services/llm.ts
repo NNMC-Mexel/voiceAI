@@ -814,42 +814,53 @@ JSON:`;
       { pattern: /объектив\S*\s+статус\S*\s*[:.,-]?\s*/iu, target: 'objectiveStatus' },
       { pattern: /амбулаторн\S*\s+терапи\S*\s*[:.,-]?\s*/iu, target: 'conclusion' },
       { pattern: /амбулаторно\s+принимает\s*[:.,-]?\s*/iu, target: 'conclusion' },
-      { pattern: /(?:рекомендаци\S*|план\s+лечени\S*)\s*[:.,-]?\s*/iu, target: 'recommendations' },
+      { pattern: /(?:рекомендаци\S*|рекомендовано|план\s+лечени\S*)\s*[:.,-]?\s*/iu, target: 'recommendations' },
       { pattern: /диет\S*\s*(?:№?\s*\d+\S*)?\s*[:.,-]?\s*/iu, target: 'diet' },
       { pattern: /(?:предварительн\S*\s+)?диагноз\S*\s*[:.,-]?\s*/iu, target: 'diagnosis' },
       { pattern: /план\s+обследовани\S*\s*[:.,-]?\s*/iu, target: 'doctorNotes' },
     ];
 
-    for (const field of ALL_TEXT_FIELDS) {
-      const text = doc[field];
-      if (!text) continue;
+    // Многократно перебираем поля пока есть перемещения (маркеров может быть несколько)
+    let moved = true;
+    let iterations = 0;
+    while (moved && iterations < 10) {
+      moved = false;
+      iterations++;
 
-      // Разбиваем текст по строкам/абзацам и ищем маркеры
-      // Ищем маркер ВНУТРИ текста (не в начале — начало уже обработано stripSectionPrefix)
-      for (const { pattern, target } of sectionMarkers) {
-        if (target === field) continue; // маркер в правильном поле — пропускаем
+      for (const field of ALL_TEXT_FIELDS) {
+        const text = doc[field];
+        if (!text) continue;
 
-        // Ищем маркер в середине или конце текста
-        const markerIdx = text.search(new RegExp(`(?:^|\\n)\\s*${pattern.source}`, 'iu'));
-        if (markerIdx < 0) continue;
+        for (const { pattern, target } of sectionMarkers) {
+          if (target === field) continue;
 
-        // Вырезаем всё от маркера до конца (или до следующего маркера)
-        const beforeMarker = text.substring(0, markerIdx).trim();
-        const fromMarker = text.substring(markerIdx).trim();
+          // Ищем маркер: в начале строки ИЛИ после точки/двоеточия внутри текста
+          const searchPattern = new RegExp(`(?:^|\\n|[.!?]\\s+)\\s*(${pattern.source})`, 'iu');
+          const searchMatch = text.match(searchPattern);
+          if (!searchMatch) continue;
 
-        // Убираем сам маркер из перемещаемого текста
-        const cleanedFragment = fromMarker.replace(pattern, '').trim();
-        if (!cleanedFragment) continue;
+          const markerIdx = text.indexOf(searchMatch[0]);
+          if (markerIdx < 0) continue;
 
-        // Обновляем поля
-        doc[field] = beforeMarker;
-        const existing = doc[target].trim();
-        doc[target] = existing
-          ? `${existing}\n\n${cleanedFragment}`.trim()
-          : cleanedFragment;
+          // Определяем где кончается "до маркера" (без точки/перевода строки)
+          const rawBefore = text.substring(0, markerIdx);
+          const beforeMarker = rawBefore.trim();
+          const fromMarker = text.substring(markerIdx).replace(/^[.!?\s]+/, '').trim();
 
-        console.log(`[postprocess] Moved "${cleanedFragment.substring(0, 50)}..." from ${field} → ${target}`);
-        break; // один маркер за раз на поле
+          // Убираем сам маркер из перемещаемого текста
+          const cleanedFragment = fromMarker.replace(pattern, '').trim();
+          if (!cleanedFragment) continue;
+
+          doc[field] = beforeMarker;
+          const existing = doc[target].trim();
+          doc[target] = existing
+            ? `${existing}\n\n${cleanedFragment}`.trim()
+            : cleanedFragment;
+
+          console.log(`[postprocess] Moved "${cleanedFragment.substring(0, 50)}..." from ${field} → ${target}`);
+          moved = true;
+          break; // перезапускаем цикл чтобы работать с обновлённым текстом
+        }
       }
     }
   }
