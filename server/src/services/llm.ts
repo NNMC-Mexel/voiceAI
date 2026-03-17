@@ -1,5 +1,5 @@
 ﻿import type { MedicalDocument, RiskAssessment, StructureResult, LLMConfig } from '../types.js';
-import { findExamTemplate, formatExamLine } from '../data/examTemplates.js';
+import { findExamTemplate, formatExamLine, parseExamValuesFromText, parseExamDate, examTemplates } from '../data/examTemplates.js';
 import { findDietTemplate } from '../data/dietTemplates.js';
 
 const DEFAULT_RISK_ASSESSMENT: RiskAssessment = {
@@ -772,16 +772,16 @@ JSON:`;
         return line; // обследования без параметров (ЭКГ, УЗИ) оставляем как есть
       }
 
-      // Извлекаем дату если есть
-      const dateMatch = line.match(/от\s+([\d_.]+\s*(?:г\.?|года?)?)/iu);
-      const date = dateMatch ? dateMatch[1] : undefined;
+      // Извлекаем дату если есть (оба формата: цифры и текстовый месяц)
+      const date = parseExamDate(line)
+        || line.match(/от\s+([\d_.]+\s*(?:г\.?|года?)?)/iu)?.[1]
+        || undefined;
 
       // Извлекаем значения параметров из текста
       const values: Record<string, string> = {};
       for (const param of template.parameters) {
         // Ищем паттерн: "paramName - value" или "paramName value"
         const escapedName = param.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        // Ищем значение: число (возможно с запятой/точкой), может быть отрицательным
         const valuePattern = new RegExp(
           `${escapedName}\\s*[-–—:]\\s*([\\d.,]+)`,
           'iu'
@@ -792,11 +792,22 @@ JSON:`;
         }
       }
 
+      // Если по сокращённым именам ничего не нашли — пробуем голосовые алиасы
+      if (Object.keys(values).length === 0) {
+        const voiceValues = parseExamValuesFromText(template.id, line);
+        Object.assign(values, voiceValues);
+      }
+
       return formatExamLine(template, values, date);
     });
 
+    // Чистим артефакты форматирования (двойные/тройные двоеточия, точка-двоеточие)
+    const cleaned = processed.map(line =>
+      line.replace(/[:]{2,}/g, ':').replace(/\.\s*:/g, ':')
+    );
+
     // Нумеруем
-    return processed.map((line, i) => `${i + 1}. ${line}`).join('\n');
+    return cleaned.map((line, i) => `${i + 1}. ${line}`).join('\n');
   }
 
   /**
@@ -991,34 +1002,38 @@ JSON:`;
    * Если обследование есть в raw но отсутствует в результате — добавляет его.
    */
   private rescueExamsFromRawText(doc: MedicalDocument, rawText: string): void {
-    // Паттерны для извлечения полных блоков обследований из сырого текста
-    const examBlockPatterns: Array<{ label: string; pattern: RegExp }> = [
-      { label: 'ОАК', pattern: /(?:ОАК|общий анализ крови)[^.]*?(?:\.|$)/gimu },
-      { label: 'Б/х', pattern: /(?:Б\/х|биохими\S+\s+анализ\s+крови|биохимия)[^.]*?(?:\.|$)/gimu },
-      { label: 'ОАМ', pattern: /(?:ОАМ|общий анализ мочи|анализ мочи)[^.]*?(?:\.|$)/gimu },
-      { label: 'коагулограмма', pattern: /(?:коагулограмма|гемостазиограмма)[^.]*?(?:\.|$)/gimu },
-      { label: 'гликированный', pattern: /(?:гликированный гемоглобин|гликозилированный гемоглобин|HbA1c)[^.]*?(?:\.|$)/gimu },
-      { label: '25-ОН', pattern: /(?:25-?ОН|витамин\s*[ДD]|вит\.?\s*[ДD])\s+[^.]*?(?:\.|$)/gimu },
-      { label: 'ЭКГ', pattern: /(?:ЭКГ|электрокардиограмма)\s+(?:от\s+)?[^.]*?(?:\.|$)/gimu },
-      { label: 'ЭхоКГ', pattern: /(?:ЭхоКГ|ЭХОКГ|эхокардиография)\s+(?:от\s+)?[^.]*?(?:\.|$)/gimu },
-      { label: 'ХМЭКГ', pattern: /(?:ХМЭКГ|холтер\S*\s+мониторирование|холтер)\s+(?:от\s+)?[^.]*?(?:\.|$)/gimu },
-      { label: 'СМАД', pattern: /(?:СМАД)\s+(?:от\s+)?[^.]*?(?:\.|$)/gimu },
-      { label: 'УЗДГ', pattern: /(?:УЗДГ|УЗДС)\s+[^.]*?(?:\.|$)/gimu },
-      { label: 'УЗИ', pattern: /(?:УЗИ)\s+[^.]*?(?:\.|$)/gimu },
-      { label: 'рентген', pattern: /(?:рентген\S*)\s+[^.]*?(?:\.|$)/gimu },
-      { label: 'МРТ', pattern: /(?:МРТ|КТ|МСКТ)\s+[^.]*?(?:\.|$)/gimu },
-      { label: 'ФГДС', pattern: /(?:ФГДС|гастроскопия)\s+(?:от\s+)?[^.]*?(?:\.|$)/gimu },
-      { label: 'тропонин', pattern: /(?:тропонин\S*)\s+[^.]*?(?:\.|$)/gimu },
-      { label: 'D-димер', pattern: /(?:D-димер|д-димер)\s+[^.]*?(?:\.|$)/gimu },
-      { label: 'BNP', pattern: /(?:BNP|NT-proBNP|про-БНП)\s+[^.]*?(?:\.|$)/gimu },
-      { label: 'ферритин', pattern: /(?:ферритин)\s+[^.]*?(?:\.|$)/gimu },
-      { label: 'ПСА', pattern: /(?:ПСА|PSA)\s+[^.]*?(?:\.|$)/gimu },
+    // Паттерны для извлечения блоков обследований из сырого текста.
+    // Для анализов с параметрами (ОАК, Б/х, ОАМ) захватываем расширенный блок
+    // до следующего маркера секции, чтобы не терять отдельные показатели.
+    const examBlockPatterns: Array<{ templateId: string; label: string; pattern: RegExp }> = [
+      // Анализы с параметрами — захватываем всё до следующего обследования/секции
+      { templateId: 'oak', label: 'ОАК', pattern: /(?:ОАК|общий анализ крови|клинический анализ крови)([\s\S]*?)(?=(?:Б\/х|биохими|ОАМ|анализ мочи|ЭКГ|ЭхоКГ|ЭХОКГ|УЗДГ|УЗИ|рентген|МРТ|КТ|СМАД|холтер|ХМЭКГ|коагулограмма|ФГДС|диагноз|рекоменд|назначен|план\s+обследован|объективн|жалоб|анамнез|заключени|$))/gimu },
+      { templateId: 'biochem', label: 'Б/х', pattern: /(?:Б\/х|биохимическ\S+\s+анализ\s+крови|биохимия\s+крови|биохимия)([\s\S]*?)(?=(?:ОАК|общий анализ крови|ОАМ|анализ мочи|ЭКГ|ЭхоКГ|ЭХОКГ|УЗДГ|УЗИ|рентген|МРТ|КТ|СМАД|холтер|ХМЭКГ|коагулограмма|ФГДС|диагноз|рекоменд|назначен|план\s+обследован|объективн|жалоб|анамнез|заключени|$))/gimu },
+      { templateId: 'oam', label: 'ОАМ', pattern: /(?:ОАМ|общий анализ мочи|анализ мочи)([\s\S]*?)(?=(?:ОАК|общий анализ крови|Б\/х|биохими|ЭКГ|ЭхоКГ|ЭХОКГ|УЗДГ|УЗИ|рентген|МРТ|КТ|СМАД|холтер|ХМЭКГ|коагулограмма|ФГДС|диагноз|рекоменд|назначен|план\s+обследован|объективн|жалоб|анамнез|заключени|$))/gimu },
+      // Обследования без параметров — короткий захват до точки
+      { templateId: '', label: 'коагулограмма', pattern: /(?:коагулограмма|гемостазиограмма)[^.]*?(?:\.|$)/gimu },
+      { templateId: '', label: 'гликированный', pattern: /(?:гликированный гемоглобин|гликозилированный гемоглобин|HbA1c)[^.]*?(?:\.|$)/gimu },
+      { templateId: '', label: '25-ОН', pattern: /(?:25-?ОН|витамин\s*[ДD]|вит\.?\s*[ДD])\s+[^.]*?(?:\.|$)/gimu },
+      { templateId: '', label: 'ЭКГ', pattern: /(?:ЭКГ|электрокардиограмма)\s+(?:от\s+)?[^.]*?(?:\.|$)/gimu },
+      { templateId: '', label: 'ЭхоКГ', pattern: /(?:ЭхоКГ|ЭХОКГ|эхокардиография)\s+(?:от\s+)?[^.]*?(?:\.|$)/gimu },
+      { templateId: '', label: 'ХМЭКГ', pattern: /(?:ХМЭКГ|холтер\S*\s+мониторирование|холтер)\s+(?:от\s+)?[^.]*?(?:\.|$)/gimu },
+      { templateId: '', label: 'СМАД', pattern: /(?:СМАД)\s+(?:от\s+)?[^.]*?(?:\.|$)/gimu },
+      { templateId: '', label: 'УЗДГ', pattern: /(?:УЗДГ|УЗДС)\s+[^.]*?(?:\.|$)/gimu },
+      { templateId: '', label: 'УЗИ', pattern: /(?:УЗИ)\s+[^.]*?(?:\.|$)/gimu },
+      { templateId: '', label: 'рентген', pattern: /(?:рентген\S*)\s+[^.]*?(?:\.|$)/gimu },
+      { templateId: '', label: 'МРТ', pattern: /(?:МРТ|КТ|МСКТ)\s+[^.]*?(?:\.|$)/gimu },
+      { templateId: '', label: 'ФГДС', pattern: /(?:ФГДС|гастроскопия)\s+(?:от\s+)?[^.]*?(?:\.|$)/gimu },
+      { templateId: '', label: 'тропонин', pattern: /(?:тропонин\S*)\s+[^.]*?(?:\.|$)/gimu },
+      { templateId: '', label: 'D-димер', pattern: /(?:D-димер|д-димер)\s+[^.]*?(?:\.|$)/gimu },
+      { templateId: '', label: 'BNP', pattern: /(?:BNP|NT-proBNP|про-БНП)\s+[^.]*?(?:\.|$)/gimu },
+      { templateId: '', label: 'ферритин', pattern: /(?:ферритин)\s+[^.]*?(?:\.|$)/gimu },
+      { templateId: '', label: 'ПСА', pattern: /(?:ПСА|PSA)\s+[^.]*?(?:\.|$)/gimu },
     ];
 
     const currentExams = doc.outpatientExams.toLowerCase();
     const rescued: string[] = [];
 
-    for (const { label, pattern } of examBlockPatterns) {
+    for (const { templateId, label, pattern } of examBlockPatterns) {
       // Проверяем: есть ли этот тип обследования уже в результате?
       if (currentExams.includes(label.toLowerCase())) continue;
 
@@ -1028,12 +1043,30 @@ JSON:`;
       if (!matches) continue;
 
       for (const match of matches) {
-        const cleaned = match.trim();
-        // Минимальная валидация: должно содержать дату или числовое значение
-        if (cleaned.length > 10 && (/\d/.test(cleaned))) {
-          rescued.push(cleaned);
-          console.log(`[postprocess] Rescued from raw text: "${cleaned.substring(0, 60)}..." (${label})`);
+        const fullBlock = match.trim();
+        // Минимальная валидация: должно содержать числовое значение
+        if (fullBlock.length < 10 || !/\d/.test(fullBlock)) continue;
+
+        // Для шаблонов с параметрами — парсим значения из голосового ввода
+        if (templateId) {
+          const template = examTemplates.find(t => t.id === templateId);
+          if (template && template.parameters.length > 0) {
+            const values = parseExamValuesFromText(templateId, fullBlock);
+            const date = parseExamDate(fullBlock);
+            const valueCount = Object.keys(values).length;
+
+            if (valueCount > 0) {
+              const formatted = formatExamLine(template, values, date);
+              rescued.push(formatted);
+              console.log(`[postprocess] Rescued+formatted from raw text: "${formatted.substring(0, 80)}..." (${label}, ${valueCount} params)`);
+              continue;
+            }
+          }
         }
+
+        // Fallback: добавляем как есть (для обследований без параметров или если парсинг не нашёл значений)
+        rescued.push(fullBlock);
+        console.log(`[postprocess] Rescued from raw text (raw): "${fullBlock.substring(0, 60)}..." (${label})`);
       }
     }
 
@@ -1051,24 +1084,21 @@ JSON:`;
    * Ищет блок "диагноз:" в raw-тексте и сравнивает длину с тем что вернул LLM.
    */
   private rescueDiagnosisFromRawText(doc: MedicalDocument, rawText: string): void {
-    // Не перезаписываем если redistributeMisplacedSections уже правильно разложил поля
-    // (т.е. план обследования и рекомендации уже заполнены)
-    if (doc.doctorNotes.trim().length > 20 && doc.recommendations.trim().length > 20) {
-      return; // перераспределение сработало — диагноз уже чистый
-    }
-
     // Ищем блок диагноза в исходном тексте, останавливаясь на следующей секции
-    // (через \n или через ". " + название секции)
     const diagMatch = rawText.match(
       /(?:предварительный\s+)?диагноз\s*[:.]?\s*([\s\S]*?)(?=(?:[\n.])\s*(?:план\s+обследовани|рекомендо|назначени|диет\S*\s*(?:№|\d)|питани|объективн|анамнез|жалоб|аллерг|данные\s+объективного))/iu
     );
     if (!diagMatch) return;
 
-    const rawDiag = diagMatch[1].trim().replace(/\n{2,}/g, ' ').replace(/\s{2,}/g, ' ');
+    const rawDiag = diagMatch[1].trim()
+      .replace(/\n{2,}/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      // Убираем маркер "предварительный" в начале если остался
+      .replace(/^предварительн\S*\s*[:.,-]?\s*/iu, '');
     const currentDiag = doc.diagnosis.trim();
 
-    // Если диагноз из raw значительно длиннее (LLM обрезал) — заменяем
-    if (rawDiag.length > 20 && rawDiag.length > currentDiag.length * 1.5) {
+    // Если диагноз из raw значительно длиннее (LLM обрезал) или LLM вернул пустой/короткий — заменяем
+    if (rawDiag.length > 20 && (currentDiag.length < 10 || rawDiag.length > currentDiag.length * 1.3)) {
       console.log(`[postprocess] Diagnosis rescued from raw text: LLM had ${currentDiag.length} chars, raw has ${rawDiag.length} chars`);
       doc.diagnosis = rawDiag;
     }
