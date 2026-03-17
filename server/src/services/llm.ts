@@ -962,25 +962,88 @@ JSON:`;
     try {
       return JSON.parse(rawJson) as T;
     } catch {
-      const sanitized = rawJson
+      let sanitized = rawJson
         .replace(/```json|```/gi, '')
-        .replace(/[“”]/g, '"')
-        .replace(/[‘’]/g, "'")
+        .replace(/[\u201C\u201D]/g, '"')
+        .replace(/[\u2018\u2019]/g, "'")
         .replace(/([{,]\s*)([A-Za-z_][\w]*)(\s*:)/g, '$1"$2"$3')
         .replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, '"$1"')
         .replace(/,\s*([}\]])/g, '$1')
         .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, ' ');
 
-      return JSON.parse(sanitized) as T;
+      try {
+        return JSON.parse(sanitized) as T;
+      } catch {
+        // Экранируем реальные переносы строк внутри JSON-строк
+        sanitized = this.escapeNewlinesInJsonStrings(sanitized);
+        return JSON.parse(sanitized) as T;
+      }
     }
+  }
+
+  /**
+   * Экранирует реальные символы \n и \r внутри JSON string values,
+   * не трогая структурные пробелы между ключами/значениями.
+   */
+  private escapeNewlinesInJsonStrings(json: string): string {
+    let result = '';
+    let inString = false;
+    let escaped = false;
+
+    for (let i = 0; i < json.length; i++) {
+      const ch = json[i];
+
+      if (escaped) {
+        result += ch;
+        escaped = false;
+        continue;
+      }
+
+      if (ch === '\\' && inString) {
+        result += ch;
+        escaped = true;
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = !inString;
+        result += ch;
+        continue;
+      }
+
+      if (inString) {
+        if (ch === '\n') {
+          result += '\\n';
+          continue;
+        }
+        if (ch === '\r') {
+          result += '\\r';
+          continue;
+        }
+        if (ch === '\t') {
+          result += '\\t';
+          continue;
+        }
+      }
+
+      result += ch;
+    }
+
+    return result;
   }
 
   private async parseDocumentWithRepair(content: string): Promise<MedicalDocument> {
     try {
       return this.parseLlmJson<MedicalDocument>(content);
-    } catch {
-      const repaired = await this.repairJsonWithLlm(content);
-      return this.parseLlmJson<MedicalDocument>(repaired);
+    } catch (firstError) {
+      console.warn(`[llm] JSON parse failed, attempting LLM repair: ${firstError}`);
+      try {
+        const repaired = await this.repairJsonWithLlm(content);
+        return this.parseLlmJson<MedicalDocument>(repaired);
+      } catch (repairError) {
+        console.warn(`[llm] LLM repair failed: ${repairError}`);
+        throw new Error(`Failed to parse LLM JSON after repair attempt: ${firstError}`);
+      }
     }
   }
 
@@ -992,7 +1055,7 @@ JSON:`;
         prompt:
           `<|im_start|>system\n/no_think\nFix invalid JSON. Return only valid JSON. Do not add new facts.<|im_end|>\n` +
           `<|im_start|>user\nMake this JSON valid:\n${brokenJson}\n<|im_end|>\n<|im_start|>assistant\n`,
-        n_predict: 512,
+        n_predict: 8192,
         temperature: 0,
         stop: ['<|im_end|>'],
         json_schema: schema,
