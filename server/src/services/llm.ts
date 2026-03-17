@@ -1,5 +1,6 @@
 ﻿import type { MedicalDocument, RiskAssessment, StructureResult, LLMConfig } from '../types.js';
 import { findExamTemplate, formatExamLine } from '../data/examTemplates.js';
+import { findDietTemplate } from '../data/dietTemplates.js';
 
 const DEFAULT_RISK_ASSESSMENT: RiskAssessment = {
   fallInLast3Months: 'нет',
@@ -92,7 +93,8 @@ Rules:
 7) PRESERVE ALL dictated text — do not omit, summarize or shorten any information.
 8) Each piece of information goes to EXACTLY ONE field. Do not duplicate between fields.
 9) When the doctor names a section explicitly (e.g. "анамнез жизни:", "диета:"), put ALL following text into that section only.
-10) Medications patient currently takes → "conclusion". New prescriptions → "recommendations". Past medications → "clinicalCourse". Diet → "diet".`;
+10) Medications patient CURRENTLY takes (doctor says "амбулаторно принимает") → "conclusion". New prescriptions (doctor says "назначаю", "рекомендую") → "recommendations". Medications mentioned in context of life history/анамнез жизни → "clinicalCourse". Diet → "diet".
+11) IMPORTANT: If addendum mentions exam results (ОАК, Б/х, ЭКГ, ЭхоКГ, etc.), put them in "outpatientExams".`;
 
     const userPrompt = `Current document (JSON):
 ${JSON.stringify(document, null, 2)}
@@ -109,7 +111,7 @@ Return JSON patch only.`;
       },
       body: this.buildCompletionBody({
         prompt: `<|im_start|>system\n/no_think\n${systemPrompt}<|im_end|>\n<|im_start|>user\n${userPrompt}<|im_end|>\n<|im_start|>assistant\n`,
-        n_predict: Math.max(768, this.config.maxTokens),
+        n_predict: Math.max(4096, this.config.maxTokens),
         temperature: this.config.temperature,
         stop: ['<|im_end|>'],
         json_schema: this.getAddendumPatchJsonSchema(),
@@ -123,7 +125,13 @@ Return JSON patch only.`;
 
     const data = (await response.json()) as LlamaCompletionResponse;
     const raw = this.stripThinkingBlocks(data.content);
+    console.log(`[llm] applyAddendum: LLM returned ${raw.length} chars for addendum "${addendumText.substring(0, 80)}..."`);
     const patch = await this.parsePatchWithRepair(raw);
+    const patchKeys = Object.keys(patch).filter(k => {
+      const v = patch[k as keyof MedicalDocumentPatch];
+      return v !== undefined && v !== '' && (typeof v !== 'object' || Object.keys(v as object).length > 0);
+    });
+    console.log(`[llm] applyAddendum: patch fields: [${patchKeys.join(', ')}]`);
     const merged = this.mergeDocumentWithPatch(document, patch, addendumText);
     return this.validateAndCleanDocument(merged);
   }
@@ -603,9 +611,10 @@ Field assignment rules:
 12) "diet" — diet recommendations. If the doctor mentions a diet number (e.g. "диета 1а", "стол 5", "диета при диабете") or describes dietary restrictions, put it here. ONLY diet-related information.
 
 Distinguishing medications:
-- Medications patient ALREADY takes → "conclusion" (амбулаторная терапия)
-- Medications doctor PRESCRIBES NOW → "recommendations" (план лечения)
-- Medications patient TOOK IN THE PAST (history) → "clinicalCourse" (анамнез жизни)
+- Medications patient CURRENTLY takes (the doctor says "амбулаторно принимает", "принимает", "на постоянной основе") → "conclusion" (амбулаторная терапия)
+- Medications doctor PRESCRIBES NOW (the doctor says "назначаю", "рекомендую", "план лечения") → "recommendations" (план лечения)
+- Medications mentioned in the CONTEXT OF LIFE HISTORY / ANAMNESIS (the doctor says "анамнез жизни... принимал", "лечился", "ранее получал", or medications mentioned INSIDE the анамнез жизни section) → "clinicalCourse" (анамнез жизни)
+CRITICAL: The SECTION CONTEXT determines the field. If medications are mentioned while the doctor is dictating "анамнез жизни", they go to "clinicalCourse" even if they sound like current medications. Only medications explicitly introduced with "амбулаторно принимает" or "амбулаторная терапия" go to "conclusion".
 Do NOT mix these. If the doctor says "амбулаторно принимает X" → conclusion. If the doctor says "назначаю Y" or "рекомендую Z" → recommendations.
 
 Section boundary rules:
@@ -718,8 +727,14 @@ JSON:`;
     // Пост-обработка: перемещение контента с секционными маркерами в правильные поля
     this.redistributeMisplacedSections(result);
 
+    // Пост-обработка: спасаем данные обследований из неправильных полей
+    this.rescueExamData(result);
+
     // Пост-обработка: дедупликация диеты из recommendations/conclusion
     this.deduplicateDiet(result);
+
+    // Пост-обработка: подстановка шаблона диеты по номеру
+    this.expandDietTemplate(result);
 
     return result;
   }
@@ -858,6 +873,84 @@ JSON:`;
 
       // Убираем пустые строки оставшиеся после удаления
       doc[field] = text.replace(/\n{3,}/g, '\n\n').trim();
+    }
+  }
+
+  /**
+   * Спасает данные обследований (ОАК, Б/х, ЭКГ, ЭхоКГ, etc.) из неправильных полей
+   * и перемещает их в outpatientExams.
+   */
+  private rescueExamData(doc: MedicalDocument): void {
+    // Паттерны для обнаружения данных обследований
+    const examPatterns = [
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ОАК|общий анализ крови)\s+от\s+[^]*?(?=\n\s*(?:\d+\.|$))/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:Б\/х|биохимия|биохимический анализ)\s+[^]*?(?=\n\s*(?:\d+\.|$))/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ОАМ|общий анализ мочи)\s+[^]*?(?=\n\s*(?:\d+\.|$))/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ЭКГ|электрокардиограмма)\s+от\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ЭхоКГ|ЭХОКГ|эхокардиография)\s+от\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ХМЭКГ|холтер\S*)\s+от\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:СМАД)\s+от\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:УЗДГ|УЗДС)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:УЗИ)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:рентген\S*)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:МРТ|КТ|МСКТ)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:коагулограмма)\s+[^\n]*/gimu,
+      /(?:^|\n)\s*(?:\d+\.\s*)?(?:ЧПЭхоКГ)\s+от\s+[^\n]*/gimu,
+    ];
+
+    // Поля из которых спасаем (не ищем в outpatientExams и doctorNotes)
+    const sourceFields: RewriteableField[] = [
+      'complaints', 'anamnesis', 'clinicalCourse', 'objectiveStatus',
+      'conclusion', 'recommendations', 'diagnosis',
+    ];
+
+    const rescued: string[] = [];
+
+    for (const field of sourceFields) {
+      let text = doc[field];
+      if (!text) continue;
+
+      for (const pattern of examPatterns) {
+        // Reset lastIndex for global patterns
+        pattern.lastIndex = 0;
+        const matches = text.match(pattern);
+        if (!matches) continue;
+
+        for (const match of matches) {
+          const cleaned = match.replace(/^\s*\d+\.\s*/, '').trim();
+          if (cleaned.length > 5) {
+            rescued.push(cleaned);
+            text = text.replace(match, '\n').trim();
+            console.log(`[postprocess] Rescued exam data "${cleaned.substring(0, 50)}..." from ${field} → outpatientExams`);
+          }
+        }
+      }
+
+      doc[field] = text.replace(/\n{3,}/g, '\n\n').trim();
+    }
+
+    if (rescued.length > 0) {
+      const existing = doc.outpatientExams.trim();
+      const newExams = rescued.join('\n');
+      const combined = existing ? `${existing}\n${newExams}` : newExams;
+      // Перезапускаем постобработку чтобы перенумеровать
+      doc.outpatientExams = this.postProcessOutpatientExams(combined);
+    }
+  }
+
+  /**
+   * Подставляет шаблон диеты по номеру.
+   * Если в поле diet указан только номер диеты (например "Стол 10", "Диета 5"),
+   * заменяет его на полный текст шаблона.
+   */
+  private expandDietTemplate(doc: MedicalDocument): void {
+    const diet = doc.diet.trim();
+    if (!diet) return;
+
+    const template = findDietTemplate(diet);
+    if (template) {
+      console.log(`[postprocess] Expanded diet template: "${diet}" → "${template.name}"`);
+      doc.diet = template.description;
     }
   }
 
