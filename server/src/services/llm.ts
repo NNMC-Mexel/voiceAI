@@ -647,6 +647,10 @@ General rules:
 23) Format ALL dates as DD.MM.YYYYг. Examples: "5 февраля 2026 года" → "05.02.2026г.", "5 февраля 26 года" → "05.02.2026г.", "февраль 2026" → "02.2026г.", "12 марта" → "12.03". Always use two-digit day and month with leading zeros. Two-digit years (e.g. "26 года") mean 2000+year (i.e. 2026). Never leave dates in word form like "5 февраля 26 года".
 24) Keep medical abbreviations abbreviated. Use "ИМТ" not "индекс массы тела", "АД" not "артериальное давление", "ЧСС" not "частота сердечных сокращений", "ФВ" not "фракция выброса", etc.
 25) Voice punctuation commands must be converted to symbols: "скобка открывается" / "открыть скобку" → "(", "скобка закрывается" / "закрыть скобку" → ")", "двоеточие" → ":", "точка" → ".". These are NOT text — they are formatting instructions from the doctor.
+26) Use proper sentence structure: add periods between separate statements. Spoken text often lacks punctuation — you must add it. Example: "жалобы отмечает течение четырех лет ранее комплексное обследование не проходил" → "Жалобы отмечает в течение четырех лет. Ранее комплексное обследование не проходил."
+27) Use standard medical abbreviations for degrees/stages with Roman numerals: "артериальная гипертензия третьей степени риск 4" → "Артериальная гипертензия III степени, риск 4". "сердечная недостаточность первый функциональный класс по NYHA" → "СН ФК I (NYHA)".
+28) Fix units: weight is always in "кг" (not "сантиметров"), height in "см". "рост 175 сантиметров вес 92 сантиметра" → "Рост 175 см, вес 92 кг". Decimal values spoken as "X и Y" mean X,Y (e.g. "34 и 2" → "34,2").
+29) Format the Plan section (doctorNotes) as a numbered list with semicolons. Each investigation/test is a separate item. Example: "общий анализ крови общий анализ мочи биохимический анализ крови УЗИ сердца" → "1. ОАК;\n2. ОАМ;\n3. БАК;\n4. ЭхоКГ;"
 
 Return ONLY JSON, no extra text.`;
   }
