@@ -154,6 +154,8 @@ export class WhisperService {
           audio_base64: audioBase64,
           language: this.config.language,
           initial_prompt: MEDICAL_INITIAL_PROMPT,
+          temperature: 0,
+          no_speech_threshold: 0.6,
         }),
         signal: controller.signal,
       });
@@ -243,7 +245,7 @@ start = time.time()
 model = WhisperModel(${modelName}, device="${device}", compute_type="${computeType}", device_index=${deviceIndex})
 load_time = time.time() - start
 print(json.dumps({"event": "whisper_model_loaded", "device": "${device}", "compute_type": "${computeType}", "load_time_sec": load_time}), file=sys.stderr)
-segments, info = model.transcribe(${audioPathLiteral}, language="${this.config.language}", beam_size=${beamSize}, initial_prompt=${JSON.stringify(MEDICAL_INITIAL_PROMPT)})
+segments, info = model.transcribe(${audioPathLiteral}, language="${this.config.language}", beam_size=${beamSize}, initial_prompt=${JSON.stringify(MEDICAL_INITIAL_PROMPT)}, temperature=0, no_speech_threshold=0.6)
 text = " ".join([segment.text for segment in segments])
 print(json.dumps({"text": text, "language": info.language}))
 `;
