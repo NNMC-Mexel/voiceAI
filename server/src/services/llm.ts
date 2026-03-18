@@ -612,6 +612,7 @@ Field assignment rules:
 9) "conclusion" — outpatient therapy (амбулаторная терапия). Medications the patient CURRENTLY takes at home. Not what the doctor prescribes now — only what patient already takes.
    FORMATTING: List medications as a numbered list (1. 2. 3. ...) each on a new line.
 10) "doctorNotes" — investigation plan (план обследования). Lab orders, imaging orders, specialist consultations the doctor orders NOW.
+   IMPORTANT: Skip nonsensical items that are clearly speech recognition errors — random everyday words (e.g. "подушечка", "стрижка", "прикинь"), gibberish, or phrases with no medical meaning. Only include actual medical orders and instructions.
 11) "recommendations" — treatment plan (рекомендации / план лечения). Medications, dosages, regimens the doctor PRESCRIBES NOW. New prescriptions go here, not into "conclusion".
    FORMATTING RULES for recommendations:
    - When medications are listed, output as NUMBERED LIST (1. 2. 3. ...), each medication on a new line.
@@ -637,6 +638,7 @@ General rules:
 15) Extract patient age and gender ONLY if explicitly present.
 16) Do NOT invent dates, diagnoses, or treatment plans.
 17) Remove filler words (ну, вот, значит, так) but keep ALL medical content exactly as spoken.
+17a) Remove speech recognition garbage: nonsensical phrases, random everyday words, gibberish sequences that have no medical meaning. These are Whisper hallucinations and must NOT appear in the output.
 18) Preserve drug names, dosages, and medical abbreviations exactly.
 19) Extract risk assessment (Morse fall scale): "fallInLast3Months" (да/нет), "dizzinessOrWeakness" (да/нет), "needsEscort" (да/нет), "painScore" (число 0-10). Default all to "нет"/"0" if not mentioned.
 20) Fix punctuation: remove excessive commas from speech pauses. Keep only grammatically correct punctuation.
