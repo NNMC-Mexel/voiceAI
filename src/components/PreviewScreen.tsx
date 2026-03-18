@@ -1,16 +1,17 @@
 ﻿import { useState } from 'react';
 import { PDFDownloadLink, PDFViewer, pdf } from '@react-pdf/renderer';
-import { ArrowLeft, Download, Printer, Edit, FileText, Loader2 } from 'lucide-react';
+import { ArrowLeft, Download, Printer, Edit, FileText, Loader2, Mic } from 'lucide-react';
 import type { MedicalDocument } from '../types';
 import { MedicalPDFDocument } from './MedicalPDFDocument';
 
 interface PreviewScreenProps {
   document: MedicalDocument;
+  audioBlob: Blob | null;
   onEdit: () => void;
   onNewDocument: () => void;
 }
 
-export function PreviewScreen({ document, onEdit, onNewDocument }: PreviewScreenProps) {
+export function PreviewScreen({ document, audioBlob, onEdit, onNewDocument }: PreviewScreenProps) {
   const [isPrinting, setIsPrinting] = useState(false);
 
   const handlePrint = async () => {
@@ -43,6 +44,22 @@ export function PreviewScreen({ document, onEdit, onNewDocument }: PreviewScreen
     return `Протокол${patientName}_${date}.pdf`;
   };
 
+  const handleDownloadAudio = () => {
+    if (!audioBlob) return;
+    const date = new Date().toISOString().split('T')[0];
+    const patientName = document.patient.fullName ? `_${document.patient.fullName.split(' ')[0]}` : '';
+    const type = audioBlob.type.toLowerCase();
+    const ext = type.includes('mp4') ? 'mp4' : type.includes('ogg') ? 'ogg' : type.includes('wav') ? 'wav' : 'webm';
+    const filename = `Аудио${patientName}_${date}.${ext}`;
+
+    const url = URL.createObjectURL(audioBlob);
+    const a = window.document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  };
+
   return (
     <div className="min-h-screen bg-slate-100 py-8 px-4">
       <div className="max-w-6xl mx-auto">
@@ -72,6 +89,13 @@ export function PreviewScreen({ document, onEdit, onNewDocument }: PreviewScreen
                 </button>
               )}
             </PDFDownloadLink>
+
+            {audioBlob && (
+              <button onClick={handleDownloadAudio} className="btn-secondary flex items-center gap-2">
+                <Mic className="w-5 h-5" />
+                Скачать аудио
+              </button>
+            )}
 
             <button onClick={handlePrint} disabled={isPrinting} className="btn-primary flex items-center gap-2">
               {isPrinting ? <Loader2 className="w-5 h-5 animate-spin" /> : <Printer className="w-5 h-5" />}

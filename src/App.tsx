@@ -108,7 +108,7 @@ function App() {
         />
       )}
 
-      {step === 'preview' && <PreviewScreen document={document} onEdit={handleEdit} onNewDocument={handleNewDocument} />}
+      {step === 'preview' && <PreviewScreen document={document} audioBlob={audioBlobRef.current} onEdit={handleEdit} onNewDocument={handleNewDocument} />}
     </div>
   );
 }
