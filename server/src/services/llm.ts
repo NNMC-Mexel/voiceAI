@@ -729,7 +729,7 @@ JSON:`;
       diagnosis: this.stripSectionPrefix('diagnosis', doc.diagnosis || ''),
       finalDiagnosis: this.stripSectionPrefix('finalDiagnosis', doc.finalDiagnosis || ''),
       conclusion: this.stripSectionPrefix('conclusion', doc.conclusion || ''),
-      doctorNotes: this.stripSectionPrefix('doctorNotes', doc.doctorNotes || ''),
+      doctorNotes: this.formatDoctorNotesAsList(this.stripSectionPrefix('doctorNotes', doc.doctorNotes || '')),
       recommendations: this.stripSectionPrefix('recommendations', doc.recommendations || ''),
       diet: this.stripSectionPrefix('diet', doc.diet || ''),
     };
@@ -765,6 +765,67 @@ JSON:`;
         doc[field] = applyMedicalDictionary(value);
       }
     }
+  }
+
+  /**
+   * Форматирует план обследования (doctorNotes) как нумерованный список.
+   * Разбивает текст через точку на отдельные пункты, каждый на новой строке.
+   */
+  private formatDoctorNotesAsList(text: string): string {
+    if (!text.trim()) return '';
+
+    // Если уже нумерованный список — оставляем как есть
+    if (/^\s*\d+[\.\)]/m.test(text)) return text;
+
+    // Ключевые слова обследований для разбиения
+    const examKeywords = /(?:^|(?<=\.\s*))(?=(?:общий\s+анализ|моча\s+на|рентген|узи|холтер|эхокардио|эхокг|уздг|уздс|мрт|кт|мскт|фгдс|ээг|экг|коагулограм|коронарограф|консультаци|направлени|каг|смад|анализ\s+крови|биохим|б\/х|оак|оам|кровь\s+на|гормон|ттг|липидн|д-димер|тропонин|bnp|nt-pro))/giu;
+
+    // Пробуем разбить по ключевым словам обследований
+    const parts: string[] = [];
+    let lastIndex = 0;
+    const matches = [...text.matchAll(examKeywords)];
+
+    if (matches.length >= 2) {
+      for (const match of matches) {
+        if (match.index! > lastIndex) {
+          const chunk = text.slice(lastIndex, match.index!).replace(/[.\s]+$/, '').trim();
+          if (chunk) parts.push(chunk);
+        }
+        lastIndex = match.index!;
+      }
+      const last = text.slice(lastIndex).replace(/[.\s]+$/, '').trim();
+      if (last) parts.push(last);
+    }
+
+    if (parts.length < 2) {
+      // Fallback: разбиваем по точкам, где после точки идёт заглавная буква
+      const sentences = text.split(/\.\s+(?=[А-ЯA-Z])/).map(s => s.replace(/\.$/, '').trim()).filter(s => s.length > 0);
+      if (sentences.length >= 2) {
+        return this.mergeAndNumberItems(sentences);
+      }
+      return text;
+    }
+
+    return this.mergeAndNumberItems(parts);
+  }
+
+  /**
+   * Склеивает пункты-продолжения (начинающиеся с маленькой буквы или предлога)
+   * с предыдущим пунктом, затем нумерует.
+   */
+  private mergeAndNumberItems(items: string[]): string {
+    const merged: string[] = [];
+    for (const item of items) {
+      // Если начинается с маленькой буквы или фразы-продолжения — склеиваем
+      const isContinuation = /^[а-яёa-z]/.test(item)
+        || /^(?:На\s+предмет|По\s+поводу|Для\s+(?:исключения|оценки|уточнения)|С\s+целью|В\s+(?:целях|связи)|При\s+необходимости)/u.test(item);
+      if (merged.length > 0 && isContinuation) {
+        merged[merged.length - 1] += '. ' + item;
+      } else {
+        merged.push(item);
+      }
+    }
+    return merged.map((s, i) => `${i + 1}. ${s}`).join('\n');
   }
 
   /**
