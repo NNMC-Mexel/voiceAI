@@ -774,8 +774,14 @@ JSON:`;
   private formatDoctorNotesAsList(text: string): string {
     if (!text.trim()) return '';
 
-    // Если уже нумерованный список — оставляем как есть
-    if (/^\s*\d+[\.\)]/m.test(text)) return text;
+    // Если уже нумерованный список — фильтруем мусорные пункты и перенумеровываем
+    if (/^\s*\d+[\.\)]/m.test(text)) {
+      const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+      const items = lines.map(l => l.replace(/^\s*\d+[\.\)]\s*/, '').trim()).filter(l => l.length > 0);
+      const cleaned = items.filter(item => !this.isGarbageItem(item));
+      if (cleaned.length === 0) return text;
+      return cleaned.map((s, i) => `${i + 1}. ${s}`).join('\n');
+    }
 
     // Ключевые слова обследований для разбиения
     const examKeywords = /(?:^|(?<=\.\s*))(?=(?:общий\s+анализ|моча\s+на|рентген|узи|холтер|эхокардио|эхокг|уздг|уздс|мрт|кт|мскт|фгдс|ээг|экг|коагулограм|коронарограф|консультаци|направлени|каг|смад|анализ\s+крови|биохим|б\/х|оак|оам|кровь\s+на|гормон|ттг|липидн|д-димер|тропонин|bnp|nt-pro))/giu;
@@ -825,7 +831,39 @@ JSON:`;
         merged.push(item);
       }
     }
-    return merged.map((s, i) => `${i + 1}. ${s}`).join('\n');
+    const cleaned = merged.filter(item => !this.isGarbageItem(item));
+    if (cleaned.length === 0) return merged.map((s, i) => `${i + 1}. ${s}`).join('\n');
+    return cleaned.map((s, i) => `${i + 1}. ${s}`).join('\n');
+  }
+
+  /**
+   * Определяет, является ли пункт плана мусором Whisper.
+   * Мусор: короткие бессмысленные фразы, латинские слова не из медицины,
+   * бытовые фразы без медицинского контекста.
+   */
+  private isGarbageItem(item: string): boolean {
+    const trimmed = item.replace(/\.\s*\d*\s*$/, '').trim();
+
+    // Слишком короткий текст без медицинских аббревиатур (1-2 слова, < 15 символов)
+    const medAbbreviations = /(?:АД|ЧСС|ЭКГ|ЭхоКГ|ОАК|ОАМ|БАК|МРТ|КТ|УЗИ|СМАД|ХМЭКГ|КАГ|ОКС|ФВ|АПФ|ЛПНП|ЛПВП|NT-proBNP|BNP|HbA1c|СКФ|МНО|ТТГ|СОЭ)/i;
+
+    // Содержит латинские слова, не являющиеся медицинскими терминами
+    const nonMedLatin = /\b(?:shovel|disease|continue|hello|world|nice|make|done|please|sorry|thanks|good|like|just|right|every|where)\b/i;
+    if (nonMedLatin.test(trimmed)) return true;
+
+    // Бытовые/бессмысленные фразы (Whisper галлюцинации)
+    const garbagePhrases = /(?:делай\s+стрижк|подушечк|прикинь|избежать\s+опыт|всех\s+сторон|стрижка|подушка)/iu;
+    if (garbagePhrases.test(trimmed)) return true;
+
+    // Пункт из одного слова без медицинской аббревиатуры — подозрительный
+    const words = trimmed.split(/\s+/);
+    if (words.length === 1 && trimmed.length < 10 && !medAbbreviations.test(trimmed)) {
+      // Разрешаем известные медицинские однословные пункты
+      const allowedSingle = /^(?:Пульс|пульс|ЭКГ|ОАК|ОАМ|БАК|СМАД|ХМЭКГ|КАГ|МРТ|КТ|УЗИ|коагулограмма)$/i;
+      if (!allowedSingle.test(trimmed)) return true;
+    }
+
+    return false;
   }
 
   /**
