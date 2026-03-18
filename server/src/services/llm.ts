@@ -1,6 +1,7 @@
 ﻿import type { MedicalDocument, RiskAssessment, StructureResult, LLMConfig } from '../types.js';
 import { findExamTemplate, formatExamLine, parseExamValuesFromText, parseExamDate, examTemplates } from '../data/examTemplates.js';
 import { findDietTemplate } from '../data/dietTemplates.js';
+import { applyMedicalDictionary } from './medical-dictionary.js';
 
 const DEFAULT_RISK_ASSESSMENT: RiskAssessment = {
   fallInLast3Months: 'нет',
@@ -745,7 +746,25 @@ JSON:`;
     // Пост-обработка: подстановка шаблона диеты по номеру
     this.expandDietTemplate(result);
 
+    // Пост-обработка: повторное применение медицинского словаря
+    // LLM может отменить коррекции словаря при структурировании текста
+    this.reapplyMedicalDictionary(result);
+
     return result;
+  }
+
+  /**
+   * Повторно применяет медицинский словарь ко всем текстовым полям документа.
+   * LLM (Qwen3-8B) часто отменяет коррекции словаря при структурировании,
+   * поэтому нужно применить их снова после LLM.
+   */
+  private reapplyMedicalDictionary(doc: MedicalDocument): void {
+    for (const field of ALL_TEXT_FIELDS) {
+      const value = doc[field];
+      if (value && value.trim()) {
+        doc[field] = applyMedicalDictionary(value);
+      }
+    }
   }
 
   /**
