@@ -95,7 +95,7 @@ export const defaultConfig: ServerConfig = {
     serverUrl: 'http://localhost:8080',
     model: 'qwen3-8b',
     maxTokens: 512,
-    temperature: 0.1,
+    temperature: 0,
     parallelSlots: 15,
     requestTimeoutMs: 120000,
     allowMockOnFailure: false,

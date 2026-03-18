@@ -113,7 +113,7 @@ Return JSON patch only.`;
       body: this.buildCompletionBody({
         prompt: `<|im_start|>system\n/no_think\n${systemPrompt}<|im_end|>\n<|im_start|>user\n${userPrompt}<|im_end|>\n<|im_start|>assistant\n`,
         n_predict: Math.max(4096, this.config.maxTokens),
-        temperature: this.config.temperature,
+        temperature: 0,
         stop: ['<|im_end|>'],
         json_schema: this.getAddendumPatchJsonSchema(),
         stream: false,
@@ -173,7 +173,7 @@ Return JSON patch only.`;
       body: this.buildCompletionBody({
         prompt: `<|im_start|>system\n/no_think\n${systemPrompt}<|im_end|>\n<|im_start|>user\n${userPrompt}<|im_end|>\n<|im_start|>assistant\n`,
         n_predict: Math.max(768, this.config.maxTokens),
-        temperature: this.config.temperature,
+        temperature: 0,
         stop: ['<|im_end|>'],
         json_schema: this.getAddendumPatchJsonSchema(),
         stream: false,
@@ -318,7 +318,7 @@ Answer in Russian and use bullet points.`;
       body: this.buildCompletionBody({
         prompt: `<|im_start|>system\n/no_think\n${systemPrompt}<|im_end|>\n<|im_start|>user\n${userPrompt}<|im_end|>\n<|im_start|>assistant\n`,
         n_predict: 256,
-        temperature: 0.1,
+        temperature: 0,
         stop: ['<|im_end|>'],
         stream: false,
       }),
@@ -362,7 +362,7 @@ Rules:
       body: this.buildCompletionBody({
         prompt: `<|im_start|>system\n/no_think\n${systemPrompt}<|im_end|>\n<|im_start|>user\n${userPrompt}<|im_end|>\n<|im_start|>assistant\n`,
         n_predict: 384,
-        temperature: 0.2,
+        temperature: 0,
         stop: ['<|im_end|>'],
         stream: false,
       }),
@@ -400,7 +400,7 @@ ${normalized}`;
       body: this.buildCompletionBody({
         prompt: `<|im_start|>system\n/no_think\n${systemPrompt}<|im_end|>\n<|im_start|>user\n${userPrompt}<|im_end|>\n<|im_start|>assistant\n`,
         n_predict: Math.min(384, this.config.maxTokens),
-        temperature: 0.1,
+        temperature: 0,
         stop: ['<|im_end|>'],
         stream: false,
       }),
