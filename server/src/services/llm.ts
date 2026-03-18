@@ -644,6 +644,9 @@ General rules:
 20) Fix punctuation: remove excessive commas from speech pauses. Keep only grammatically correct punctuation.
 21) Fix spelling errors in medical terms (e.g. "фибриляция" → "фибрилляция", "гипертензея" → "гипертензия").
 22) Use Roman numerals for: functional class (ФК I-IV), NYHA (I-IV), CCS (I-IV), EHRA (I-IV), hypertension stages (ГБ I-III), AV-block degrees (I-III), valve insufficiency degrees (I-IV). Use Arabic numerals for diabetes types: СД 1 типа, СД 2 типа.
+23) Format ALL dates as DD.MM.YYYYг. Examples: "5 февраля 2026 года" → "05.02.2026г.", "5 февраля 26 года" → "05.02.2026г.", "февраль 2026" → "02.2026г.", "12 марта" → "12.03". Always use two-digit day and month with leading zeros. Two-digit years (e.g. "26 года") mean 2000+year (i.e. 2026). Never leave dates in word form like "5 февраля 26 года".
+24) Keep medical abbreviations abbreviated. Use "ИМТ" not "индекс массы тела", "АД" not "артериальное давление", "ЧСС" not "частота сердечных сокращений", "ФВ" not "фракция выброса", etc.
+25) Voice punctuation commands must be converted to symbols: "скобка открывается" / "открыть скобку" → "(", "скобка закрывается" / "закрыть скобку" → ")", "двоеточие" → ":", "точка" → ".". These are NOT text — they are formatting instructions from the doctor.
 
 Return ONLY JSON, no extra text.`;
   }

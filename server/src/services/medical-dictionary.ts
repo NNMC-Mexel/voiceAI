@@ -732,7 +732,58 @@ const VITALS_FORMATTING: ReplacementRule[] = [
   ),
 ];
 
-// ─── 6. Нормализация пунктуации / пробелов ───────────────────────────────────
+// ─── 6. Форматирование дат ────────────────────────────────────────────────────
+// Преобразуем текстовые даты в формат DD.MM.YYYYг.
+
+const MONTH_MAP: Record<string, string> = {
+  'январ': '01', 'феврал': '02', 'март': '03', 'марта': '03',
+  'апрел': '04', 'ма': '05', 'мая': '05', 'июн': '06',
+  'июл': '07', 'август': '08', 'сентябр': '09',
+  'октябр': '10', 'ноябр': '11', 'декабр': '12',
+};
+
+function monthToNumber(monthStr: string): string | null {
+  const lower = monthStr.toLowerCase();
+  for (const [prefix, num] of Object.entries(MONTH_MAP)) {
+    if (lower.startsWith(prefix)) return num;
+  }
+  return null;
+}
+
+function padTwo(n: number): string {
+  return n < 10 ? '0' + n : String(n);
+}
+
+function normalizeYear(y: string): string {
+  const num = parseInt(y, 10);
+  if (num < 100) return String(2000 + num);
+  return String(num);
+}
+
+const DATE_FORMATTING: ReplacementRule[] = [
+  // "5 февраля 2026 года" / "5 февраля 26 года" / "5 февраля 2026г" / "5 февраля 26г"
+  {
+    pattern: /(\d{1,2})\s+(январ[яьie]?|феврал[яьie]?|март[аеie]?|апрел[яьie]?|ма[яйie]|июн[яьie]?|июл[яьie]?|август[аеie]?|сентябр[яьie]?|октябр[яьie]?|ноябр[яьie]?|декабр[яьie]?)\s+(\d{2,4})\s*(?:год[аеуy]?|г\.?)?/giu,
+    replacement: (_match: string, day: string, month: string, year: string) => {
+      const m = monthToNumber(month);
+      if (!m) return _match;
+      return `${padTwo(parseInt(day, 10))}.${m}.${normalizeYear(year)}г.`;
+    },
+  },
+  // "февраль 2026" / "февраль 26 года" (month + year only)
+  {
+    pattern: /(?:^|(?<=\s))(январ[яьie]?|феврал[яьie]?|март[аеie]?|апрел[яьie]?|ма[яйie]|июн[яьie]?|июл[яьie]?|август[аеie]?|сентябр[яьie]?|октябр[яьie]?|ноябр[яьie]?|декабр[яьie]?)\s+(\d{2,4})\s*(?:год[аеуy]?|г\.?)?(?=[\s,.]|$)/giu,
+    replacement: (_match: string, month: string, year: string) => {
+      const m = monthToNumber(month);
+      if (!m) return _match;
+      return `${m}.${normalizeYear(year)}г.`;
+    },
+  },
+  // "индекс массы тела" → "ИМТ" (keep abbreviated)
+  regexRule(/индекс\s+массы\s+тела/giu, 'ИМТ'),
+];
+
+// ─── 7. Нормализация пунктуации / пробелов ──────────────────────────────────
 
 // ─── 6a. Голосовые команды пунктуации ────────────────────────────────────────
 // Врач может произносить знаки пунктуации голосом — заменяем на символы.
@@ -805,6 +856,7 @@ const ALL_RULES: ReplacementRule[] = [
   ...UNITS_CORRECTIONS,
   ...PHONETIC_CORRECTIONS,
   ...VITALS_FORMATTING,
+  ...DATE_FORMATTING,
   ...VOICE_PUNCTUATION,
   ...PUNCTUATION_FIXES,
 ];
