@@ -641,9 +641,33 @@ General rules:
 17a) Remove speech recognition garbage: nonsensical phrases, random everyday words, gibberish sequences that have no medical meaning. These are Whisper hallucinations and must NOT appear in the output.
 18) Preserve drug names, dosages, and medical abbreviations exactly.
 19) Extract risk assessment (Morse fall scale): "fallInLast3Months" (да/нет), "dizzinessOrWeakness" (да/нет), "needsEscort" (да/нет), "painScore" (число 0-10). Default all to "нет"/"0" if not mentioned.
-20) Fix punctuation: remove excessive commas from speech pauses. Keep only grammatically correct punctuation.
+20) Fix punctuation thoroughly. This is CRITICAL for document quality:
+   - Remove excessive commas that come from speech pauses (Whisper inserts commas for every pause).
+   - Add periods between separate statements/sentences. Spoken text has NO punctuation — you MUST add it.
+   - Add commas in enumerations: "ОАК ОАМ БАК ЭКГ" → "ОАК, ОАМ, БАК, ЭКГ".
+   - Add commas before "который", "где", "так как", "поскольку", "однако", "но".
+   - Separate clauses with periods when they describe different facts.
+   - Never put a comma before a period. Never double punctuation marks.
+   - Examples:
+     BAD: "жалобы отмечает течение четырех лет ранее обследование не проходил обратился в стационар"
+     GOOD: "Жалобы отмечает в течение четырех лет. Ранее обследование не проходил. Обратился в стационар."
+     BAD: "ТВС, ВГВ, ВГС отрицает в анамнезе перенесенный ВГА наследственность отягощена по АГ"
+     GOOD: "ТВС, ВГВ, ВГС — отрицает. В анамнезе перенесенный ВГА. Наследственность отягощена по АГ."
 21) Fix spelling errors in medical terms (e.g. "фибриляция" → "фибрилляция", "гипертензея" → "гипертензия").
-22) Use Roman numerals for: functional class (ФК I-IV), NYHA (I-IV), CCS (I-IV), EHRA (I-IV), hypertension stages (ГБ I-III), AV-block degrees (I-III), valve insufficiency degrees (I-IV). Use Arabic numerals for diabetes types: СД 1 типа, СД 2 типа.
+22) Roman vs Arabic numerals — STRICT RULES:
+   ROMAN NUMERALS (I, II, III, IV) for:
+   - Степень (degree): "АГ III степени", "ожирение II ст."
+   - Стадия (stage): "ГБ II стадии", "ХСН стадия II"
+   - Функциональный класс (ФК): "ФК II (NYHA)", "ФК I (CCS)"
+   - NYHA/CCS/EHRA: "EHRA IIb", "III по NYHA"
+   - АВ-блокада: "АВ блокада II степени"
+   - Недостаточность/регургитация: "митральная регургитация III степени"
+   ARABIC NUMERALS (1, 2, 3, 4) for:
+   - Тип (type): "СД 2 типа", "СД 1 типа"
+   - Риск: "риск 4", "риск 3"
+   - Баллы/шкалы: "оценка боли 7б", "Морзе 25 баллов"
+   - Числовые значения: "ФВ 40%", "ЧСС 78"
+   Rule of thumb: степень/стадия/класс = Roman; тип/риск/балл = Arabic.
 23) Format ALL dates as DD.MM.YYYYг. Examples: "5 февраля 2026 года" → "05.02.2026г.", "5 февраля 26 года" → "05.02.2026г.", "февраль 2026" → "02.2026г.", "12 марта" → "12.03". Always use two-digit day and month with leading zeros. Two-digit years (e.g. "26 года") mean 2000+year (i.e. 2026). Never leave dates in word form like "5 февраля 26 года".
 24) Keep medical abbreviations abbreviated. Use "ИМТ" not "индекс массы тела", "АД" not "артериальное давление", "ЧСС" not "частота сердечных сокращений", "ФВ" not "фракция выброса", etc.
 25) Voice punctuation commands must be converted to symbols: "скобка открывается" / "открыть скобку" → "(", "скобка закрывается" / "закрыть скобку" → ")", "двоеточие" → ":", "точка" → ".". These are NOT text — they are formatting instructions from the doctor.

@@ -444,11 +444,31 @@ const PHONETIC_CORRECTIONS: ReplacementRule[] = [
   regexRule(/функциональный\s+класс\s+(\d)/giu, 'ФК $1'),
   regexRule(/(?<![а-яёa-z])фк\s*(\d)/giu, 'ФК $1'),
 
-  // Степени
-  regexRule(/(\d)\s*(?:ой|ый|ая|я)\s+степен/giu, '$1 степен'),
+  // Степени — убираем порядковые окончания: "3ой степени" → "3 степени"
+  regexRule(/(\d)\s*(?:ой|ый|ая|я|ей)\s+степен/giu, '$1 степен'),
 
-  // Стадии
-  regexRule(/(\d)\s*(?:ой|ый|ая|я)\s+стади/giu, '$1 стади'),
+  // Стадии — убираем порядковые окончания
+  regexRule(/(\d)\s*(?:ой|ый|ая|я|ей)\s+стади/giu, '$1 стади'),
+
+  // ── Текстовые числительные → арабские (перед степень/стадия/тип) ──
+  // Для степень/стадия: используем арабские, потом ROMAN_NUMERAL_RULES конвертирует в римские.
+  regexRule(/(?:первы[йяем]|первой|первого)\s+(степен|стади)/giu, '1 $1'),
+  regexRule(/(?:второ[йяемг]|второй|второго)\s+(степен|стади)/giu, '2 $1'),
+  regexRule(/(?:третье?[йяемг]?|третьей|третьего)\s+(степен|стади)/giu, '3 $1'),
+  regexRule(/(?:четвёрт[ыйаяе].|четвертый|четвертой|четвертого)\s+(степен|стади)/giu, '4 $1'),
+  // Для "функциональный класс": напрямую → "ФК" + римская цифра
+  regexRule(/(?:первы[йяем]|первой|первого)\s+(?:функциональный\s+класс|ФК)/giu, 'ФК I'),
+  regexRule(/(?:второ[йяемг]|второй|второго)\s+(?:функциональный\s+класс|ФК)/giu, 'ФК II'),
+  regexRule(/(?:третье?[йяемг]?|третьей|третьего)\s+(?:функциональный\s+класс|ФК)/giu, 'ФК III'),
+  regexRule(/(?:четвёрт[ыйаяе].|четвертый|четвертой|четвертого)\s+(?:функциональный\s+класс|ФК)/giu, 'ФК IV'),
+  // "первый/второй/третий тип" (для СД — оставляем арабские)
+  regexRule(/(?:первы[йяем]|первой|первого)\s+(тип)/giu, '1 $1'),
+  regexRule(/(?:второ[йяемг]|второй|второго)\s+(тип)/giu, '2 $1'),
+  // "риск один/два/три/четыре" → "риск 1/2/3/4"
+  regexRule(/риск\s+(?:один|одна)/giu, 'риск 1'),
+  regexRule(/риск\s+(?:два|две)/giu, 'риск 2'),
+  regexRule(/риск\s+(?:три(?!глицерид))/giu, 'риск 3'),
+  regexRule(/риск\s+четыре/giu, 'риск 4'),
 
   // ── Частые ошибки Whisper в медицинских терминах ──
   // "фибриляция" → "фибрилляция" (одна Л → двойная ЛЛ)
@@ -745,6 +765,77 @@ const VITALS_FORMATTING: ReplacementRule[] = [
   ),
 ];
 
+// ─── 5b. Арабские → Римские цифры (в медицинском контексте) ──────────────────
+// Римские: степень, стадия, класс, ФК, блокада
+// Арабские: тип (СД), риск, баллы
+
+const ARABIC_TO_ROMAN: Record<string, string> = {
+  '1': 'I', '2': 'II', '3': 'III', '4': 'IV', '5': 'V',
+};
+
+function arabicToRoman(n: string): string {
+  return ARABIC_TO_ROMAN[n] || n;
+}
+
+const ROMAN_NUMERAL_RULES: ReplacementRule[] = [
+  // ── Контексты где НУЖНЫ римские цифры ──
+
+  // "ФК 1" / "ФК 2" / "ФК 3" / "ФК 4" → "ФК I" / "ФК II" / "ФК III" / "ФК IV"
+  // Также ловит "ФК 1," и "ФК 1." (перед запятой/точкой)
+  {
+    pattern: /(?<![а-яёa-z])ФК\s*[-–—]?\s*([1-4])(?![0-9])/giu,
+    replacement: (_m: string, n: string) => `ФК ${arabicToRoman(n)}`,
+  },
+  // "степени 3" / "3 степени" / "3 степень" / "3 ст." → "III степени"
+  {
+    pattern: /([1-4])\s*(степен\S*|ст\.)/giu,
+    replacement: (_m: string, n: string, word: string) => `${arabicToRoman(n)} ${word}`,
+  },
+  // "степень 3" → "степень III"
+  {
+    pattern: /(степен\S*|ст\.)\s+([1-4])(?![0-9,.])/giu,
+    replacement: (_m: string, word: string, n: string) => `${word} ${arabicToRoman(n)}`,
+  },
+  // "стадия 2" / "2 стадии" / "2 стадия" → "II стадия"
+  {
+    pattern: /([1-5])\s*(стади\S*)/giu,
+    replacement: (_m: string, n: string, word: string) => `${arabicToRoman(n)} ${word}`,
+  },
+  {
+    pattern: /(стади\S*)\s+([1-5])(?![0-9,.])/giu,
+    replacement: (_m: string, word: string, n: string) => `${word} ${arabicToRoman(n)}`,
+  },
+  // "EHRA 2" / "EHRA 2b" → "EHRA II" / "EHRA IIb"
+  {
+    pattern: /EHRA\s*([1-4])([ab])?/giu,
+    replacement: (_m: string, n: string, sub: string) => `EHRA ${arabicToRoman(n)}${sub || ''}`,
+  },
+  // "АВ блокада 2" / "AV блокада 3" → "АВ блокада II" / "АВ блокада III"
+  {
+    pattern: /((?:АВ|AV)\s*[-–—]?\s*блокад\S*)\s+([1-3])(?![0-9,.])/giu,
+    replacement: (_m: string, prefix: string, n: string) => `${prefix} ${arabicToRoman(n)}`,
+  },
+  // "X по NYHA" / "X по CCS" → Roman
+  {
+    pattern: /([1-4])\s+(по\s+(?:NYHA|CCS|EHRA|них\S))/giu,
+    replacement: (_m: string, n: string, rest: string) => `${arabicToRoman(n)} ${rest}`,
+  },
+  // "ГБ 2" / "ГБ 3" → "ГБ II" / "ГБ III"
+  {
+    pattern: /(?<![а-яёa-z])ГБ\s+([1-3])(?![0-9,.])/gu,
+    replacement: (_m: string, n: string) => `ГБ ${arabicToRoman(n)}`,
+  },
+  // "ожирение 2 ст" / "ожирение 3 степени" → "ожирение II ст."
+  {
+    pattern: /(ожирени\S*)\s+([1-3])\s*(степен\S*|ст\.?)/giu,
+    replacement: (_m: string, prefix: string, n: string, word: string) => `${prefix} ${arabicToRoman(n)} ${word}`,
+  },
+
+  // ── Контексты где НУЖНЫ арабские (НЕ трогаем) ──
+  // "СД 2 типа", "риск 4", "оценка боли 7" — эти остаются арабскими.
+  // Их не нужно менять, просто не ловим их выше.
+];
+
 // ─── 6. Форматирование дат ────────────────────────────────────────────────────
 // Преобразуем текстовые даты в формат DD.MM.YYYYг.
 
@@ -852,13 +943,25 @@ const VOICE_PUNCTUATION: ReplacementRule[] = [
 const PUNCTUATION_FIXES: ReplacementRule[] = [
   // Дублированные "мм рт.ст." (Whisper повторяет единицу) → одна
   regexRule(/мм\s*рт\.?\s*ст\.?\s*мм\.?\s*[Рр]т\.?\s*[Сс]т\.?/giu, 'мм рт.ст.'),
+  // Двойные/тройные точки → одна
+  regexRule(/\.{2,}/g, '.'),
+  // Двойные запятые → одна
+  regexRule(/,{2,}/g, ','),
+  // Запятая сразу перед точкой → точка
+  regexRule(/,\s*\./g, '.'),
+  // Точка сразу после запятой → точка
+  regexRule(/\.\s*,/g, '.'),
   // Множественные пробелы → один
   regexRule(/\s{2,}/g, ' '),
   // Пробел перед точкой/запятой
   regexRule(/\s+([.,;:!?])/g, '$1'),
+  // Нет пробела после точки/запятой перед буквой → добавляем
+  regexRule(/([.,;:!?])([а-яёА-ЯЁa-zA-Z])/gu, '$1 $2'),
   // Пробел после открывающей скобки и перед закрывающей — убираем
   regexRule(/\(\s+/g, '('),
   regexRule(/\s+\)/g, ')'),
+  // "мм рт.ст. ." → "мм рт.ст." (точка после аббревиатуры с точкой)
+  regexRule(/рт\.ст\.\s*\./g, 'рт.ст.'),
   // Заглавная после точки
   regexRule(/\.\s+([а-яё])/gu, (match) => match.toUpperCase()),
 ];
@@ -875,6 +978,7 @@ const ALL_RULES: ReplacementRule[] = [
   ...UNITS_CORRECTIONS,
   ...PHONETIC_CORRECTIONS,
   ...VITALS_FORMATTING,
+  ...ROMAN_NUMERAL_RULES,
   ...DATE_FORMATTING,
   ...VOICE_PUNCTUATION,
   ...PUNCTUATION_FIXES,
