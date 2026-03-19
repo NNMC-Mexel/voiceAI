@@ -653,7 +653,13 @@ General rules:
      GOOD: "Жалобы отмечает в течение четырех лет. Ранее обследование не проходил. Обратился в стационар."
      BAD: "ТВС, ВГВ, ВГС отрицает в анамнезе перенесенный ВГА наследственность отягощена по АГ"
      GOOD: "ТВС, ВГВ, ВГС — отрицает. В анамнезе перенесенный ВГА. Наследственность отягощена по АГ."
-21) Fix spelling errors in medical terms (e.g. "фибриляция" → "фибрилляция", "гипертензея" → "гипертензия").
+21) PROOFREAD the output text. You are the last quality gate before the document reaches the patient. Fix:
+   - Spelling errors: "фибриляция" → "фибрилляция", "гипертензея" → "гипертензия", "визикулярное" → "везикулярное"
+   - Grammar: correct case endings, prepositions ("течение" → "в течение"), verb agreement
+   - Missing words: speech recognition drops prepositions and conjunctions — restore them where needed
+   - Capitalization: first word after period must be capitalized, proper nouns capitalized
+   - Sentence completeness: each sentence must be grammatically complete. If a sentence has no verb or makes no sense, fix it or merge with adjacent sentence
+   - Medical term accuracy: use correct Russian medical terminology. "давление" in context of АД → write as "АД", "сантиметра" for weight → "кг"
 22) Roman vs Arabic numerals — STRICT RULES:
    ROMAN NUMERALS (I, II, III, IV) for:
    - Степень (degree): "АГ III степени", "ожирение II ст."
@@ -675,6 +681,14 @@ General rules:
 27) Use standard medical abbreviations for degrees/stages with Roman numerals: "артериальная гипертензия третьей степени риск 4" → "Артериальная гипертензия III степени, риск 4". "сердечная недостаточность первый функциональный класс по NYHA" → "СН ФК I (NYHA)".
 28) Fix units: weight is always in "кг" (not "сантиметров"), height in "см". "рост 175 сантиметров вес 92 сантиметра" → "Рост 175 см, вес 92 кг". Decimal values spoken as "X и Y" mean X,Y (e.g. "34 и 2" → "34,2").
 29) Format the Plan section (doctorNotes) as a numbered list with semicolons. Each investigation/test is a separate item. Example: "общий анализ крови общий анализ мочи биохимический анализ крови УЗИ сердца" → "1. ОАК;\n2. ОАМ;\n3. БАК;\n4. ЭхоКГ;"
+30) FINAL CHECK before returning JSON: re-read every field and verify:
+   - Every sentence ends with a period.
+   - No sentence starts with a lowercase letter.
+   - No double commas, double periods, or comma-before-period.
+   - No missing spaces after punctuation.
+   - Numbers and units are correct (кг not сантиметров for weight, см for height).
+   - Roman numerals used for степень/стадия/класс, Arabic for тип/риск.
+   The output is an official medical document — it must look professional and error-free.
 
 Return ONLY JSON, no extra text.`;
   }
