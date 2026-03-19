@@ -592,17 +592,17 @@ C) Each fact goes to EXACTLY ONE field — no duplication.
 Fields:
 1) "complaints" — patient complaints (жалобы)
 2) "anamnesis" — disease history (анамнез заболевания)
-3) "outpatientExams" — ALL exam results/lab tests as NUMBERED LIST. Format: "ExamName от DATE: param - value unit." Add units: Hb г/л, Эр *10¹²/л, креатинин мкмоль/л, глюкоза ммоль/л, АЛТ/АСТ МЕ/л, ХС/ЛПНП/ЛПВП ммоль/л, СОЭ мм/ч. Output ONLY dictated parameters.
+3) "outpatientExams" — ALL exam results/lab tests as NUMBERED LIST (each item on NEW LINE with \\n). Format: "ExamName от DATE: param - value unit." Add units: Hb г/л, Эр *10¹²/л, креатинин мкмоль/л, глюкоза ммоль/л, АЛТ/АСТ МЕ/л, ХС/ЛПНП/ЛПВП ммоль/л, СОЭ мм/ч. Output ONLY dictated parameters.
 4) "clinicalCourse" — life history (анамнез жизни): surgeries, TB, hepatitis, habits, comorbidities, PREVIOUSLY taken medications
 5) "allergyHistory" — allergies or "отрицает"
-6) "objectiveStatus" — physical exam (осмотр, АД, ЧСС, ИМТ, SpO2)
-7) "neurologicalStatus" — neurological exam
+6) "objectiveStatus" — physical exam (осмотр, АД, ЧСС, ИМТ, SpO2). Include ALL physical exam details: abdomen, liver, edema, stool, diuresis.
+7) "neurologicalStatus" — neurological exam. Do NOT put lab data here.
 8) "diagnosis" — preliminary diagnosis with ICD-10 if mentioned
 8a) "finalDiagnosis" — only if doctor says "заключительный диагноз", else empty
-9) "conclusion" — current outpatient therapy (амбулаторная терапия) as numbered list. Only meds patient CURRENTLY takes ("принимает", "амбулаторно принимает")
-10) "doctorNotes" — investigation plan as numbered list with semicolons. Skip speech recognition garbage.
-11) "recommendations" — treatment plan as numbered list. Format: "Таб.название доза по X таб. X раз/день, время;"
-12) "diet" — diet recommendations only
+9) "conclusion" — current outpatient therapy (амбулаторная терапия) as numbered list (\\n between items). Only meds patient CURRENTLY takes ("принимает", "амбулаторно принимает")
+10) "doctorNotes" — investigation plan as numbered list (\\n between items). Skip speech recognition garbage.
+11) "recommendations" — treatment plan as numbered list (\\n between items). Format: "Таб.название доза по X таб. X раз/день, время;"
+12) "diet" — diet recommendations only. If specific diet content dictated, include it fully.
 
 Medication routing:
 - "принимает/амбулаторно принимает" → conclusion
@@ -713,9 +713,9 @@ JSON:`;
       neurologicalStatus: this.stripSectionPrefix('neurologicalStatus', doc.neurologicalStatus || ''),
       diagnosis: this.stripSectionPrefix('diagnosis', doc.diagnosis || ''),
       finalDiagnosis: this.stripSectionPrefix('finalDiagnosis', doc.finalDiagnosis || ''),
-      conclusion: this.stripSectionPrefix('conclusion', doc.conclusion || ''),
+      conclusion: this.splitInlineNumberedList(this.stripSectionPrefix('conclusion', doc.conclusion || '')),
       doctorNotes: this.formatDoctorNotesAsList(this.stripSectionPrefix('doctorNotes', doc.doctorNotes || '')),
-      recommendations: this.stripSectionPrefix('recommendations', doc.recommendations || ''),
+      recommendations: this.splitInlineNumberedList(this.stripSectionPrefix('recommendations', doc.recommendations || '')),
       diet: this.stripSectionPrefix('diet', doc.diet || ''),
     };
 
@@ -750,6 +750,19 @@ JSON:`;
         doc[field] = applyMedicalDictionary(value);
       }
     }
+  }
+
+  /**
+   * Разбивает инлайновый нумерованный список на строки.
+   * "1. Бисопролол... 2. Эдарби-Кло..." → "1. Бисопролол...\n2. Эдарби-Кло..."
+   */
+  private splitInlineNumberedList(text: string): string {
+    if (!text.trim()) return '';
+    // Если уже содержит \n между номерами — не трогаем
+    if (/\d+\.\s.*\n\s*\d+\./.test(text)) return text;
+    // Разбиваем по номерам: "1. ... 2. ... 3. ..."
+    const split = text.replace(/\s+(\d+)\.\s+/g, '\n$1. ');
+    return split.trim();
   }
 
   /**
