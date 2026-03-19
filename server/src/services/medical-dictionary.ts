@@ -559,7 +559,22 @@ const PHONETIC_CORRECTIONS: ReplacementRule[] = [
   regexRule(/ЧАЦ\s*ВАСК/giu, 'CHA₂DS₂-VASc'),
   // "порог сердца" → "порок сердца" (Whisper ошибка)
   regexRule(/порог\s+сердца/giu, 'порок сердца'),
-  // "Метроникомпиэмэрай" → "Medtronic Compi MRI" (название устройства, оставляем как есть)
+  // "Митроникомпиэмэрай" / "Метроникомпиэмэрай" → "Medtronic Compia MRI CRT-D"
+  regexRule(/[Мм][еи]тро?ник\S*комп\S*э?м\S*р\S*/giu, 'Medtronic Compia MRI CRT-D'),
+  // "мм врт. ст." / "мм. врт. ст." → "мм рт.ст." (Whisper ошибка)
+  regexRule(/мм\.?\s*врт\.?\s*ст\.?/giu, 'мм рт.ст.'),
+  // "мм рт. Ст." / "мм рт. ст." → "мм рт.ст." (лишние пробелы и заглавная)
+  regexRule(/мм\s+рт\.\s*[Сс]т\./gu, 'мм рт.ст.'),
+  // "аортыа" → "аорты" (лишняя буква)
+  regexRule(/аортыа/giu, 'аорты'),
+  // "Сосниженная/сосниженной" → "со сниженной" (слитное написание)
+  regexRule(/[Сс]осниженн/giu, 'со сниженн'),
+  // "батреи" → "батареи" (опечатка)
+  regexRule(/батреи/giu, 'батареи'),
+  // "Браво" → "BRAVO" (название устройства CRT-D)
+  wordRule('Браво', 'BRAVO'),
+  // "ВВАР" → "VVIR" (режим стимуляции)
+  wordRule('ВВАР', 'VVIR'),
   // "а дышки" → "одышки" (Whisper разбивает слово)
   regexRule(/а\s+дышки/giu, 'одышки'),
   // "сои" → "СОЭ" (Whisper неправильно распознаёт аббревиатуру)
@@ -696,15 +711,16 @@ const PHONETIC_CORRECTIONS: ReplacementRule[] = [
   regexRule(/,?\s*https?:\/\/\S+/giu, ''),
   // Whisper мусор: кириллица+латиница смешанные слова (Сниженfl, последdatedo, Какım)
   // Но не трогаем известные медицинские аббревиатуры (CRTD, MRI, NYHA, EHRA, CRT, VVI, DDD, VVAR)
-  regexRule(/\s+(?!(?:CRTD|MRI|NYHA|EHRA|CRT|VVI|DDD|VVAR|BRAVO|Compi|Mitronic|Quattro|Asura|Concor|Digoxin|DASH)\b)[а-яёА-ЯЁ]+[a-zA-Z]+\S*/gu, ''),
-  regexRule(/\s+(?!(?:CRTD|MRI|NYHA|EHRA|CRT|VVI|DDD|VVAR|BRAVO|Compi|Mitronic|Quattro|Asura|Concor|Digoxin|DASH)\b)[a-zA-Z]+[а-яёА-ЯЁ]+\S*/gu, ''),
+  regexRule(/\s+(?!(?:CRTD|MRI|NYHA|EHRA|CRT|VVI|DDD|VVIR|BRAVO|Compi|Mitronic|Medtronic|Quattro|Asura|Concor|Digoxin|DASH|CRT-D)\b)[а-яёА-ЯЁ]+[a-zA-Z]+\S*/gu, ''),
+  regexRule(/\s+(?!(?:CRTD|MRI|NYHA|EHRA|CRT|VVI|DDD|VVIR|BRAVO|Compi|Mitronic|Medtronic|Quattro|Asura|Concor|Digoxin|DASH|CRT-D)\b)[a-zA-Z]+[а-яёА-ЯЁ]+\S*/gu, ''),
   // Whisper мусор: отдельные нераспознанные латинские слова (не медицинские аббревиатуры)
   // Латинское слово из 3+ букв в нижнем регистре, не являющееся известным медтермином
   regexRule(/\s+(?!(?:site|http)\b)(?:[a-z]{3,})\s+(?=[А-ЯЁа-яё])/gu, ' '),
   // Whisper мусор: спецсимволы Unicode посреди текста (•, турецкие символы ı, ş и т.п.)
   regexRule(/[•·\u0131\u015f\u011f\u00e7\u00f6\u00fc]+\S*/gu, ''),
-  // Whisper мусор: блоки из 2+ англ. слов подряд (не являющиеся медтерминами)
-  regexRule(/(?<=[а-яёА-ЯЁ.]\s)(?:(?:(?!CRTD|MRI|NYHA|EHRA|Mitronic|Quattro|Asura|Compi|BRAVO|Concor|DASH)[A-Za-z]+)\s+){2,}(?:(?!CRTD|MRI|NYHA|EHRA|Mitronic|Quattro|Asura|Compi|BRAVO|Concor|DASH)[A-Za-z]+)\s*/gu, ''),
+  // Whisper мусор: блоки из 2+ англ. слов/чисел подряд (не являющиеся медтерминами)
+  // Ловит: "using 2-5 developed Valentino Daniel AD maniac Subscription"
+  regexRule(/(?<=[а-яёА-ЯЁ.]\s)(?:(?:(?!CRTD|MRI|NYHA|EHRA|Mitronic|Quattro|Asura|Compi|BRAVO|Concor|DASH|VVIR|Medtronic|CRT-D)[A-Za-z0-9][-A-Za-z0-9]*)\s+){2,}(?:(?!CRTD|MRI|NYHA|EHRA|Mitronic|Quattro|Asura|Compi|BRAVO|Concor|DASH|VVIR|Medtronic|CRT-D)[A-Za-z0-9][-A-Za-z0-9]*)[.\s]*/gu, ''),
   // Whisper галлюцинации в конце аудио — мусор с латиницей
   regexRule(/[а-яё]+[a-z]\S*\.?\s+[a-z]\S*[\s\S]*$/giu, ''),
 ];

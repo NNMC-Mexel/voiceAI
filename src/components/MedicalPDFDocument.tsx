@@ -195,7 +195,13 @@ export function MedicalPDFDocument({ document }: MedicalPDFDocumentProps) {
         {sections.map((section, index) => (
           <View key={index} style={styles.section}>
             <Text style={styles.sectionTitle}>{section.title}</Text>
-            <Text style={styles.sectionContent}>{section.content}</Text>
+            {section.content.includes('\n') ? (
+              section.content.split('\n').map((line, i) => (
+                <Text key={i} style={styles.sectionContent}>{line}</Text>
+              ))
+            ) : (
+              <Text style={styles.sectionContent}>{section.content}</Text>
+            )}
           </View>
         ))}
 
