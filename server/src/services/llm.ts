@@ -836,8 +836,8 @@ JSON:`;
     const nonMedLatin = /\b(?:shovel|disease|continue|hello|world|nice|make|done|please|sorry|thanks|good|like|just|right|every|where)\b/i;
     if (nonMedLatin.test(trimmed)) return true;
 
-    // Бытовые/бессмысленные фразы (Whisper галлюцинации)
-    const garbagePhrases = /(?:делай\s+стрижк|подушечк|прикинь|избежать\s+опыт|всех\s+сторон|стрижка|подушка)/iu;
+    // Бытовые/бессмысленные фразы (Whisper галлюцинации и неформальная речь врача)
+    const garbagePhrases = /(?:делай\s+стрижк|подушечк|прикинь|избежать\s+опыт|всех\s+сторон|стрижка|подушка|пусть\s+у\s+вас|мы\s+вам\s+(?:всегда\s+)?благодарн|после\s+курса\s+на\s+культур|всё\s+в\s+порядке|все\s+в\s+порядке)/iu;
     if (garbagePhrases.test(trimmed)) return true;
 
     // Пункт из одного слова без медицинской аббревиатуры — подозрительный
