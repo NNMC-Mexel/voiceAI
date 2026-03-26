@@ -62,6 +62,12 @@ export function RecordingScreen({ onRecordingComplete, error: externalError }: R
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    const MAX_SIZE = 100 * 1024 * 1024; // 100 МБ
+    if (file.size > MAX_SIZE) {
+      setError('Файл слишком большой. Максимальный размер — 100 МБ.');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
     onRecordingComplete(file);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };

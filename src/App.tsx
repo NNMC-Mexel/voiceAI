@@ -16,12 +16,45 @@ function filenameForBlob(blob: Blob, baseName: string): string {
   return `${baseName}.webm`;
 }
 
+const SESSION_STEP_KEY = 'voicemed_step';
+const SESSION_DOC_KEY = 'voicemed_document';
+
 function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
-  const [step, setStep] = useState<AppStep>('recording');
-  const [document, setDocument] = useState<MedicalDocument>(emptyDocument);
+  const [step, setStep] = useState<AppStep>(() => {
+    try {
+      const saved = sessionStorage.getItem(SESSION_STEP_KEY) as AppStep | null;
+      return saved && ['recording', 'processing', 'editing', 'preview'].includes(saved) ? saved : 'recording';
+    } catch {
+      return 'recording';
+    }
+  });
+  const [document, setDocument] = useState<MedicalDocument>(() => {
+    try {
+      const saved = sessionStorage.getItem(SESSION_DOC_KEY);
+      return saved ? (JSON.parse(saved) as MedicalDocument) : emptyDocument;
+    } catch {
+      return emptyDocument;
+    }
+  });
   const [error, setError] = useState<string | null>(null);
   const audioBlobRef = useRef<Blob | null>(null);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(SESSION_STEP_KEY, step);
+    } catch {
+      // ignore
+    }
+  }, [step]);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(SESSION_DOC_KEY, JSON.stringify(document));
+    } catch {
+      // ignore
+    }
+  }, [document]);
 
   useEffect(() => {
     apiClient.checkAuth().then(setAuthenticated);
@@ -83,6 +116,12 @@ function App() {
     audioBlobRef.current = null;
     setError(null);
     setStep('recording');
+    try {
+      sessionStorage.removeItem(SESSION_STEP_KEY);
+      sessionStorage.removeItem(SESSION_DOC_KEY);
+    } catch {
+      // ignore
+    }
   }, []);
 
   if (authenticated === null) {

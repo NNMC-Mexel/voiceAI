@@ -88,13 +88,8 @@ export class WhisperService {
     await writeFile(tempAudioPath, audioBuffer);
 
     try {
-      const result = await this.transcribeFile(tempAudioPath, filename);
-      // Постобработка: исправляем медицинские термины
-      const corrected = applyMedicalDictionary(result.text);
-      if (corrected !== result.text) {
-        console.log(`[medical-dictionary] Applied corrections (${DICTIONARY_RULE_COUNT} rules)`);
-      }
-      return { ...result, text: corrected };
+      // transcribeFile already applies applyMedicalDictionary internally
+      return await this.transcribeFile(tempAudioPath, filename);
     } finally {
       try {
         await unlink(tempAudioPath);
@@ -107,14 +102,22 @@ export class WhisperService {
   async transcribeFile(audioPath: string, filename: string): Promise<TranscriptionResult> {
     const startTime = Date.now();
 
+    const applyDict = (result: TranscriptionResult): TranscriptionResult => {
+      const corrected = applyMedicalDictionary(result.text);
+      if (corrected !== result.text) {
+        console.log(`[medical-dictionary] Applied corrections (${DICTIONARY_RULE_COUNT} rules)`);
+      }
+      return { ...result, text: corrected };
+    };
+
     // Шаг 1: Persistent HTTP whisper-сервер (нет перезагрузки модели → быстро)
     if (this.config.serverUrl) {
       try {
         const result = await this.transcribeWithServer(audioPath);
-        return {
+        return applyDict({
           ...result,
           duration: (Date.now() - startTime) / 1000,
-        };
+        });
       } catch (error) {
         console.warn(`Whisper HTTP server unavailable, falling back to subprocess... (${error})`);
       }
@@ -123,30 +126,30 @@ export class WhisperService {
     // Шаг 2: whisper.cpp subprocess
     try {
       const result = await this.transcribeWithWhisperCpp(audioPath);
-      return {
+      return applyDict({
         ...result,
         duration: (Date.now() - startTime) / 1000,
-      };
+      });
     } catch (error) {
       console.log(`whisper.cpp not available, trying faster-whisper... (${error})`);
 
       // Шаг 3: faster-whisper CUDA subprocess
       try {
         const result = await this.transcribeWithFasterWhisper(audioPath, this.config.device);
-        return {
+        return applyDict({
           ...result,
           duration: (Date.now() - startTime) / 1000,
-        };
+        });
       } catch (fallbackError) {
         // Шаг 4: faster-whisper CPU (если CUDA не сработал)
         if (this.config.device === 'cuda') {
           try {
             console.log(`faster-whisper CUDA failed, retrying on CPU... (${fallbackError})`);
             const result = await this.transcribeWithFasterWhisper(audioPath, 'cpu');
-            return {
+            return applyDict({
               ...result,
               duration: (Date.now() - startTime) / 1000,
-            };
+            });
           } catch (cpuError) {
             fallbackError = cpuError;
           }
@@ -296,7 +299,8 @@ print(json.dumps({"text": text, "language": info.language}))
       python.on('close', (code) => {
         if (code === 0) {
           try {
-            const result = JSON.parse(stdout.trim());
+            const lastLine = stdout.trim().split('\n').filter(Boolean).pop() ?? '';
+            const result = JSON.parse(lastLine);
             resolve({
               text: result.text,
               language: result.language,
