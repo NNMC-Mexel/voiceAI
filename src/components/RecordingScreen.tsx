@@ -1,6 +1,7 @@
-﻿import { useState, useEffect, useRef } from 'react';
+﻿import { useState, useEffect, useRef, useCallback } from 'react';
 import { Mic, Pause, Play, Square, AlertCircle, CheckCircle, RotateCcw, Upload } from 'lucide-react';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
+import { useWakeWord } from '../hooks/useWakeWord';
 import { WaveformVisualizer } from './WaveformVisualizer';
 
 
@@ -24,7 +25,39 @@ export function RecordingScreen({ onRecordingComplete, error: externalError }: R
 
   const [error, setError] = useState<string | null>(null);
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
+  const autoSubmitRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Wake word: "Джарвис" starts recording, "стоп" stops and auto-submits
+  const handleWakeWord = useCallback(() => {
+    if (isRecording || audioBlob || hasPermission === false) return;
+    setError(null);
+    autoSubmitRef.current = true;
+    void startRecording().catch((err) => {
+      setError(err instanceof Error ? err.message : 'Ошибка записи');
+      autoSubmitRef.current = false;
+    });
+  }, [isRecording, audioBlob, hasPermission, startRecording]);
+
+  const handleStopWord = useCallback(() => {
+    if (!isRecording) return;
+    stopRecording(2); // trim last 2 seconds to cut off "Стоп Нави"
+  }, [isRecording, stopRecording]);
+
+  useWakeWord({
+    enabled: true,
+    isRecording,
+    onWakeWord: handleWakeWord,
+    onStopWord: handleStopWord,
+  });
+
+  // Auto-submit after stop word: when audioBlob appears and autoSubmit flag is set
+  useEffect(() => {
+    if (audioBlob && autoSubmitRef.current) {
+      autoSubmitRef.current = false;
+      onRecordingComplete(audioBlob);
+    }
+  }, [audioBlob, onRecordingComplete]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -176,10 +209,10 @@ export function RecordingScreen({ onRecordingComplete, error: externalError }: R
                 {isRecording
                   ? isPaused
                     ? 'Запись на паузе'
-                    : 'Идет запись...'
+                    : 'Идет запись... Скажите "Стоп Нави" для завершения'
                   : audioBlob
                     ? 'Запись завершена'
-                    : 'Максимум 30 минут'}
+                    : 'Скажите "Нави" или нажмите кнопку'}
               </p>
             </div>
           </div>
@@ -229,7 +262,7 @@ export function RecordingScreen({ onRecordingComplete, error: externalError }: R
                 </button>
 
                 <button
-                  onClick={stopRecording}
+                  onClick={() => stopRecording()}
                   className="btn-primary flex items-center gap-2 bg-gradient-to-r from-red-500 to-red-600 shadow-red-500/30 hover:shadow-red-500/40 hover:from-red-600 hover:to-red-700"
                 >
                   <Square className="w-5 h-5" />

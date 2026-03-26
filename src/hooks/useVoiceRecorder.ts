@@ -13,6 +13,7 @@ export function useVoiceRecorder() {
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const trimChunksRef = useRef(0);
 
   const pickSupportedMimeType = useCallback((): string => {
     const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
@@ -64,7 +65,13 @@ export function useVoiceRecorder() {
 
       mediaRecorder.onstop = () => {
         const recorderMimeType = mediaRecorder.mimeType || mimeType || 'audio/webm';
-        const audioBlob = new Blob(chunksRef.current, { type: recorderMimeType });
+        // Trim last N chunks if requested (to cut off stop phrase from audio)
+        const trimCount = trimChunksRef.current;
+        trimChunksRef.current = 0;
+        const chunks = trimCount > 0 && chunksRef.current.length > trimCount
+          ? chunksRef.current.slice(0, -trimCount)
+          : chunksRef.current;
+        const audioBlob = new Blob(chunks, { type: recorderMimeType });
         setState((prev) => ({ ...prev, audioBlob }));
       };
 
@@ -104,8 +111,10 @@ export function useVoiceRecorder() {
     }
   }, [state.isRecording, state.isPaused, updateDuration]);
 
-  const stopRecording = useCallback(() => {
+  const stopRecording = useCallback((trimSeconds = 0) => {
     if (mediaRecorderRef.current && state.isRecording) {
+      // Each chunk is ~1 second (start(1000)), so trimSeconds ≈ chunks to drop
+      trimChunksRef.current = trimSeconds;
       mediaRecorderRef.current.stop();
 
       if (timerRef.current) {

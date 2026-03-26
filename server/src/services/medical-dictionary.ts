@@ -1015,7 +1015,22 @@ const PUNCTUATION_FIXES: ReplacementRule[] = [
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /** Все правила замены в порядке применения */
+// ── Очистка голосовых команд (wake/stop фразы) ──────────────────────────────
+const WAKE_WORD_CLEANUP: ReplacementRule[] = [
+  // "Стоп Нави", "Стоп-Нави", "стоп, Нави", "Стоп! Нави" etc.
+  regexRule(/\s*стоп[\s\-,!.]*нави[!.]?\s*/gi, ''),
+  regexRule(/\s*stop[\s\-,!.]*navi[!.]?\s*/gi, ''),
+  // standalone "Нави" at start/end
+  regexRule(/\s*нави[!.]?\s*$/gi, ''),
+  regexRule(/^\s*нави[!.]?\s*/gi, ''),
+  // "Оу, Нави" / "Ау! Нави" — common false starts
+  regexRule(/\s*[ао]у[!,.]?\s*нави[!.]?\s*/gi, ''),
+  // "остановись Нави"
+  regexRule(/\s*остановись\s+нави[!.]?\s*/gi, ''),
+];
+
 const ALL_RULES: ReplacementRule[] = [
+  ...WAKE_WORD_CLEANUP,
   ...LATIN_CARDIOLOGY_ABBREVIATIONS,
   ...GENERAL_MEDICAL_ABBREVIATIONS,
   ...DRUG_NAME_CORRECTIONS,
