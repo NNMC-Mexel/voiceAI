@@ -150,12 +150,18 @@ class ApiClient {
         }
         let errorMessage = `Request failed: ${response.status}`;
         try {
-          const err = await response.json();
-          if (err?.error) errorMessage = String(err.error);
-          else if (err?.message) errorMessage = String(err.message);
-        } catch {
           const text = await response.text();
-          if (text) errorMessage = text;
+          if (text) {
+            try {
+              const err = JSON.parse(text) as { error?: unknown; message?: unknown };
+              if (err?.error) errorMessage = String(err.error);
+              else if (err?.message) errorMessage = String(err.message);
+            } catch {
+              errorMessage = text;
+            }
+          }
+        } catch {
+          // ignore body read errors
         }
         throw new Error(errorMessage);
       }
@@ -216,7 +222,7 @@ class ApiClient {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ document, text }),
-    }, 0);
+    }, 300_000);
   }
 
   async processAudio(audioBlob: Blob, filename: string = 'recording.webm'): Promise<ProcessResponse> {
@@ -226,7 +232,7 @@ class ApiClient {
     return this.request('/api/process', {
       method: 'POST',
       body: formData,
-    }, 0);
+    }, 300_000);
   }
 
   async processAddendum(
@@ -258,7 +264,7 @@ class ApiClient {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ document }),
-    }, 0);
+    }, 300_000);
   }
 
   async chat(
@@ -292,7 +298,7 @@ class ApiClient {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ document, instruction }),
-    }, 0);
+    }, 300_000);
   }
 
   async tts(text: string): Promise<string> {

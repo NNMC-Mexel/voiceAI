@@ -278,7 +278,7 @@ Return JSON patch only.`;
 
     const data = (await response.json()) as LlamaCompletionResponse;
     const raw = this.stripThinkingBlocks(data.content);
-    const stoppedEos = (data as any).stop_type === 'eos' || (data as any).stopped_eos === true;
+    const stoppedEos = (data as any).stop_type === 'eos' || (data as any).stopped_eos === true || (data as any).stop === 'eos';
     const truncated = !stoppedEos && raw.length > 0;
     console.log(`LLM structureText response: ${raw.length} chars, stopped_eos: ${stoppedEos}, truncated: ${truncated}`);
     if (truncated) {
@@ -1351,9 +1351,68 @@ JSON:`;
       } catch {
         // Экранируем реальные переносы строк внутри JSON-строк
         sanitized = this.escapeNewlinesInJsonStrings(sanitized);
-        return JSON.parse(sanitized) as T;
+        try {
+          return JSON.parse(sanitized) as T;
+        } catch {
+          // Экранируем unescaped кавычки внутри JSON string values
+          sanitized = this.escapeUnquotedQuotesInJsonStrings(sanitized);
+          return JSON.parse(sanitized) as T;
+        }
       }
     }
+  }
+
+  /**
+   * Экранирует неэкранированные кавычки внутри JSON string values.
+   * Использует статeful-парсер: отслеживает, находимся ли мы внутри строки.
+   */
+  private escapeUnquotedQuotesInJsonStrings(json: string): string {
+    let result = '';
+    let inString = false;
+    let escaped = false;
+
+    for (let i = 0; i < json.length; i++) {
+      const ch = json[i];
+
+      if (escaped) {
+        result += ch;
+        escaped = false;
+        continue;
+      }
+
+      if (ch === '\\' && inString) {
+        result += ch;
+        escaped = true;
+        continue;
+      }
+
+      if (ch === '"') {
+        if (!inString) {
+          // Открываем строку
+          inString = true;
+          result += ch;
+        } else {
+          // Проверяем: это закрывающая кавычка (за ней пробел/: /,/}/])
+          // или кавычка внутри значения?
+          let j = i + 1;
+          while (j < json.length && (json[j] === ' ' || json[j] === '\t' || json[j] === '\r' || json[j] === '\n')) j++;
+          const nextMeaningful = json[j];
+          const isClosing = nextMeaningful === ':' || nextMeaningful === ',' || nextMeaningful === '}' || nextMeaningful === ']' || j >= json.length;
+          if (isClosing) {
+            inString = false;
+            result += ch;
+          } else {
+            // Unescaped quote inside string value — escape it
+            result += '\\"';
+          }
+        }
+        continue;
+      }
+
+      result += ch;
+    }
+
+    return result;
   }
 
   /**

@@ -884,7 +884,8 @@ const MONTH_MAP: Record<string, string> = {
 
 function monthToNumber(monthStr: string): string | null {
   const lower = monthStr.toLowerCase();
-  for (const [prefix, num] of Object.entries(MONTH_MAP)) {
+  const entries = Object.entries(MONTH_MAP).sort((a, b) => b[0].length - a[0].length);
+  for (const [prefix, num] of entries) {
     if (lower.startsWith(prefix)) return num;
   }
   return null;
@@ -1018,15 +1019,15 @@ const PUNCTUATION_FIXES: ReplacementRule[] = [
 // ── Очистка голосовых команд (wake/stop фразы) ──────────────────────────────
 const WAKE_WORD_CLEANUP: ReplacementRule[] = [
   // "Стоп Нави", "Стоп-Нави", "стоп, Нави", "Стоп! Нави" etc.
-  regexRule(/\s*стоп[\s\-,!.]*нави[!.]?\s*/gi, ''),
-  regexRule(/\s*stop[\s\-,!.]*navi[!.]?\s*/gi, ''),
-  // standalone "Нави" at start/end
-  regexRule(/\s*нави[!.]?\s*$/gi, ''),
-  regexRule(/^\s*нави[!.]?\s*/gi, ''),
+  regexRule(/\s*стоп[\s\-,!.]*нави(?![а-яёa-z])[!.]?\s*/gi, ''),
+  regexRule(/\s*stop[\s\-,!.]*navi(?![а-яёa-z])[!.]?\s*/gi, ''),
+  // standalone "Нави" at start/end (word boundary to protect "навигация" etc.)
+  regexRule(/\s*(?<![а-яёa-z])нави(?![а-яёa-z])[!.]?\s*$/gi, ''),
+  regexRule(/^\s*(?<![а-яёa-z])нави(?![а-яёa-z])[!.]?\s*/gi, ''),
   // "Оу, Нави" / "Ау! Нави" — common false starts
-  regexRule(/\s*[ао]у[!,.]?\s*нави[!.]?\s*/gi, ''),
+  regexRule(/\s*[ао]у[!,.]?\s*нави(?![а-яёa-z])[!.]?\s*/gi, ''),
   // "остановись Нави"
-  regexRule(/\s*остановись\s+нави[!.]?\s*/gi, ''),
+  regexRule(/\s*остановись\s+нави(?![а-яёa-z])[!.]?\s*/gi, ''),
 ];
 
 const ALL_RULES: ReplacementRule[] = [

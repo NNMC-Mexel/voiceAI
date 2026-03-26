@@ -30,9 +30,6 @@ declare global {
   }
 }
 
-const WAKE_PHRASES = ['нави', 'navi'];
-const STOP_PHRASES = ['стоп нави', 'stop navi', 'стоп-нави', 'stop-navi'];
-
 // Cooldown after action to prevent re-triggering from buffered results
 const ACTION_COOLDOWN_MS = 3000;
 
@@ -72,17 +69,13 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
   useEffect(() => { enabledRef.current = enabled; }, [enabled]);
 
   const containsStopPhrase = (text: string): boolean => {
-    for (const phrase of STOP_PHRASES) {
-      if (text.includes(phrase)) return true;
-    }
-    return false;
+    return /(?<![а-яёa-z])стоп[\s\-]*нави(?![а-яёa-z])/i.test(text) ||
+      /(?<![а-яёa-z])stop[\s\-]*navi(?![а-яёa-z])/i.test(text);
   };
 
   const containsWakePhrase = (text: string): boolean => {
-    for (const phrase of WAKE_PHRASES) {
-      if (text.includes(phrase)) return true;
-    }
-    return false;
+    return /(?<![а-яёa-z])нави(?![а-яёa-z])/i.test(text) ||
+      /(?<![а-яёa-z])navi(?![a-z])/i.test(text);
   };
 
   const createAndStart = useCallback(() => {

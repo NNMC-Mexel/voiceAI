@@ -171,6 +171,8 @@ export function EditingScreen({
     selectionEnd: number;
   } | null>(null);
   const savedSelectionRef = useRef<{ start: number; end: number; text: string } | null>(null);
+  const documentRef = useRef(document);
+  useEffect(() => { documentRef.current = document; }, [document]);
   const recommendationsInFlightRef = useRef(false);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsUrlRef = useRef<string | null>(null);
@@ -427,12 +429,12 @@ export function EditingScreen({
       setLastAddendumText(result.transcription.text);
       await refreshRecommendationsInChat();
 
-      resetAddendumRecording();
       setIsAddendumOpen(false);
     } catch (err) {
       console.error('[Addendum] Error:', err);
       setAddendumError(err instanceof Error ? err.message : 'Ошибка дополнения документа');
     } finally {
+      resetAddendumRecording();
       setIsUpdating(false);
     }
   };
@@ -454,7 +456,7 @@ export function EditingScreen({
     if (isDocumentEditInstruction(trimmedQuestion)) {
       setChatLoading(true);
       try {
-        const result = await apiClient.instructDocument(document, trimmedQuestion);
+        const result = await apiClient.instructDocument(documentRef.current, trimmedQuestion);
         onDocumentChange(result.document);
         await refreshRecommendationsInChat();
 
@@ -495,7 +497,7 @@ export function EditingScreen({
       const history = nextHistory
         .slice(-8)
         .map((m) => ({ role: m.role, text: m.text }));
-      const result = await apiClient.chat(trimmedQuestion, history, document);
+      const result = await apiClient.chat(trimmedQuestion, history, documentRef.current);
       const answerText = result.answer || 'Нет ответа';
       setChatMessages((prev) => [
         ...prev,
@@ -597,8 +599,12 @@ export function EditingScreen({
   useEffect(() => {
     if (addendumBlob && autoApplyRef.current) {
       autoApplyRef.current = false;
-      void handleAddendumApply(addendumBlob);
+      handleAddendumApply(addendumBlob).catch((err) => {
+        console.error('[Addendum] Auto-apply error:', err);
+        setAddendumError(err instanceof Error ? err.message : 'Ошибка автоприменения');
+      });
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [addendumBlob]);
 
   const handleRewriteField = async (field: RewriteableField, announceInChat = false) => {
@@ -721,7 +727,11 @@ export function EditingScreen({
         <div className="flex items-center justify-between mb-8 slide-up">
           <div>
             <button
-              onClick={onBack}
+              onClick={() => {
+                if (window.confirm('Все несохранённые изменения будут потеряны. Продолжить?')) {
+                  onBack();
+                }
+              }}
               className="flex items-center gap-2 text-text-secondary hover:text-medical-600 transition-colors mb-2"
             >
               <ArrowLeft className="w-4 h-4" />

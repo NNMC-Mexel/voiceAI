@@ -120,6 +120,7 @@ export function MedicalPDFDocument({ document }: MedicalPDFDocumentProps) {
   const formatDate = (dateStr: string) => {
     if (!dateStr) return '';
     const date = new Date(dateStr);
+    if (isNaN(date.getTime())) return dateStr;
     return date.toLocaleDateString('ru-RU', {
       day: '2-digit',
       month: '2-digit',
@@ -148,7 +149,7 @@ export function MedicalPDFDocument({ document }: MedicalPDFDocumentProps) {
       <Page size="A4" style={styles.page}>
         <View style={styles.header}>
           <Text style={styles.title}>КОНСУЛЬТАЦИЯ</Text>
-          <Text style={styles.subtitle}>Дата составления: {formatDate(new Date().toISOString())}</Text>
+          <Text style={styles.subtitle}>Дата составления: {formatDate(document.patient.complaintDate)}</Text>
         </View>
 
         <View style={styles.patientBlock}>
@@ -196,7 +197,7 @@ export function MedicalPDFDocument({ document }: MedicalPDFDocumentProps) {
           <View key={index} style={styles.section}>
             <Text style={styles.sectionTitle}>{section.title}</Text>
             {section.content.includes('\n') ? (
-              section.content.split('\n').map((line, i) => (
+              section.content.split('\n').filter(line => line.trim()).map((line, i) => (
                 <Text key={i} style={styles.sectionContent}>{line}</Text>
               ))
             ) : (
@@ -214,7 +215,7 @@ export function MedicalPDFDocument({ document }: MedicalPDFDocumentProps) {
 
         <View style={styles.footer} fixed>
           <Text style={styles.footerText}>Документ сформирован автоматически</Text>
-          <Text style={styles.footerText}>{formatDate(new Date().toISOString())}</Text>
+          <Text style={styles.footerText}>{formatDate(document.patient.complaintDate)}</Text>
         </View>
       </Page>
     </Document>
