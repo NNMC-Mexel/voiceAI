@@ -33,6 +33,7 @@ import { fieldLabels, patientFieldLabels, riskAssessmentLabels } from '../types'
 import { CollapsibleSection } from './CollapsibleSection';
 import { TermCorrectionPopup } from './TermCorrectionPopup';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
+import { useWakeWord } from '../hooks/useWakeWord';
 import { WaveformVisualizer } from './WaveformVisualizer';
 import { apiClient } from '../api/client';
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -158,6 +159,7 @@ export function EditingScreen({
   const [isRecommendationsLoading, setIsRecommendationsLoading] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [ttsEnabled, setTtsEnabled] = useState(false);
+  const autoApplyRef = useRef(false);
   const [isTtsSpeaking, setIsTtsSpeaking] = useState(false);
   const [isDietListOpen, setIsDietListOpen] = useState(false);
   const [isExamListOpen, setIsExamListOpen] = useState(false);
@@ -398,17 +400,27 @@ export function EditingScreen({
     }
   };
 
-  const handleAddendumApply = async () => {
-    if (!addendumBlob) return;
+  const handleAddendumApply = async (blobOverride?: Blob) => {
+    const blob = blobOverride || addendumBlob;
+    if (!blob) return;
 
     setIsUpdating(true);
     setAddendumError(null);
 
     try {
+      console.log('[Addendum] Starting processAddendum, blob size:', blob.size);
       const result = await apiClient.processAddendum(
-        addendumBlob,
+        blob,
         document,
-        filenameForBlob(addendumBlob, 'addendum')
+        filenameForBlob(blob, 'addendum')
+      );
+
+      console.log('[Addendum] Result transcription:', result.transcription.text?.substring(0, 100));
+      console.log('[Addendum] Result document fields changed:',
+        Object.keys(result.document).filter(k => {
+          const key = k as keyof typeof result.document;
+          return result.document[key] !== document[key];
+        })
       );
 
       onDocumentChange(result.document);
@@ -418,6 +430,7 @@ export function EditingScreen({
       resetAddendumRecording();
       setIsAddendumOpen(false);
     } catch (err) {
+      console.error('[Addendum] Error:', err);
       setAddendumError(err instanceof Error ? err.message : 'Ошибка дополнения документа');
     } finally {
       setIsUpdating(false);
@@ -555,6 +568,38 @@ export function EditingScreen({
       );
     }
   };
+
+  // Wake word: "Джарвис" starts addendum recording, "Стоп" stops and auto-applies
+  const handleWakeWord = useCallback(() => {
+    if (isUpdating || isAddendumRecording || addendumBlob) return;
+    autoApplyRef.current = true;
+    if (!isAddendumOpen) setIsAddendumOpen(true);
+    setAddendumError(null);
+    void startAddendumRecording().catch((err) => {
+      setAddendumError(err instanceof Error ? err.message : 'Ошибка записи');
+      autoApplyRef.current = false;
+    });
+  }, [isUpdating, isAddendumRecording, addendumBlob, isAddendumOpen, startAddendumRecording]);
+
+  const handleStopWord = useCallback(() => {
+    if (!isAddendumRecording) return;
+    stopAddendumRecording(2); // trim last 2 seconds to cut off "Стоп Нави"
+  }, [isAddendumRecording, stopAddendumRecording]);
+
+  useWakeWord({
+    enabled: true,
+    isRecording: isAddendumRecording,
+    onWakeWord: handleWakeWord,
+    onStopWord: handleStopWord,
+  });
+
+  // Auto-apply addendum after stop word
+  useEffect(() => {
+    if (addendumBlob && autoApplyRef.current) {
+      autoApplyRef.current = false;
+      void handleAddendumApply(addendumBlob);
+    }
+  }, [addendumBlob]);
 
   const handleRewriteField = async (field: RewriteableField, announceInChat = false) => {
     const sourceText = document[field].trim();
@@ -803,13 +848,15 @@ export function EditingScreen({
                     <h2 className="text-lg font-semibold text-medical-900">Если забыли важную информацию — добавьте голосом</h2>
                     <p className="text-text-secondary text-sm mt-1">Дополнение будет расшифровано и встроено в текущий документ.</p>
                   </div>
-                  <button
-                    onClick={() => setIsAddendumOpen((v) => !v)}
-                    className="btn-secondary flex items-center gap-2"
-                  >
-                    <Mic className="w-4 h-4" />
-                    {isAddendumOpen ? 'Скрыть' : 'Записать дополнение'}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setIsAddendumOpen((v) => !v)}
+                      className="btn-secondary flex items-center gap-2"
+                    >
+                      <Mic className="w-4 h-4" />
+                      {isAddendumOpen ? 'Скрыть' : 'Записать дополнение'}
+                    </button>
+                  </div>
                 </div>
 
                 {isAddendumOpen && (
@@ -839,7 +886,7 @@ export function EditingScreen({
                           {isAddendumRecording
                             ? isAddendumPaused
                               ? 'Пауза'
-                              : 'Запись дополнения...'
+                              : 'Запись... Скажите "Стоп Нави" для завершения'
                             : addendumBlob
                             ? 'Запись готова'
                             : 'Короткое дополнение'}
@@ -877,7 +924,7 @@ export function EditingScreen({
                             )}
                           </button>
                           <button
-                            onClick={stopAddendumRecording}
+                            onClick={() => stopAddendumRecording()}
                             className="btn-primary flex items-center gap-2 bg-gradient-to-r from-red-500 to-red-600 shadow-red-500/30 hover:shadow-red-500/40 hover:from-red-600 hover:to-red-700"
                           >
                             <Square className="w-5 h-5" />
@@ -896,7 +943,7 @@ export function EditingScreen({
                             Сбросить
                           </button>
                           <button
-                            onClick={handleAddendumApply}
+                            onClick={() => handleAddendumApply()}
                             className="btn-primary flex items-center gap-2"
                             disabled={isUpdating}
                           >
