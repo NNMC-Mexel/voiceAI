@@ -99,13 +99,110 @@ export class WhisperService {
     }
   }
 
+  /**
+   * Remove Whisper hallucination loops: repeated phrases like
+   * "снижение памяти, снижение памяти, снижение памяти" → "снижение памяти"
+   * Also removes trailing garbage ("Дождь. Дождь. Дождь..." etc.)
+   */
+  private cleanWhisperHallucinations(text: string): string {
+    // 1. Remove repeated phrases (3+ consecutive repetitions of 1-5 word phrases)
+    // e.g. "снижение памяти, снижение памяти, снижение памяти" → "снижение памяти"
+    let cleaned = text.replace(
+      /((?:[а-яёА-ЯЁa-zA-Z]+\s+){1,4}[а-яёА-ЯЁa-zA-Z]+)[,.\s]+(?:\1[,.\s]+){2,}/giu,
+      '$1, '
+    );
+
+    // 2. Remove trailing hallucination garbage — non-medical babble at the end
+    // Matches repeated short phrases at the very end of text
+    cleaned = cleaned.replace(
+      /(?:\s+(?:Дождь|Осторожно|Всё хорошо|Раз|Или|не знаю|Тогда мы|Вы)[.,!?]?\s*){2,}[\s\S]*$/gi,
+      ''
+    );
+
+    // 3. Remove generic trailing garbage: any single word/phrase repeated 3+ times at end
+    cleaned = cleaned.replace(
+      /(\s+[\wа-яёА-ЯЁ]+[.,!?]?)\1{2,}\s*$/giu,
+      ''
+    );
+
+    // 3a. Remove repeated words/phrases separated by periods: "Холостой. Холостой. Холостой." → ""
+    cleaned = cleaned.replace(
+      /(?:\s*([а-яёА-ЯЁ]{3,})\s*[.!?,]\s*){3,}/giu,
+      (match, word) => {
+        // Only remove if the same word repeats 3+ times
+        const w = word.toLowerCase();
+        const repeats = match.toLowerCase().split(w).length - 1;
+        return repeats >= 3 ? '. ' : match;
+      }
+    );
+
+    // 4. Remove truncated words left after loop removal (e.g. "снижение пам" after removing "снижение памяти" repeats)
+    // A truncated fragment is 2-4 chars of a word followed by a non-letter
+    cleaned = cleaned.replace(
+      /,\s+[а-яёА-ЯЁa-zA-Z]{2,4}\s+(?=[А-ЯЁA-Z])/gu,
+      '. '
+    );
+
+    // 5. Remove inline Latin garbage sentences (e.g. "asimilation LSD в rashache, allow corneal damage")
+    // Pattern: sequence containing 3+ Latin words mixed with Cyrillic prepositions, ending at period/comma
+    cleaned = cleaned.replace(
+      /[,.]?\s*(?:[a-zA-Z]{2,}\s+){2,}[а-яёА-ЯЁ]{1,3}\s+(?:[a-zA-Z]{2,}[\s,]*){1,}[^.]*?(?=[.!?]\s+[А-ЯЁ]|$)/gu,
+      '. '
+    );
+
+    // 5b. Remove trailing hallucination with mixed Latin nonsense words
+    // Catches: "Гипотония Fay Riom Induca &i 6 5. Медицинская об 10 loosenhet..."
+    // Heuristic: if we see 3+ non-medical Latin words in a short span near the end, truncate from there
+    const latinGarbageMatch = cleaned.match(
+      /(?:[a-zA-Z]{3,}\s+){2,}[^.]*(?:\.\s*(?:[а-яёА-ЯЁ]+\s+){0,3}(?:[a-zA-Z]{2,}|[&@#$%])\s*){2,}[\s\S]*$/u
+    );
+    if (latinGarbageMatch && latinGarbageMatch.index !== undefined) {
+      // Only truncate if the garbage is in the last 30% of the text
+      if (latinGarbageMatch.index > cleaned.length * 0.7) {
+        cleaned = cleaned.substring(0, latinGarbageMatch.index).trim();
+      }
+    }
+
+    // 5c. Remove trailing number sequence garbage: "1. 2. 3. 4. 5. 6. 7. 8. 9. 10."
+    cleaned = cleaned.replace(
+      /(?:\s*\d+\.\s*){5,}\s*$/gu,
+      ''
+    );
+
+    // 5d. Remove trailing "cycling/following" + number garbage
+    cleaned = cleaned.replace(
+      /\s*(?:cycling|following|next)\s*[.\s]*(?:\d+\.\s*){2,}[\s\S]*$/giu,
+      ''
+    );
+
+    // 6. Remove multilingual garbage: Hebrew, Arabic, CJK, Turkish special chars
+    cleaned = cleaned.replace(
+      /[\u0590-\u05FF\u0600-\u06FF\u3000-\u9FFF\uAC00-\uD7AF]+\S*/gu,
+      ''
+    );
+
+    // 6. Remove trailing multilingual garbage at end of text
+    // Catches patterns like "Ally выпарии", "Master maneuver" at the end
+    cleaned = cleaned.replace(
+      /(?:\s+[A-Z][a-z]+){2,}\s*\.?\s*$/g,
+      ''
+    );
+
+    return cleaned.trim();
+  }
+
   async transcribeFile(audioPath: string, filename: string): Promise<TranscriptionResult> {
     const startTime = Date.now();
 
     const applyDict = (result: TranscriptionResult): TranscriptionResult => {
-      const corrected = applyMedicalDictionary(result.text);
+      // First clean hallucinations, then apply dictionary
+      const dehalucinated = this.cleanWhisperHallucinations(result.text);
+      const corrected = applyMedicalDictionary(dehalucinated);
       if (corrected !== result.text) {
         console.log(`[medical-dictionary] Applied corrections (${DICTIONARY_RULE_COUNT} rules)`);
+      }
+      if (dehalucinated !== result.text) {
+        console.log(`[whisper] Cleaned hallucinations: ${result.text.length} → ${dehalucinated.length} chars`);
       }
       return { ...result, text: corrected };
     };
@@ -189,6 +286,11 @@ export class WhisperService {
           initial_prompt: MEDICAL_INITIAL_PROMPT,
           temperature: 0,
           no_speech_threshold: 0.6,
+          condition_on_previous_text: false,
+          // Hallucination prevention: repetition_penalty suppresses Whisper loops
+          // ("снижение памяти" x30, "Дождь" x10 etc.)
+          repetition_penalty: 1.2,
+          word_timestamps: true,
         }),
         signal: controller.signal,
       });
@@ -278,7 +380,7 @@ start = time.time()
 model = WhisperModel(${modelName}, device="${device}", compute_type="${computeType}", device_index=${deviceIndex})
 load_time = time.time() - start
 print(json.dumps({"event": "whisper_model_loaded", "device": "${device}", "compute_type": "${computeType}", "load_time_sec": load_time}), file=sys.stderr)
-segments, info = model.transcribe(${audioPathLiteral}, language="${this.config.language}", beam_size=${beamSize}, initial_prompt=${JSON.stringify(MEDICAL_INITIAL_PROMPT)}, temperature=0, no_speech_threshold=0.6)
+segments, info = model.transcribe(${audioPathLiteral}, language="${this.config.language}", beam_size=${beamSize}, initial_prompt=${JSON.stringify(MEDICAL_INITIAL_PROMPT)}, temperature=0, no_speech_threshold=0.6, condition_on_previous_text=False, word_timestamps=True, repetition_penalty=1.2)
 text = " ".join([segment.text for segment in segments])
 print(json.dumps({"text": text, "language": info.language}))
 `;
