@@ -59,27 +59,13 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
 
   useEffect(() => { onWakeWordRef.current = onWakeWord; }, [onWakeWord]);
   useEffect(() => { onStopWordRef.current = onStopWord; }, [onStopWord]);
-  const prevRecordingRef = useRef(isRecording);
   useEffect(() => {
-    const wasRecording = prevRecordingRef.current;
-    prevRecordingRef.current = isRecording;
     isRecordingRef.current = isRecording;
     // Reset stopFired when recording starts
     if (isRecording) {
       stopFiredRef.current = false;
     }
-    // When recording ends, force-restart speech recognition after a delay
-    // (MediaRecorder may have taken exclusive mic access, causing recognition to die)
-    if (wasRecording && !isRecording && enabledRef.current) {
-      console.log('[WakeWord] Recording ended, scheduling recognition restart...');
-      setTimeout(() => {
-        if (enabledRef.current && !isRecordingRef.current) {
-          console.log('[WakeWord] Restarting recognition after recording ended');
-          createAndStart();
-        }
-      }, 1000);
-    }
-  }, [isRecording, createAndStart]);
+  }, [isRecording]);
   useEffect(() => { enabledRef.current = enabled; }, [enabled]);
 
   const containsStopPhrase = (text: string): boolean => {
@@ -196,6 +182,23 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
     }
     setIsListening(false);
   }, []);
+
+  // When recording ends, force-restart speech recognition after a delay
+  // (MediaRecorder may have taken exclusive mic access, causing recognition to die)
+  const prevRecordingRef = useRef(isRecording);
+  useEffect(() => {
+    const wasRecording = prevRecordingRef.current;
+    prevRecordingRef.current = isRecording;
+    if (wasRecording && !isRecording && enabledRef.current) {
+      console.log('[WakeWord] Recording ended, scheduling recognition restart...');
+      setTimeout(() => {
+        if (enabledRef.current && !isRecordingRef.current) {
+          console.log('[WakeWord] Restarting recognition after recording ended');
+          createAndStart();
+        }
+      }, 1000);
+    }
+  }, [isRecording, createAndStart]);
 
   useEffect(() => {
     if (enabled && isSupported) {
