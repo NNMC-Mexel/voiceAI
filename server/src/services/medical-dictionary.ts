@@ -807,6 +807,105 @@ const PHONETIC_CORRECTIONS: ReplacementRule[] = [
   regexRule(/менорагии/giu, 'меноррагии'),
   regexRule(/менорагия/giu, 'меноррагия'),
   regexRule(/менорагий/giu, 'меноррагий'),
+
+  // "Ростозность/Постозность" → "Пастозность" (Whisper искажение)
+  regexRule(/[рп]остозност/giu, 'пастозност'),
+
+  // "Матче-спускание/Матчи спуска" → "Мочеиспускание" (Whisper искажение)
+  regexRule(/матч[еи][-\s]*спуска\S*/giu, 'мочеиспускание'),
+
+  // "штутного столба" → "рт.ст." (Whisper: "мм штутного столба")
+  regexRule(/штутного\s+столба/giu, 'рт.ст.'),
+
+  // "кожаная покрова" → "кожные покровы"
+  regexRule(/кожаная\s+покров\S*/giu, 'кожные покровы'),
+
+  // "сиррадиация" → "с иррадиацией"
+  regexRule(/сиррадиаци\S*/giu, (m) => m.startsWith('С') ? 'С иррадиацией' : 'с иррадиацией'),
+
+  // "Цепей нет" → "Сыпей нет"
+  regexRule(/цепей\s+нет/giu, 'сыпей нет'),
+
+  // "паниха" → "по NYHA" (Whisper: "паниха" вместо "по NYHA")
+  regexRule(/паниха/giu, 'по NYHA'),
+
+  // "Куатро-Асура" → "Quadra Assura" (Whisper транслитерация)
+  regexRule(/куатро[-\s]*асура/giu, 'Quadra Assura'),
+
+  // "Митроник Компи МРАЙ" → "Medtronic Compi MRI"
+  regexRule(/митроник\S*\s+компи\s+мр\S*/giu, 'Medtronic Compi MRI'),
+
+  // "Cardioverter" → "кардиовертер" (нормализация латиницы)
+  regexRule(/Cardioverter\s*[-–]?\s*Defibrillator/giu, 'кардиовертер-дефибриллятор'),
+
+  // "докардиальной" → "эндокардиальной"
+  regexRule(/докардиальн/giu, 'эндокардиальн'),
+  // "декардиальной" → "эндокардиальной"
+  regexRule(/декардиальн/giu, 'эндокардиальн'),
+
+  // "Диагнозильная" → "Дилатационная" (Whisper mismatch)
+  regexRule(/диагнозильн\S+\s+кардиомиопати/giu, 'дилатационная кардиомиопати'),
+
+  // "энэнэндокардиальной" → "эндокардиальной" (Whisper stutter)
+  regexRule(/эн[эе]н[эе]ндокардиальн/giu, 'эндокардиальн'),
+
+  // "Метроникомпиэмэрай" → "Medtronic Compi MRI" (Whisper слияние)
+  regexRule(/метроникомпиэмэр\S*/giu, 'Medtronic Compi MRI'),
+
+  // "кардиорезинхронизирующего" → "кардиоресинхронизирующего" (Whisper: з вместо с)
+  regexRule(/кардиорезинхрониз/giu, 'кардиоресинхрониз'),
+
+  // "посттепенным" → "постепенным" (Whisper typo)
+  regexRule(/посттепенн/giu, 'постепенн'),
+
+  // "вестомдилатационная" → "верифицирован диагноз дилатационная" (Whisper fusion)
+  regexRule(/вестом\s*дилатационн/giu, 'верифицирован диагноз «дилатационн'),
+
+  // "Mitronic" → "Medtronic" (Whisper mishearing brand name)
+  regexRule(/Mitronic/gi, 'Medtronic'),
+
+  // "МИТРОНИ-КОМПИ-МРАЙ" / "Митрони компи МРАЙ" → "Medtronic Compi MRI"
+  regexRule(/митрони[-\s]*компи[-\s]*мрай/giu, 'Medtronic Compi MRI'),
+
+  // "следствие под crimes" — Whisper hallucination (garbled "от 25.02.2016г.")
+  regexRule(/следствие\s+под\s+crimes/giu, 'от'),
+
+  // "Compia" → "Compi" (Whisper extra letter)
+  regexRule(/Compia\b/gi, 'Compi'),
+
+  // "Ксоратин" → "Ксарелто" (Whisper mishearing drug name)
+  regexRule(/Ксоратин\S*/giu, 'Ксарелто'),
+
+  // "Релта" → "Ксарелто" (Whisper truncation of drug name)
+  regexRule(/(?<!\S)Релта\b/giu, 'Ксарелто'),
+
+  // "джардинс" → "Джардинс" (capitalize brand name)
+  regexRule(/(?<!\S)джардинс/giu, 'Джардинс'),
+
+  // "Со сниженная ФВ" → "Сниженная ФВ" (garbled prefix)
+  regexRule(/Со\s+сниженная\s+ФВ/giu, 'Сниженная ФВ'),
+
+  // "энэндокардиальной" → "эндокардиальной" (Whisper stutter variant)
+  regexRule(/энэндокардиальн/giu, 'эндокардиальн'),
+
+  // "бикардиальной" → "эндокардиальной" (Whisper mishearing)
+  regexRule(/бикардиальн/giu, 'эндокардиальн'),
+
+  // "Бесстатичная" → "нестатическая" or remove — Whisper garble of "аортальная"
+  // Actually "Бесстатичная аортальная" → just "аортальная"
+  regexRule(/бесстатичн\S*\s+аортальн/giu, 'аортальная'),
+
+  // "тахи-бродикардитический" → "тахи-брадикардитический"
+  regexRule(/бродикардитическ/giu, 'брадикардитическ'),
+
+  // "кардиевертер" → "кардиовертер"
+  regexRule(/кардиевертер/giu, 'кардиовертер'),
+
+  // "аорто-склероз" → "атеросклероз аорты"
+  regexRule(/аорто[-\s]*склероз/giu, 'атеросклероз аорты'),
+
+  // "ХС." garbage at end of sentences (Whisper hallucination)
+  regexRule(/\s+ХС\.\s*(?:ХС\.?\s*)*/gu, ' '),
 ];
 
 // ─── 5a. Форматирование жизненных показателей ────────────────────────────────

@@ -296,6 +296,9 @@ Return JSON patch only.`;
     // Спасаем диагноз если LLM его обрезал
     this.rescueDiagnosisFromRawText(enriched, rawText);
 
+    // Спасаем рекомендации из исходного текста если LLM их потерял
+    this.rescueRecommendationsFromRawText(enriched, rawText);
+
     return enriched;
   }
 
@@ -742,11 +745,17 @@ JSON:`;
     // Пост-обработка: подстановка шаблона диеты по номеру
     this.expandDietTemplate(result);
 
+    // Пост-обработка: чистка diagnosis от нерелевантных данных (анамнез жизни, обследования)
+    this.cleanDiagnosis(result);
+
     // Пост-обработка: дедупликация внутри полей (LLM иногда дублирует весь блок)
     this.deduplicateFields(result);
 
     // Пост-обработка: чистка diet от данных рекомендаций
     this.cleanDietField(result);
+
+    // Пост-обработка: чистка recommendations от мусора Whisper
+    this.cleanRecommendations(result);
 
     // Пост-обработка: повторное применение медицинского словаря
     // LLM может отменить коррекции словаря при структурировании текста
@@ -756,10 +765,197 @@ JSON:`;
   }
 
   /**
+   * Чистит recommendations от мусора Whisper (non-medical hallucinations).
+   */
+  private cleanRecommendations(doc: MedicalDocument): void {
+    const reco = doc.recommendations;
+    if (!reco || reco.length < 30) return;
+
+    // Split by numbered items or sentences
+    const items = reco.split(/(?=\d+\.\s)|(?<=[.!?])\s+/).filter(s => s.trim());
+    const clean: string[] = [];
+
+    // Medical recommendation keywords
+    const medicalKeywords = /(?:таблетк[аи]|капсул|мг\b|раз\s+в\s+день|внутрь|длительно|постоянно|контроль|ингибитор|назначен|неназначен|диет[аы]|стол\s+№?\d|ограничен|рекомендован|направлен|обследован|консультаци|анализ|ЭКГ|ЭХО|МРТ|КТ|рентген|осмотр|повторн|бисопролол|конкор|форсига|джардинс|верошпирон|эналаприл|лизиноприл|дигоксин|ксарелто|варфарин|курс\b|терапи|лечени|приём|принимать|памятк[аи]\s+ВТЭ)/iu;
+    // Garbage patterns
+    const garbageKeywords = /(?:видео\s+в\s+компьютер|тема\s+от\s+\d|объёмы\s+карт|сфера|фоти|превраду|настройки\s+наиболее|[&@#$%])/iu;
+
+    for (const item of items) {
+      const trimmed = item.trim();
+      if (!trimmed || trimmed.length < 3) continue;
+
+      // Remove obvious garbage
+      if (garbageKeywords.test(trimmed)) {
+        console.log(`[postprocess] Removed garbage from recommendations: "${trimmed.substring(0, 50)}..."`);
+        continue;
+      }
+
+      // Remove bare "Рекомендации" header
+      if (/^рекомендации\.?\s*$/iu.test(trimmed)) continue;
+
+      // Keep if medical or numbered recommendation
+      if (medicalKeywords.test(trimmed) || /^\d+\.\s/.test(trimmed)) {
+        clean.push(trimmed);
+      } else if (trimmed.length > 100) {
+        // Long non-medical sentence — likely garbage
+        console.log(`[postprocess] Removed non-medical sentence from recommendations: "${trimmed.substring(0, 50)}..."`);
+      } else {
+        clean.push(trimmed); // Keep short ambiguous items
+      }
+    }
+
+    if (clean.length < items.length) {
+      doc.recommendations = clean.join('\n').trim();
+      console.log(`[postprocess] Cleaned recommendations: ${items.length} → ${clean.length} items`);
+    }
+  }
+
+  /**
    * Повторно применяет медицинский словарь ко всем текстовым полям документа.
    * LLM (Qwen3-8B) часто отменяет коррекции словаря при структурировании,
    * поэтому нужно применить их снова после LLM.
    */
+  /**
+   * Чистит diagnosis от данных, которые не являются диагнозом:
+   * - анамнез жизни (перенесённые заболевания, операции)
+   * - данные обследований (ЭХО-КГ, ФВ и т.д.)
+   * - текущая терапия (амбулаторно принимает...)
+   * Перемещает их в правильные поля.
+   */
+  private cleanDiagnosis(doc: MedicalDocument): void {
+    const diag = doc.diagnosis;
+    if (!diag || diag.length < 200) return;
+
+    // First: split off "Рекомендации ..." block if embedded in diagnosis
+    const recoBlockMatch = diag.match(/\s*Рекомендации\s+([\s\S]*)$/iu);
+    let diagText = diag;
+    if (recoBlockMatch) {
+      const recoBlock = recoBlockMatch[1].trim();
+      diagText = diag.substring(0, recoBlockMatch.index!).trim();
+      console.log(`[postprocess] Extracted "Рекомендации" block from diagnosis (${recoBlock.length} chars)`);
+
+      // Parse recommendations block: split diet vs medication/other recs
+      const dietParts: string[] = [];
+      const recoParts: string[] = [];
+
+      // Split by numbered items or sentence boundaries
+      const recoItems = recoBlock.split(/(?=\d+\.\s)/).filter(s => s.trim());
+      const dietKeywords = /(?:диет[аы]|стол\s*(?:№?\s*)?\d+|гипохолестерин|ограничен\S*\s+(?:соли|жидкости)|питание)/iu;
+      const nonDietRecoKeywords = /(?:таблетк[аи]|капсул|мг\s+по|раз\s+в\s+день|внутрь|длительно|постоянно|контроль\s+(?:АД|ЧСС|пульса)|памятк[аи]\s+ВТЭ|ингибитор|назначен|неназначен|титров)/iu;
+
+      for (const item of recoItems) {
+        const trimmed = item.trim();
+        if (!trimmed) continue;
+        if (dietKeywords.test(trimmed) && !nonDietRecoKeywords.test(trimmed)) {
+          dietParts.push(trimmed);
+        } else {
+          recoParts.push(trimmed);
+        }
+      }
+
+      // Append diet parts to doc.diet
+      if (dietParts.length > 0) {
+        const dietText = dietParts.join(' ').trim();
+        const existingDiet = (doc.diet || '').trim();
+        if (!existingDiet || !existingDiet.includes(dietText.substring(0, Math.min(30, dietText.length)))) {
+          doc.diet = existingDiet ? `${existingDiet} ${dietText}`.trim() : dietText;
+        }
+        console.log(`[postprocess] Moved diet from diagnosis recommendations → diet (${dietText.length} chars)`);
+      }
+
+      // Append reco parts to doc.recommendations
+      if (recoParts.length > 0) {
+        const recoText = recoParts.join('\n').trim();
+        const existingReco = (doc.recommendations || '').trim();
+        // Replace empty/garbage recommendations
+        if (!existingReco || existingReco.length < 10) {
+          doc.recommendations = recoText;
+        } else if (!existingReco.includes(recoText.substring(0, Math.min(30, recoText.length)))) {
+          doc.recommendations = `${existingReco}\n${recoText}`.trim();
+        }
+        console.log(`[postprocess] Moved recommendations from diagnosis → recommendations (${recoText.length} chars)`);
+      }
+    }
+
+    const sentences = diagText.split(/(?<=[.!?])\s+/).filter(s => s.trim());
+    if (sentences.length < 3) {
+      doc.diagnosis = diagText;
+      return;
+    }
+
+    // Patterns that should NOT be in diagnosis (checked FIRST — higher priority)
+    const anamnesisLifeKeywords = /(?:перенесённ\S*\s+заболевани|перенесенн\S*\s+заболевани|туберкулез|вирусн\S+\s+гепатит|ВИЧ\s+отрицает|болезнь\s+Боткина|гемотрансфузи|наследственност|операци\S*\s+и\s+травм|паховой\s+грыж|вредн\S+\s+привычк|аллергол\S*\s+анамнез|отрицает$)/iu;
+    const currentTherapyKeywords = /(?:амбулаторно\s+принимает|таблетка\s+\S+\s+\d+\s*мг)/iu;
+    const examDataKeywords = /(?:по\s+данным\s+ЭХО|по\s+данным\s+ЭКГ|по\s+результатам|выполнена\s+КАГ|терапию\s+по\s+схеме|обратился\s+в?\s*связи|осмотрен\s+аритмолог|направлен\s+к?\s*кардиолог|ВП\s+\d+%|режим\s+стимуляции|проведена\s+проверка)/iu;
+    // Patterns that SHOULD be in diagnosis
+    const diagnosisKeywords = /(?:кардиомиопати|фибрилляци\S+\s+предсерд|тахи.?бради|состояние\s+после|имплантаци|истощение\s+батаре|кардиоресинхронизирующ|кардиовертер|атеросклероз|недостаточност|гипертензи|гипертони|стенокардия|порок\s+сердца|ХСН|ФК|NYHA|EHRA|ХВН|варикозн|стадия|функциональный\s+класс|степен[ьи]\s+риска|риск\s+сердечн)/iu;
+
+    const diagParts: string[] = [];
+    const anamnesisParts: string[] = [];
+    const clinicalParts: string[] = [];
+    const conclusionParts: string[] = [];
+
+    let inNonDiagBlock = false;
+    for (const sent of sentences) {
+      // Check non-diagnosis patterns FIRST (they take priority)
+      if (anamnesisLifeKeywords.test(sent)) {
+        clinicalParts.push(sent);
+        inNonDiagBlock = true;
+      } else if (currentTherapyKeywords.test(sent)) {
+        conclusionParts.push(sent);
+        inNonDiagBlock = true;
+      } else if (examDataKeywords.test(sent)) {
+        anamnesisParts.push(sent);
+        inNonDiagBlock = true;
+      } else if (diagnosisKeywords.test(sent)) {
+        diagParts.push(sent);
+        inNonDiagBlock = false;
+      } else if (inNonDiagBlock) {
+        // Continue accumulating non-diagnosis block
+        if (anamnesisLifeKeywords.test(sent) || sent.match(/отрицает/iu)) {
+          clinicalParts.push(sent);
+        } else {
+          anamnesisParts.push(sent);
+        }
+      } else {
+        // Default: keep in diagnosis
+        diagParts.push(sent);
+      }
+    }
+
+    const totalMoved = anamnesisParts.length + clinicalParts.length + conclusionParts.length;
+    if (totalMoved === 0 && !recoBlockMatch) return;
+
+    // Move to correct fields
+    if (anamnesisParts.length > 0) {
+      const moved = anamnesisParts.join(' ');
+      const existing = doc.anamnesis.trim();
+      if (!existing.includes(moved.substring(0, Math.min(50, moved.length)))) {
+        doc.anamnesis = existing ? `${existing} ${moved}`.trim() : moved;
+      }
+      console.log(`[postprocess] Moved ${anamnesisParts.length} sentences from diagnosis → anamnesis`);
+    }
+    if (clinicalParts.length > 0) {
+      const moved = clinicalParts.join(' ');
+      const existing = doc.clinicalCourse.trim();
+      if (!existing.includes(moved.substring(0, Math.min(50, moved.length)))) {
+        doc.clinicalCourse = existing ? `${existing} ${moved}`.trim() : moved;
+      }
+      console.log(`[postprocess] Moved ${clinicalParts.length} sentences from diagnosis → clinicalCourse`);
+    }
+    if (conclusionParts.length > 0) {
+      const moved = conclusionParts.join(' ');
+      const existing = doc.conclusion.trim();
+      if (!existing.includes(moved.substring(0, Math.min(50, moved.length)))) {
+        doc.conclusion = existing ? `${existing} ${moved}`.trim() : moved;
+      }
+      console.log(`[postprocess] Moved ${conclusionParts.length} sentences from diagnosis → conclusion`);
+    }
+
+    doc.diagnosis = diagParts.join(' ').trim();
+    console.log(`[postprocess] Cleaned diagnosis: ${diag.length} → ${doc.diagnosis.length} chars (moved ${totalMoved} sentences)`);
+  }
+
   /**
    * Удаляет дублирование внутри полей.
    * LLM (Qwen3-8B) иногда дублирует весь блок текста или отдельные предложения.
@@ -788,7 +984,7 @@ JSON:`;
       const unique: string[] = [];
       for (const sent of sentences) {
         const normalized = sent.trim().toLowerCase().replace(/\s+/g, ' ');
-        if (normalized.length > 15 && seen.has(normalized)) {
+        if (normalized.length > 3 && seen.has(normalized)) {
           console.log(`[postprocess] Removed duplicate sentence in ${field}: "${sent.substring(0, 40)}..."`);
           continue;
         }
@@ -833,7 +1029,7 @@ JSON:`;
     const dietLines: string[] = [];
 
     // Keywords that BELONG in diet
-    const dietKeywords = /(?:диет[аы]|стол\s*(?:№?\s*)?\d+|гипохолестерин|ограничен\S*\s+(?:соли|жидкости|жиров)|исключить|калорийност|питание|рацион|продукт|овощи|фрукт|молочн|каш[иу]|хлеб|мясо|рыб[аыу]|жареное|солёное|копчён|номер\s+\d+)/iu;
+    const dietKeywords = /(?:диет[аы]|стол\s*(?:№?\s*)?\d+|гипохолестерин|ограничен\S*\s+(?:соли|жидкости|жиров)|исключить|калорийност|питание|рацион|продукт|овощи|фрукт|молочн|каш[иу]|хлеб|мясо|рыб[аыу]|жареное|солёное|копчён|номер\s+\d+|литр[аов]?\b|памятк\S*\s+на\s+руки|на\s+руки)/iu;
 
     // Keywords that DON'T belong in diet
     const nonDietKeywords = /(?:таблетк[аи]|капсул[аы]|инъекци|мг\s+по|раз\s+в\s+день|внутрь|длительно|постоянно|контроль\s+(?:АД|ЧСС|пульса)|памятк[аи]\s+ВТЭ|ингибитор|назначен|неназначен|титров)/iu;
@@ -844,6 +1040,9 @@ JSON:`;
 
       if (nonDietKeywords.test(cleaned) && !dietKeywords.test(cleaned)) {
         console.log(`[postprocess] Removed non-diet content from diet: "${cleaned.substring(0, 50)}..."`);
+      } else if (!dietKeywords.test(cleaned) && cleaned.length > 5) {
+        // No diet keywords at all — likely Whisper garbage
+        console.log(`[postprocess] Removed non-diet garbage from diet: "${cleaned.substring(0, 50)}..."`);
       } else {
         dietLines.push(line);
       }
@@ -856,15 +1055,22 @@ JSON:`;
     // Remove "cycling/following" + garbage
     doc.diet = doc.diet.replace(/\s*(?:cycling|following|next)\s*[.\s]*(?:\d+\.\s*)*.*$/giu, '').trim();
 
-    // Remove duplicate diet descriptions
+    // Remove duplicate diet descriptions (exact and substring-level)
     if (doc.diet) {
       const parts = doc.diet.split(/[.\n]+/).filter(p => p.trim());
-      const seen = new Set<string>();
       const unique: string[] = [];
       for (const part of parts) {
         const norm = part.trim().toLowerCase().replace(/\s+/g, ' ');
-        if (norm.length > 5 && seen.has(norm)) continue;
-        seen.add(norm);
+        if (norm.length < 3) continue;
+        // Check if this part is already contained in an existing part (substring dedup)
+        const isDup = unique.some(existing => {
+          const existNorm = existing.trim().toLowerCase().replace(/\s+/g, ' ');
+          return existNorm === norm || existNorm.includes(norm) || norm.includes(existNorm);
+        });
+        if (isDup) {
+          console.log(`[postprocess] Removed duplicate diet part: "${part.trim().substring(0, 40)}..."`);
+          continue;
+        }
         unique.push(part.trim());
       }
       doc.diet = unique.join('. ').trim();
@@ -1091,7 +1297,7 @@ JSON:`;
           if (target === field) continue;
 
           // Ищем маркер: в начале строки ИЛИ после точки/двоеточия внутри текста
-          const searchPattern = new RegExp(`(?:^|\\n|[.!?]\\s+)\\s*(${pattern.source})`, 'iu');
+          const searchPattern = new RegExp(`(?:^|\\n|[.!?,;]\\s+)\\s*(${pattern.source})`, 'iu');
           const searchMatch = text.match(searchPattern);
           if (!searchMatch) continue;
 
@@ -1254,10 +1460,10 @@ JSON:`;
     const sentences = allergy.split(/(?<=[.!?])\s+/).filter(s => s.trim());
 
     // Keywords that BELONG in allergyHistory
-    const allergyKeywords = /аллерг|непереносим|отрицает|отмечает\s+реакци|крапивниц|отёк\s+квинке|анафилак|лекарствен\S*\s+(?:аллерг|непереносим)|медикамент/iu;
+    const allergyKeywords = /аллерг|непереносим|(?:на\s+)?медикамент\S*\s+отрицает|отмечает\s+реакци|крапивниц|отёк\s+квинке|анафилак|лекарствен\S*\s+(?:аллерг|непереносим)/iu;
 
     // Keywords that DON'T belong in allergyHistory
-    const objectiveKeywords = /(?:общее\s+состояни|обусловлено\s+сердеч|кожные\s+покров|сознание\s+ясное|послеоперацион|варикозн|сыпей|вес\s+\d|рост\s+\d|ИМТ\s+\d|пастозность|щитовидная\s+желез|дыхание|аускультативно|хрипов|тоны\s+сердца|систолическ|шум\s+на|иррадиаци|АД\s+[-–—]?\s*\d|ЧСС\s+[-–—]?\s*\d|мочеиспускани|почки|стул\s+регулярн|пульс\s+\d|SpO₂|живот\s+мягк|печень\s+не|не\s+увеличен|ритмичн|степень\s+тяжести|безболезненн|справа|слева|скорость\s+\d+\s+балл)/iu;
+    const objectiveKeywords = /(?:общее\s+состояни|обусловлено\s+сердеч|кожные\s+покров|сознание\s+ясное|послеоперацион|варикозн|сыпей|вес\s+\d|рост\s+\d|ИМТ\s+\d|пастозность|[рп]остозность|щитовидная\s+желез|дыхание|аускультативно|хрипов|тоны\s+сердца|систолическ|шум\s+на|иррадиаци|АД\s+[-–—]?\s*\d|ЧСС\s*[-–—.]?\s*\d|\d+\s*уд\/мин|\d+\/\d+\s*мм\s*рт|мм\s+рт\.?\s*ст|мочеиспускани|почки|стол\s+регулярн|стул\s+регулярн|пульс\s+\d|SpO₂|живот\s+мягк|печень\s+не|не\s+увеличен|ритмичн|степен[ьи]\s+тяжести|безболезненн|справа|слева|скорость\s+\d+\s+балл)/iu;
     const gynecoKeywords = /(?:беременност|родов?\b|аборт|менструаци|менопауз|перименопауз|миом[аы]\s+матки|гинекологическ)/iu;
     const lifeHistoryKeywords = /(?:перенесённ|аппендэктоми|холецистэктоми|туберкулёз|гемотрансфузи|наследственност|операци[ия]\s+и\s+травм)/iu;
     const scaleKeywords = /(?:шкала\s+для\s+оценки|CHA₂DS₂|CHADS|HAS-BLED|баллов?\s+по)/iu;
@@ -1266,15 +1472,18 @@ JSON:`;
     const objectiveParts: string[] = [];
     const clinicalParts: string[] = [];
 
+    // Keywords for life history that end up in allergyHistory
+    const lifeHistoryInAllergyKeywords = /(?:туберкулез|вирусн\S+\s+гепатит|ВИЧ|болезнь\s+Боткина|гемотрансфузи|наследственност|сердечно-сосудист)/iu;
+
     for (const sent of sentences) {
       if (allergyKeywords.test(sent)) {
         allergyParts.push(sent);
       } else if (objectiveKeywords.test(sent) || scaleKeywords.test(sent)) {
         objectiveParts.push(sent);
-      } else if (gynecoKeywords.test(sent) || lifeHistoryKeywords.test(sent)) {
+      } else if (gynecoKeywords.test(sent) || lifeHistoryKeywords.test(sent) || lifeHistoryInAllergyKeywords.test(sent)) {
         clinicalParts.push(sent);
-      } else if (allergyParts.length > 0 && sent.length < 50) {
-        // Short continuation of allergy text
+      } else if (allergyParts.length > 0 && sent.length < 50 && !(/\d+\/\d+|мм\s*рт|уд\/мин|мг|кг|см\b|стол\s+регулярн/iu.test(sent))) {
+        // Short continuation of allergy text (but not measurement data)
         allergyParts.push(sent);
       } else {
         // Default: if we already have allergy text, the rest is likely misplaced
@@ -1304,7 +1513,15 @@ JSON:`;
       console.log(`[postprocess] Moved ${clinicalParts.length} sentences from allergyHistory → clinicalCourse`);
     }
 
-    doc.allergyHistory = allergyParts.join(' ').trim() || 'Не отягощен.';
+    // Dedup allergy sentences
+    const seenAllergy = new Set<string>();
+    const uniqueAllergy = allergyParts.filter(s => {
+      const norm = s.trim().toLowerCase().replace(/\s+/g, ' ');
+      if (seenAllergy.has(norm)) return false;
+      seenAllergy.add(norm);
+      return true;
+    });
+    doc.allergyHistory = uniqueAllergy.join(' ').trim() || 'Не отягощен.';
   }
 
   /**
@@ -1412,6 +1629,44 @@ JSON:`;
     if (rawDiag.length > 20 && (currentDiag.length < 10 || rawDiag.length > currentDiag.length * 1.3)) {
       console.log(`[postprocess] Diagnosis rescued from raw text: LLM had ${currentDiag.length} chars, raw has ${rawDiag.length} chars`);
       doc.diagnosis = rawDiag;
+    }
+  }
+
+  /**
+   * Спасает рекомендации из исходного текста если LLM их потерял.
+   */
+  private rescueRecommendationsFromRawText(doc: MedicalDocument, rawText: string): void {
+    // Only rescue if recommendations are empty or garbage
+    if (doc.recommendations && doc.recommendations.trim().length > 10) return;
+
+    // Look for "Рекомендации" block in raw text
+    const recoMatch = rawText.match(
+      /рекомендаци\S*\s*[:.]?\s*([\s\S]*?)(?=(?:[\n.])\s*(?:диагноз|объективн|анамнез|жалоб|аллерг|данные\s+объективного|$))/iu
+    );
+
+    if (recoMatch && recoMatch[1].trim().length > 20) {
+      const rawReco = recoMatch[1].trim()
+        .replace(/\n{2,}/g, '\n')
+        .replace(/\s{2,}/g, ' ');
+      doc.recommendations = rawReco;
+      console.log(`[postprocess] Recommendations rescued from raw text: ${rawReco.length} chars`);
+      return;
+    }
+
+    // Alternative: look for numbered medication items with "мг по 1 таблетке" pattern
+    const medItems: string[] = [];
+    const medPattern = /\d+\.\s*(?:таблетк[аи]\s+\S+.*?(?:длительно|постоянно|в\s+сутки|мг\s+в\s+сутки)[.!,]?)/giu;
+    let match;
+    while ((match = medPattern.exec(rawText)) !== null) {
+      medItems.push(match[0].trim());
+    }
+
+    if (medItems.length > 0) {
+      const existing = doc.recommendations.trim();
+      if (!existing || existing.length < 10) {
+        doc.recommendations = medItems.join('\n');
+        console.log(`[postprocess] Recommendations rescued (${medItems.length} med items) from raw text`);
+      }
     }
   }
 

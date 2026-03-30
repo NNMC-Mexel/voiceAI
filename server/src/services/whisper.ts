@@ -9,6 +9,8 @@ interface WhisperServerResponse {
   text: string;
   language: string;
   elapsed: number;
+  chunks?: number;
+  chunk_details?: Array<{ chunk: number; duration: number; chars: number; elapsed: number }>;
 }
 
 const MEDICAL_INITIAL_PROMPT = `Консультация кардиолога. Риск падения по шкале Морзе. Оценка боли. ` +
@@ -136,6 +138,12 @@ export class WhisperService {
       }
     );
 
+    // 3b. Remove Whisper "subtitle" hallucinations that appear at chunk boundaries
+    cleaned = cleaned.replace(
+      /\s*(?:Субтитры\s+создавал?\s+\S+|Продолжение\s+следует\.{0,3}|Спасибо\s+за\s+(?:просмотр|внимание)\.?|Подписывайтесь\s+на\s+канал\.?)\s*/giu,
+      ' '
+    );
+
     // 4. Remove truncated words left after loop removal (e.g. "снижение пам" after removing "снижение памяти" repeats)
     // A truncated fragment is 2-4 chars of a word followed by a non-letter
     cleaned = cleaned.replace(
@@ -143,11 +151,18 @@ export class WhisperService {
       '. '
     );
 
-    // 5. Remove inline Latin garbage sentences (e.g. "asimilation LSD в rashache, allow corneal damage")
-    // Pattern: sequence containing 3+ Latin words mixed with Cyrillic prepositions, ending at period/comma
+    // 5. Remove inline Latin garbage sentences — any sentence with 2+ non-medical Latin words
+    const medicalLatin = /^(?:CRTD?|CRT-D|MRI|NYHA|EHRA|VVIR|DDDR|SpO2|ProBNP|Medtronic|Quadra|Assura|Brava|Compi|EssentioDR|Sphera|FV|HIV|HbA1c|NT|BNP|COPD|COVID|TAVI|PCI|AV|ECG|CT|BMI|GFR|INR|LMWH|UFH|ACE|ARB|SGLT2|DPP-4|GLP-1|TSH|T[34]|CRP|ESR|WBC|RBC|PLT|Hb|Ht|MCH|MCV|MCHC|ALP|ALT|AST|GGT|LDH|CPK|CK|Fe|TIBC|HBsAg|Anti|IgG|IgM|EF|LVEF|RVSP|LA|LV|RV|RA|IVS|LVPW|CO|CI|SV|EDV|ESV|EDD|ESD)$/i;
     cleaned = cleaned.replace(
-      /[,.]?\s*(?:[a-zA-Z]{2,}\s+){2,}[а-яёА-ЯЁ]{1,3}\s+(?:[a-zA-Z]{2,}[\s,]*){1,}[^.]*?(?=[.!?]\s+[А-ЯЁ]|$)/gu,
-      '. '
+      /(?<=[.!?]\s|^)[^.!?]*?(?=[.!?]|$)/gu,
+      (sentence) => {
+        const latinWords = sentence.match(/\b[a-zA-Z]{3,}\b/g) || [];
+        const nonMedical = latinWords.filter(w => !medicalLatin.test(w));
+        if (nonMedical.length >= 2 && nonMedical.length > latinWords.length * 0.4) {
+          return '';
+        }
+        return sentence;
+      }
     );
 
     // 5b. Remove trailing hallucination with mixed Latin nonsense words
@@ -268,8 +283,8 @@ export class WhisperService {
 
   private async transcribeWithServer(audioPath: string): Promise<Omit<TranscriptionResult, 'duration'>> {
     const controller = new AbortController();
-    // 5 минут — достаточно даже для длинных записей (до 30 мин аудио)
-    const timeout = setTimeout(() => controller.abort(), 300_000);
+    // 10 минут — с chunking каждый кусок транскрибируется отдельно
+    const timeout = setTimeout(() => controller.abort(), 600_000);
 
     try {
       // Читаем файл и кодируем в base64 — это позволяет вызвать Whisper-сервер
@@ -301,6 +316,14 @@ export class WhisperService {
       }
 
       const data = (await response.json()) as WhisperServerResponse;
+      if (data.chunks && data.chunks > 1) {
+        console.log(`[whisper] Chunked transcription: ${data.chunks} chunks, ${data.elapsed?.toFixed(1)}s total`);
+        if (data.chunk_details) {
+          for (const c of data.chunk_details) {
+            console.log(`  chunk ${c.chunk}: ${c.duration}s → ${c.chars} chars (${c.elapsed}s)`);
+          }
+        }
+      }
       return { text: data.text, language: data.language };
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
