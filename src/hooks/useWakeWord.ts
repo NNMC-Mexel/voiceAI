@@ -59,13 +59,27 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
 
   useEffect(() => { onWakeWordRef.current = onWakeWord; }, [onWakeWord]);
   useEffect(() => { onStopWordRef.current = onStopWord; }, [onStopWord]);
+  const prevRecordingRef = useRef(isRecording);
   useEffect(() => {
+    const wasRecording = prevRecordingRef.current;
+    prevRecordingRef.current = isRecording;
     isRecordingRef.current = isRecording;
     // Reset stopFired when recording starts
     if (isRecording) {
       stopFiredRef.current = false;
     }
-  }, [isRecording]);
+    // When recording ends, force-restart speech recognition after a delay
+    // (MediaRecorder may have taken exclusive mic access, causing recognition to die)
+    if (wasRecording && !isRecording && enabledRef.current) {
+      console.log('[WakeWord] Recording ended, scheduling recognition restart...');
+      setTimeout(() => {
+        if (enabledRef.current && !isRecordingRef.current) {
+          console.log('[WakeWord] Restarting recognition after recording ended');
+          createAndStart();
+        }
+      }, 1000);
+    }
+  }, [isRecording, createAndStart]);
   useEffect(() => { enabledRef.current = enabled; }, [enabled]);
 
   const containsStopPhrase = (text: string): boolean => {
@@ -191,6 +205,20 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
     }
     return () => stop();
   }, [enabled, isSupported, createAndStart, stop]);
+
+  // Watchdog: if enabled but not listening, force restart every 5 seconds
+  const isListeningRef = useRef(isListening);
+  useEffect(() => { isListeningRef.current = isListening; }, [isListening]);
+  useEffect(() => {
+    if (!enabled || !isSupported) return;
+    const watchdog = setInterval(() => {
+      if (enabledRef.current && !isListeningRef.current) {
+        console.log('[WakeWord] Watchdog: not listening, restarting...');
+        createAndStart();
+      }
+    }, 5000);
+    return () => clearInterval(watchdog);
+  }, [enabled, isSupported, createAndStart]);
 
   return { isListening, isSupported };
 }
