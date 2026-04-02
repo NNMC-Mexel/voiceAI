@@ -238,6 +238,10 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
     if (enabled && isSupported) {
       permissionDeniedRef.current = false;
       lastWakeTranscriptRef.current = '';
+      // Treat mount as "mic just released" so that not-allowed errors within
+      // the first 3 seconds (mic transitioning from a previous MediaRecorder)
+      // are not mistaken for a real user permission denial.
+      recordingStoppedAtRef.current = Date.now();
       createAndStart();
     } else {
       stop();
