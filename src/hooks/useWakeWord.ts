@@ -108,6 +108,7 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
     recognition.maxAlternatives = 3;
 
     recognition.onstart = () => {
+      console.log('[WakeWord] Recognition started');
       setIsListening(true);
     };
 
@@ -166,12 +167,13 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
       if (event.error === 'no-speech' || event.error === 'aborted') return;
 
       if (event.error === 'not-allowed') {
+        const elapsed = Date.now() - recordingStoppedAtRef.current;
         const micStillReleasing =
           isRecordingRef.current ||
-          Date.now() - recordingStoppedAtRef.current < MIC_RELEASE_COOLDOWN_MS;
+          elapsed < MIC_RELEASE_COOLDOWN_MS;
 
         if (micStillReleasing) {
-          // MediaRecorder hasn't released the mic yet — not a real permission denial
+          console.log(`[WakeWord] not-allowed ignored (mic releasing, ${elapsed}ms since stop)`);
           return;
         }
         // Real permission denied by user in browser settings
@@ -185,7 +187,9 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
 
     recognition.onend = () => {
       setIsListening(false);
-      if (enabledRef.current && !permissionDeniedRef.current) {
+      const willRestart = enabledRef.current && !permissionDeniedRef.current;
+      console.log('[WakeWord] Recognition ended, willRestart:', willRestart);
+      if (willRestart) {
         restartTimeoutRef.current = window.setTimeout(() => {
           if (enabledRef.current && !permissionDeniedRef.current) {
             createAndStart();
