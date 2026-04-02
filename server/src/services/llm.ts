@@ -840,7 +840,12 @@ JSON:`;
     }
 
     if (clean.length < items.length) {
-      doc.recommendations = clean.join('\n').trim();
+      // Remove orphan numbers left after deleting numbered items (e.g. lone "2\n")
+      const joined = clean.join('\n')
+        .replace(/^\d+\s*$/gm, '')
+        .replace(/\n{2,}/g, '\n')
+        .trim();
+      doc.recommendations = joined;
       console.log(`[postprocess] Cleaned recommendations: ${items.length} → ${clean.length} items`);
     }
   }
@@ -1548,7 +1553,9 @@ JSON:`;
         objectiveParts.push(sent);
       } else if (gynecoKeywords.test(sent) || lifeHistoryKeywords.test(sent) || lifeHistoryInAllergyKeywords.test(sent)) {
         clinicalParts.push(sent);
-      } else if (allergyParts.length > 0 && sent.length < 50 && !(/\d+\/\d+|\d+\s+на\s+\d+\s+мм|мм\s*рт|мм\b\.?$|уд\/мин|ЧСС|АД|мг|кг|см\b|стол\s+регулярн|стул\s+регулярн/iu.test(sent))) {
+      } else if (/^[мМ][мМ]\s+рт\.?\s*ст\.?\.?\s*$/u.test(sent.trim())) {
+        // Standalone "Мм рт.ст." / "мм рт.ст." — orphan Whisper garbage, discard
+      } else if (allergyParts.length > 0 && sent.length < 50 && !(/\d+\/\d+|\d+\s+на\s+\d+\s+мм|[мМ][мМ]\s*рт|мм\b\.?$|уд\/мин|ЧСС|АД|мг|кг|см\b|стол\s+регулярн|стул\s+регулярн/iu.test(sent))) {
         // Short continuation of allergy text (but not measurement data)
         allergyParts.push(sent);
       } else {
