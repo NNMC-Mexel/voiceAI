@@ -1342,7 +1342,7 @@ JSON:`;
       { pattern: /данны\S*\s+объективн\S*\s+(?:исследовани|осмотр)\S*\s*[:.,-]?\s*/iu, target: 'objectiveStatus' },
       { pattern: /амбулаторн\S*\s+терапи\S*\s*[:.,-]?\s*/iu, target: 'conclusion' },
       { pattern: /амбулаторно\s+принимает\s*[:.,-]?\s*/iu, target: 'conclusion' },
-      { pattern: /(?:рекомендаци\S*|рекомендовано|план\s+лечени\S*)\s*[:.,-]?\s*/iu, target: 'recommendations' },
+      { pattern: /(?:рекомендаци\S*|рекомендован\S*|план\s+лечени\S*)\s*[:.,-]?\s*/iu, target: 'recommendations' },
       { pattern: /диет\S*\s*(?:№?\s*\d+\S*)?\s*[:.,-]?\s*/iu, target: 'diet' },
       { pattern: /(?:предварительн\S*\s+)?диагноз\S*\s*[:.,-]?\s*/iu, target: 'diagnosis' },
       { pattern: /план\s+обследовани\S*\s*[:.,-]?\s*/iu, target: 'doctorNotes' },
@@ -1691,8 +1691,10 @@ JSON:`;
       .replace(/^предварительн\S*\s*[:.,-]?\s*/iu, '');
     const currentDiag = doc.diagnosis.trim();
 
-    // Если диагноз из raw значительно длиннее (LLM обрезал) или LLM вернул пустой/короткий — заменяем
-    if (rawDiag.length > 20 && (currentDiag.length < 10 || rawDiag.length > currentDiag.length * 1.3)) {
+    // Rescue ONLY if LLM returned empty or very short diagnosis (< 50 chars)
+    // Don't replace a real LLM diagnosis with raw text — raw often contains
+    // anamnesis/therapy sections that follow the diagnosis block
+    if (rawDiag.length > 20 && currentDiag.length < 50) {
       console.log(`[postprocess] Diagnosis rescued from raw text: LLM had ${currentDiag.length} chars, raw has ${rawDiag.length} chars`);
       doc.diagnosis = rawDiag;
     }
