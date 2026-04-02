@@ -571,16 +571,26 @@ export function EditingScreen({
     }
   };
 
-  // Wake word: "Джарвис" starts addendum recording, "Стоп" stops and auto-applies
+  // Wake word: "Нави" starts addendum recording, "Стоп Нави" stops and auto-applies
   const handleWakeWord = useCallback(() => {
+    console.log('[EditingScreen] handleWakeWord called, guards:', {
+      isUpdating,
+      isAddendumRecording,
+      addendumBlob: !!addendumBlob,
+    });
     if (isUpdating || isAddendumRecording || addendumBlob) return;
     autoApplyRef.current = true;
     if (!isAddendumOpen) setIsAddendumOpen(true);
     setAddendumError(null);
-    void startAddendumRecording().catch((err) => {
-      setAddendumError(err instanceof Error ? err.message : 'Ошибка записи');
-      autoApplyRef.current = false;
-    });
+    void startAddendumRecording()
+      .then(() => {
+        console.log('[EditingScreen] startAddendumRecording() succeeded');
+      })
+      .catch((err) => {
+        console.error('[EditingScreen] startAddendumRecording() failed:', err);
+        setAddendumError(err instanceof Error ? err.message : 'Ошибка записи');
+        autoApplyRef.current = false;
+      });
   }, [isUpdating, isAddendumRecording, addendumBlob, isAddendumOpen, startAddendumRecording]);
 
   const handleStopWord = useCallback(() => {
