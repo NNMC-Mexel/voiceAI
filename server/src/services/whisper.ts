@@ -210,6 +210,11 @@ export class WhisperService {
     const startTime = Date.now();
 
     const applyDict = (result: TranscriptionResult): TranscriptionResult => {
+      // Log raw Whisper output BEFORE any processing
+      console.log('\n\x1b[33m━━━ [WHISPER RAW] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m');
+      console.log(result.text);
+      console.log('\x1b[33m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m\n');
+
       // First clean hallucinations, then apply dictionary
       const dehalucinated = this.cleanWhisperHallucinations(result.text);
       const corrected = applyMedicalDictionary(dehalucinated);
@@ -219,6 +224,14 @@ export class WhisperService {
       if (dehalucinated !== result.text) {
         console.log(`[whisper] Cleaned hallucinations: ${result.text.length} → ${dehalucinated.length} chars`);
       }
+
+      // Log corrected Whisper text AFTER dictionary
+      if (corrected !== result.text) {
+        console.log('\n\x1b[36m━━━ [WHISPER + DICT] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m');
+        console.log(corrected);
+        console.log('\x1b[36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m\n');
+      }
+
       return { ...result, text: corrected };
     };
 

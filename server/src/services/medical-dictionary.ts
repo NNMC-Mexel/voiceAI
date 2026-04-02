@@ -866,6 +866,8 @@ const PHONETIC_CORRECTIONS: ReplacementRule[] = [
 
   // "МИТРОНИ-КОМПИ-МРАЙ" / "Митрони компи МРАЙ" → "Medtronic Compi MRI"
   regexRule(/митрони[-\s]*компи[-\s]*мрай/giu, 'Medtronic Compi MRI'),
+  // Слитное написание: "Митроникомпиэмэрай" и подобные
+  regexRule(/[Мм]итроник\S*компи\S*(?:мр|эм)\S*/giu, 'Medtronic Compi MRI'),
 
   // "следствие под crimes" — Whisper hallucination (garbled "от 25.02.2016г.")
   regexRule(/следствие\s+под\s+crimes/giu, 'от'),
@@ -906,6 +908,119 @@ const PHONETIC_CORRECTIONS: ReplacementRule[] = [
 
   // "ХС." garbage at end of sentences (Whisper hallucination)
   regexRule(/\s+ХС\.\s*(?:ХС\.?\s*)*/gu, ' '),
+
+  // "Не билет" → "Небилет" (drug name, beta-blocker)
+  regexRule(/Не\s+билет/giu, 'Небилет'),
+
+  // "новостолбачье" / "нового столбачья" → garbled "мм рт.ст." — remove
+  regexRule(/новостолбач\S*/giu, 'мм рт.ст.'),
+
+  // "СС 97" → "ЧСС 97" (Whisper dropped Ч)
+  regexRule(/(?<![а-яёА-ЯЁ])СС\s+(\d{2,3})\s*(в\s+минуту|уд)/giu, 'ЧСС $1 $2'),
+  regexRule(/(?<![а-яёА-ЯЁ])СС\s+(\d{2,3})(?!\S)/giu, 'ЧСС $1'),
+
+  // "субклим. Клинический" → "субклинический" (Whisper word break)
+  regexRule(/субклим\S*\s*клинически/giu, 'субклинически'),
+
+  // "Трипонит" → "III по NYHA" (Whisper garble)
+  regexRule(/трипонит/giu, 'III по NYHA'),
+
+  // "Невздушный" → "не вздут" (Whisper mishearing)
+  regexRule(/невздушн\S*/giu, 'не вздут'),
+
+  // "по НИХО" → "по NYHA" (Whisper Cyrillic transliteration)
+  regexRule(/по\s+НИХО/giu, 'по NYHA'),
+  regexRule(/по\s+Нихо/gu, 'по NYHA'),
+
+  // "Стол обычной окраски" → "Стул обычной окраски" (Whisper: стол вместо стул)
+  regexRule(/[Сс]тол\s+(обычн\S+\s+окраск|оформлен|(?:без|с)\s+патологическ)/giu, (m) =>
+    m.replace(/[Сс]тол/, (s) => s[0] === 'С' ? 'Стул' : 'стул')
+  ),
+
+  // "Мм, тут" — Whisper filler garbage
+  regexRule(/Мм,?\s+тут\s+/giu, ''),
+
+  // "мм рт.ст. Мм." — parasitic "Мм." after blood pressure
+  regexRule(/мм\s+рт\.?\s*ст\.?\s+Мм\./gu, 'мм рт.ст.'),
+
+  // Standalone "Мм." at sentence start — Whisper filler
+  regexRule(/(?<=[.!?])\s+Мм\.\s*/gu, ' '),
+
+  // "Мм рт.ст." without a number before — orphaned garbage
+  regexRule(/(?<![0-9])\s*Мм\s+рт\.?\s*ст\.?\s*/gu, ' '),
+
+  // "памятка в ЭТН" → "памятка ВТЭ" (Whisper reorder)
+  regexRule(/памятк\S*\s+в\s+ЭТН/giu, 'памятка ВТЭ'),
+
+  // "Корчери СС" → "Контроль ЧСС" (Whisper garble)
+  regexRule(/корчери\s+СС/giu, 'контроль ЧСС'),
+
+  // "оберной дуги" → "реберной дуги" (Whisper dropped first letter)
+  regexRule(/оберной\s+дуги/giu, 'реберной дуги'),
+
+  // "тонны сердца" → "тоны сердца" (Whisper double-н)
+  regexRule(/тонны\s+сердца/giu, 'тоны сердца'),
+
+  // "Покойный" → "Спокойный" (Whisper dropped С- prefix, context: зев/состояние)
+  regexRule(/(?<=[,.]\s*)покойн/giu, 'спокойн'),
+
+  // "Натриевая Менее" → "Натриевая. Менее" or handle: "Натриевая диета" when before "менее X грамм"
+  // Actually "Натриевая Менее 5 грамм" = "Ограничение натрия менее 5 грамм"
+
+  // "Следующий, эзетимиб" → "Эзетимиб" (Whisper garble of numbering)
+  regexRule(/следующий,?\s+(эзетимиб)/giu, '$1'),
+
+  // "через СС" → "ЧСС" (Whisper garble of "ЧСС")
+  regexRule(/через\s+СС(?!\S)/giu, 'ЧСС'),
+
+  // "Внутри под контролем" → "Внутрь под контролем" (Whisper: и вместо ь)
+  regexRule(/внутри\s+под\s+контролем/giu, 'внутрь под контролем'),
+
+  // "concore" → "Конкор" (Whisper Latin transcription of Конкор)
+  regexRule(/\bconcore\b/gi, 'Конкор'),
+
+  // "Дигоксин 029" → "Дигоксин 0,25" (Whisper number garble)
+  regexRule(/Дигоксин\s+029/giu, 'Дигоксин 0,25'),
+
+  // "Де вики" → "ВП" (Whisper garble of "ВП" — ventricular pacing)
+  regexRule(/Де\s+вики/giu, 'ВП'),
+
+  // "Идеально" in recommendations context → "Длительно" (Whisper mishear)
+  regexRule(/(?<=контролем\s+пульса\s+и\s+АД\.?\s*)Идеально/giu, 'Длительно'),
+
+  // "НИБИЛЕТ" → "Небилет" (Whisper caps garble)
+  regexRule(/НИБИЛЕТ/gu, 'Небилет'),
+  regexRule(/нибилет/giu, 'Небилет'),
+
+  // "Заголовок" — Whisper garbage word in medical context
+  regexRule(/Заголовок\s*/giu, ''),
+
+  // "тромбоципения" → "тромбоцитопения" (Whisper typo)
+  regexRule(/тромбоципени/giu, 'тромбоцитопени'),
+
+  // "спокоен спокоен" → "спокоен" (Whisper stutter)
+  regexRule(/спокоен\s+спокоен/giu, 'спокоен'),
+
+  // "випи" → "ВП" (Whisper garble of ВП — ventricular pacing)
+  regexRule(/(?<![а-яёА-ЯЁ])випи(?![а-яёА-ЯЁ])/giu, 'ВП'),
+
+  // "виви а. Р." → "VVIR" (Whisper garble of pacing mode)
+  regexRule(/виви\s+а\.?\s*р\.?/giu, 'VVIR'),
+
+  // "сея артерий" → "сонных артерий" (Whisper garble)
+  regexRule(/сея\s+артерий/giu, 'сонных артерий'),
+
+  // "постестепенным" → "постепенным" (Whisper stutter)
+  regexRule(/постестепенн/giu, 'постепенн'),
+
+  // "Делатационная" → "Дилатационная" (Whisper typo)
+  regexRule(/[Дд]елатационн/giu, 'дилатационн'),
+
+  // "Масса тела 27,2 кг" → "ИМТ 27,2 кг/м²" when it's clearly BMI not weight
+  regexRule(/Масса\s+тела\s+(\d+[.,]\d+)\s*кг(?!\s*\/)/giu, 'ИМТ $1 кг/м²'),
+
+  // "При диабете" → "Предиабет" (Whisper garble)
+  regexRule(/При\s+диабете(?![а-яёА-ЯЁ])/gu, 'Предиабет'),
 ];
 
 // ─── 5a. Форматирование жизненных показателей ────────────────────────────────
