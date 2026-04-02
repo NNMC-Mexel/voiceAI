@@ -286,6 +286,19 @@ Return JSON patch only.`;
       console.warn(`[LLM] WARNING: Response truncated (no EOS). Prompt=${promptSize} chars, input=${rawText.length} chars, output=${raw.length} chars. Check llama.cpp n_ctx setting.`);
     }
     const document = await this.parseDocumentWithRepair(raw);
+
+    // Log raw LLM output BEFORE post-processing
+    const LLM_FIELDS = ['complaints','anamnesis','clinicalCourse','allergyHistory','objectiveStatus',
+      'diagnosis','finalDiagnosis','conclusion','recommendations','diet','doctorNotes','outpatientExams'] as const;
+    console.log('\n\x1b[35m━━━ [LLM RAW] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m');
+    for (const f of LLM_FIELDS) {
+      const v = (document as any)[f];
+      if (v && typeof v === 'string' && v.trim()) {
+        console.log(`  \x1b[35m${f}:\x1b[0m ${v}`);
+      }
+    }
+    console.log('\x1b[35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m\n');
+
     const cleaned = this.validateAndCleanDocument(document);
     const enriched = this.enrichPatientFromRawText(cleaned, rawText);
 
@@ -298,6 +311,18 @@ Return JSON patch only.`;
 
     // Спасаем рекомендации из исходного текста если LLM их потерял
     this.rescueRecommendationsFromRawText(enriched, rawText);
+
+    // Log final result AFTER all post-processing
+    const FINAL_FIELDS = ['complaints','anamnesis','clinicalCourse','allergyHistory','objectiveStatus',
+      'diagnosis','finalDiagnosis','conclusion','recommendations','diet','doctorNotes','outpatientExams'] as const;
+    console.log('\n\x1b[32m━━━ [FINAL] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m');
+    for (const f of FINAL_FIELDS) {
+      const v = (enriched as any)[f];
+      if (v && typeof v === 'string' && v.trim()) {
+        console.log(`  \x1b[32m${f}:\x1b[0m ${v}`);
+      }
+    }
+    console.log('\x1b[32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m\n');
 
     return enriched;
   }
@@ -757,6 +782,16 @@ JSON:`;
     // Пост-обработка: чистка recommendations от мусора Whisper
     this.cleanRecommendations(result);
 
+    // Пост-обработка: если objectiveStatus содержит diagnosis-данные в конце, удалить
+    this.cleanObjectiveStatusTail(result);
+
+    // Пост-обработка: если finalDiagnosis совпадает с diagnosis, очистить finalDiagnosis
+    if (result.finalDiagnosis && result.diagnosis &&
+        result.finalDiagnosis.trim() === result.diagnosis.trim()) {
+      console.log('[postprocess] finalDiagnosis is identical to diagnosis, clearing');
+      result.finalDiagnosis = '';
+    }
+
     // Пост-обработка: повторное применение медицинского словаря
     // LLM может отменить коррекции словаря при структурировании текста
     this.reapplyMedicalDictionary(result);
@@ -822,6 +857,36 @@ JSON:`;
    * - текущая терапия (амбулаторно принимает...)
    * Перемещает их в правильные поля.
    */
+  private cleanObjectiveStatusTail(doc: MedicalDocument): void {
+    const obj = doc.objectiveStatus;
+    const diag = doc.diagnosis;
+    if (!obj || !diag || obj.length < 100 || diag.length < 50) return;
+
+    // Check if ANY diagnosis sentence appears at the end of objectiveStatus
+    const diagSentences = diag.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 15);
+    if (diagSentences.length < 2) return;
+
+    // Find earliest diagnosis sentence in second half of objectiveStatus
+    let earliestIdx = -1;
+    for (const sent of diagSentences) {
+      const needle = sent.trim().substring(0, 40);
+      const idx = obj.indexOf(needle);
+      if (idx > 0 && idx > obj.length * 0.4) {
+        if (earliestIdx < 0 || idx < earliestIdx) {
+          earliestIdx = idx;
+        }
+      }
+    }
+
+    if (earliestIdx > 0) {
+      const cleaned = obj.substring(0, earliestIdx).replace(/[.,;:\s]+$/, '').trim();
+      if (cleaned.length > 50) {
+        console.log(`[postprocess] Removed diagnosis tail from objectiveStatus (${obj.length} → ${cleaned.length} chars)`);
+        doc.objectiveStatus = cleaned;
+      }
+    }
+  }
+
   private cleanDiagnosis(doc: MedicalDocument): void {
     const diag = doc.diagnosis;
     if (!diag || diag.length < 200) return;
@@ -963,14 +1028,14 @@ JSON:`;
   private deduplicateFields(doc: MedicalDocument): void {
     for (const field of ALL_TEXT_FIELDS) {
       const value = doc[field];
-      if (!value || value.length < 100) continue;
+      if (!value || value.length < 10) continue;
 
       // Strategy 1: if the field is exactly doubled (first half === second half)
       const mid = Math.floor(value.length / 2);
       // Allow some tolerance for whitespace differences
       const firstHalf = value.substring(0, mid).trim();
       const secondHalf = value.substring(mid).trim();
-      if (firstHalf.length > 50 && firstHalf === secondHalf) {
+      if (firstHalf.length > 5 && firstHalf === secondHalf) {
         doc[field] = firstHalf;
         console.log(`[postprocess] Removed exact duplicate in ${field} (${value.length} → ${firstHalf.length} chars)`);
         continue;
@@ -978,7 +1043,7 @@ JSON:`;
 
       // Strategy 2: sentence-level dedup
       const sentences = value.split(/(?<=[.!?])\s+/).filter(s => s.trim());
-      if (sentences.length < 4) continue;
+      if (sentences.length < 2) continue;
 
       const seen = new Set<string>();
       const unique: string[] = [];
@@ -1274,6 +1339,7 @@ JSON:`;
       { pattern: /анамнез\s+заболевания\s*[:.,-]?\s*/iu, target: 'anamnesis' },
       { pattern: /аллерг\S*\s+анамнез\S*\s*[:.,-]?\s*/iu, target: 'allergyHistory' },
       { pattern: /объектив\S*\s+статус\S*\s*[:.,-]?\s*/iu, target: 'objectiveStatus' },
+      { pattern: /данны\S*\s+объективн\S*\s+(?:исследовани|осмотр)\S*\s*[:.,-]?\s*/iu, target: 'objectiveStatus' },
       { pattern: /амбулаторн\S*\s+терапи\S*\s*[:.,-]?\s*/iu, target: 'conclusion' },
       { pattern: /амбулаторно\s+принимает\s*[:.,-]?\s*/iu, target: 'conclusion' },
       { pattern: /(?:рекомендаци\S*|рекомендовано|план\s+лечени\S*)\s*[:.,-]?\s*/iu, target: 'recommendations' },
@@ -1463,7 +1529,7 @@ JSON:`;
     const allergyKeywords = /аллерг|непереносим|(?:на\s+)?медикамент\S*\s+отрицает|отмечает\s+реакци|крапивниц|отёк\s+квинке|анафилак|лекарствен\S*\s+(?:аллерг|непереносим)/iu;
 
     // Keywords that DON'T belong in allergyHistory
-    const objectiveKeywords = /(?:общее\s+состояни|обусловлено\s+сердеч|кожные\s+покров|сознание\s+ясное|послеоперацион|варикозн|сыпей|вес\s+\d|рост\s+\d|ИМТ\s+\d|пастозность|[рп]остозность|щитовидная\s+желез|дыхание|аускультативно|хрипов|тоны\s+сердца|систолическ|шум\s+на|иррадиаци|АД\s+[-–—]?\s*\d|ЧСС\s*[-–—.]?\s*\d|\d+\s*уд\/мин|\d+\/\d+\s*мм\s*рт|мм\s+рт\.?\s*ст|мочеиспускани|почки|стол\s+регулярн|стул\s+регулярн|пульс\s+\d|SpO₂|живот\s+мягк|печень\s+не|не\s+увеличен|ритмичн|степен[ьи]\s+тяжести|безболезненн|справа|слева|скорость\s+\d+\s+балл)/iu;
+    const objectiveKeywords = /(?:общее\s+состояни|обусловлено\s+сердеч|кожные\s+покров|сознание\s+ясное|послеоперацион|варикозн|сыпей|вес\s+\d|рост\s+\d|ИМТ\s+\d|пастозность|[рп]остозность|щитовидная\s+желез|дыхание|аускультативно|хрипов|тоны\s+сердца|систолическ|шум\s+на|иррадиаци|АД\s+[-–—]?\s*\d|ЧСС\s*[-–—.]?\s*\d|\d+\s*уд\/мин|\d+\/\d+\s*мм\s*рт|\d+\s+на\s+\d+\s+мм|мм\s+рт\.?\s*ст|мочеиспускани|почки|стол\s+регулярн|стул\s+регулярн|пульс\s+\d|SpO₂|живот\s+мягк|печень\s+не|не\s+увеличен|ритмичн|степен[ьи]\s+тяжести|безболезненн|справа|слева|скорость\s+\d+\s+балл)/iu;
     const gynecoKeywords = /(?:беременност|родов?\b|аборт|менструаци|менопауз|перименопауз|миом[аы]\s+матки|гинекологическ)/iu;
     const lifeHistoryKeywords = /(?:перенесённ|аппендэктоми|холецистэктоми|туберкулёз|гемотрансфузи|наследственност|операци[ия]\s+и\s+травм)/iu;
     const scaleKeywords = /(?:шкала\s+для\s+оценки|CHA₂DS₂|CHADS|HAS-BLED|баллов?\s+по)/iu;
@@ -1482,7 +1548,7 @@ JSON:`;
         objectiveParts.push(sent);
       } else if (gynecoKeywords.test(sent) || lifeHistoryKeywords.test(sent) || lifeHistoryInAllergyKeywords.test(sent)) {
         clinicalParts.push(sent);
-      } else if (allergyParts.length > 0 && sent.length < 50 && !(/\d+\/\d+|мм\s*рт|уд\/мин|мг|кг|см\b|стол\s+регулярн/iu.test(sent))) {
+      } else if (allergyParts.length > 0 && sent.length < 50 && !(/\d+\/\d+|\d+\s+на\s+\d+\s+мм|мм\s*рт|мм\b\.?$|уд\/мин|ЧСС|АД|мг|кг|см\b|стол\s+регулярн|стул\s+регулярн/iu.test(sent))) {
         // Short continuation of allergy text (but not measurement data)
         allergyParts.push(sent);
       } else {
