@@ -25,12 +25,17 @@ test('isValidMedicalDocument validates minimal shape', () => {
     },
     complaints: '',
     anamnesis: '',
-    objectiveStatus: '',
-    diagnosis: '',
+    outpatientExams: '',
     clinicalCourse: '',
+    allergyHistory: '',
+    objectiveStatus: '',
+    neurologicalStatus: '',
+    diagnosis: '',
+    finalDiagnosis: '',
     conclusion: '',
-    recommendations: '',
     doctorNotes: '',
+    recommendations: '',
+    diet: '',
   };
 
   assert.equal(isValidMedicalDocument(valid), true);
