@@ -47,6 +47,8 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
   const lastActionTimeRef = useRef(0);
   // Flag: stop already fired this recording session, don't fire again
   const stopFiredRef = useRef(false);
+  // Flag: microphone permission denied — stop all restart attempts
+  const permissionDeniedRef = useRef(false);
   const [isListening, setIsListening] = useState(false);
   const [isSupported] = useState(() => {
     return typeof window !== 'undefined' &&
@@ -147,14 +149,24 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
 
     recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
       if (event.error === 'no-speech' || event.error === 'aborted') return;
+      if (event.error === 'not-allowed') {
+        if (isRecordingRef.current) {
+          // Mic busy with MediaRecorder — expected, will retry after recording ends
+          return;
+        }
+        // Actual permission denied — stop all attempts
+        console.warn('[WakeWord] Microphone permission denied — wake word disabled until page reload');
+        permissionDeniedRef.current = true;
+        return;
+      }
       console.warn('[WakeWord] Recognition error:', event.error);
     };
 
     recognition.onend = () => {
       setIsListening(false);
-      if (enabledRef.current) {
+      if (enabledRef.current && !permissionDeniedRef.current) {
         restartTimeoutRef.current = window.setTimeout(() => {
-          if (enabledRef.current) {
+          if (enabledRef.current && !permissionDeniedRef.current) {
             createAndStart();
           }
         }, 300);
@@ -202,6 +214,8 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
 
   useEffect(() => {
     if (enabled && isSupported) {
+      // Reset permission denied flag when user re-enables wake word
+      permissionDeniedRef.current = false;
       createAndStart();
     } else {
       stop();
@@ -215,6 +229,8 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
   useEffect(() => {
     if (!enabled || !isSupported) return;
     const watchdog = setInterval(() => {
+      // Skip if permission denied or mic busy with recording
+      if (permissionDeniedRef.current || isRecordingRef.current) return;
       if (enabledRef.current && !isListeningRef.current) {
         console.log('[WakeWord] Watchdog: not listening, restarting...');
         createAndStart();
