@@ -279,6 +279,7 @@ Return JSON patch only.`;
     }
 
     const data = (await response.json()) as LlamaCompletionResponse;
+    console.log(`[LLM] response keys: ${Object.keys(data).join(', ')}, content type: ${typeof data.content}, content length: ${String(data.content ?? '').length}`);
     const raw = this.stripThinkingBlocks(data.content);
     const stoppedEos = (data as any).stop_type === 'eos' || (data as any).stopped_eos === true || (data as any).stop === 'eos';
     const truncated = !stoppedEos && raw.length > 0;
@@ -445,8 +446,9 @@ ${normalized}`;
     return this.stripThinkingBlocks(data.content);
   }
 
-  private stripThinkingBlocks(text: string): string {
-    return text
+  private stripThinkingBlocks(text: unknown): string {
+    const str = typeof text === 'string' ? text : String(text ?? '');
+    return str
       .replace(/<think>[\s\S]*?<\/think>/gi, '')
       .replace(/<\/?think>/gi, '')
       .trim();
