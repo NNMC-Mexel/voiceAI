@@ -263,11 +263,13 @@ Return JSON patch only.`;
         'Content-Type': 'application/json',
       },
       body: this.buildCompletionBody({
-        prompt: `<|im_start|>system\n/no_think\n${systemPrompt}<|im_end|>\n<|im_start|>user\n${userPrompt}<|im_end|>\n<|im_start|>assistant\n`,
+        // No /no_think — allow Qwen3 chain-of-thought before JSON.
+        // json_schema removed: grammar sampler conflicts with <think> blocks.
+        // parseDocumentWithRepair handles imperfect JSON output.
+        prompt: `<|im_start|>system\n${systemPrompt}<|im_end|>\n<|im_start|>user\n${userPrompt}<|im_end|>\n<|im_start|>assistant\n`,
         n_predict: Math.max(16384, this.config.maxTokens),
         temperature: 0,
         stop: ['<|im_end|>'],
-        json_schema: this.getDocumentJsonSchema(),
         stream: false,
       }),
     });
