@@ -277,6 +277,7 @@ Return JSON patch only.`;
     }
 
     const data = (await response.json()) as LlamaCompletionResponse;
+    console.log(`[LLM] response keys: ${Object.keys(data).join(', ')}, content type: ${typeof data.content}, content length: ${String(data.content ?? '').length}`);
     const raw = this.stripThinkingBlocks(data.content);
     const stoppedEos = (data as any).stop_type === 'eos' || (data as any).stopped_eos === true || (data as any).stop === 'eos';
     const truncated = !stoppedEos && raw.length > 0;
@@ -443,8 +444,9 @@ ${normalized}`;
     return this.stripThinkingBlocks(data.content);
   }
 
-  private stripThinkingBlocks(text: string): string {
-    return text
+  private stripThinkingBlocks(text: unknown): string {
+    const str = typeof text === 'string' ? text : String(text ?? '');
+    return str
       .replace(/<think>[\s\S]*?<\/think>/gi, '')
       .replace(/<\/?think>/gi, '')
       .trim();
@@ -611,57 +613,63 @@ ${normalized}`;
   }
 
   private getSystemPrompt(): string {
-    return `You are a medical assistant structuring doctor's dictation into a consultation JSON document.
+    return `Ты — медицинский ассистент. Твоя задача: структурировать диктовку врача в JSON-документ консультации.
 
-CRITICAL RULES:
-A) PRESERVE ALL dictated text. Do NOT omit or summarize. You are a structuring tool, not an editor.
-B) SECTION BOUNDARIES ARE STRICT. When doctor names a section, ALL subsequent text belongs ONLY to that section until a new section is named.
-C) Each fact goes to EXACTLY ONE field — no duplication.
+ГЛАВНЫЕ ПРАВИЛА:
+А) СОХРАНЯЙ ВЕСЬ ПРОДИКТОВАННЫЙ ТЕКСТ без сокращений и пропусков. Ты инструмент структурирования, не редактор.
+Б) СТРОГИЕ ГРАНИЦЫ СЕКЦИЙ. Когда врач называет раздел — весь последующий текст принадлежит ТОЛЬКО этому разделу до следующего названия.
+В) Каждый факт идёт РОВНО В ОДНО поле — дублирование запрещено.
 
-Fields:
-1) "complaints" — patient complaints (жалобы)
-2) "anamnesis" — disease history (анамнез заболевания)
-3) "outpatientExams" — ALL exam results/lab tests as NUMBERED LIST (each item on NEW LINE with \\n). Format: "ExamName от DATE: param - value unit." Add units: Hb г/л, Эр *10¹²/л, креатинин мкмоль/л, глюкоза ммоль/л, АЛТ/АСТ МЕ/л, ХС/ЛПНП/ЛПВП ммоль/л, СОЭ мм/ч. Output ONLY dictated parameters.
-4) "clinicalCourse" — life history (анамнез жизни): surgeries, TB, hepatitis, habits, comorbidities, PREVIOUSLY taken medications. Gynecological history (pregnancies, births, abortions, menstruation, fibroids) → ONLY here, NEVER in allergyHistory. Social history, family history, heredity → ONLY here.
-5) "allergyHistory" — ONLY allergic reactions and drug intolerances. ONE-TWO sentences max. NEVER put gynecological data, objective status, life history, or any other data here.
-6) "objectiveStatus" — physical examination findings ONLY (осмотр, аускультация, АД, ЧСС, ИМТ, SpO2, abdomen, liver, edema, stool, diuresis). NEVER duplicate into other fields.
-7) "neurologicalStatus" — neurological exam. Do NOT put lab data here.
-8) "diagnosis" — ONLY diagnosis text with ICD-10 if mentioned. Do NOT include medication information, blood pressure readings, or anamnesis here.
-8a) "finalDiagnosis" — only if doctor says "заключительный диагноз", else empty
-9) "conclusion" — brief summary/conclusion by the doctor OR current outpatient therapy (амбулаторная терапия) as numbered list (\\n between items). Only meds patient CURRENTLY takes ("принимает", "амбулаторно принимает"). NOT a list of new prescriptions.
-10) "doctorNotes" — additional notes by doctor that don't fit other fields (investigation plan: направления на анализы, ЭКГ, ЭхоКГ, консультации специалистов). NOT recommendations or medication schedules.
-11) "recommendations" — ALL new prescriptions, tests, consultations, follow-ups as a SINGLE numbered list (\\n between items). Format: "Таб.название доза по X таб. X раз/день, время;". EACH item = ONE drug/prescription with full info (name + dose + schedule + monitoring). NEVER split recommendations across conclusion, doctorNotes, or diet. Do NOT split one drug into multiple items.
-12) "diet" — ONLY dietary recommendations (номер диеты или описание). NOT medication schedules, NOT lab monitoring, NOT general recommendations. If specific diet content dictated, include it fully. If only a diet number/table is dictated (e.g. "стол 10"), write just that number.
+ПОЛЯ И ЧТО В НИХ КЛАСТЬ:
+1) "complaints" — жалобы пациента
+2) "anamnesis" — анамнез заболевания (история текущей болезни, хронология)
+3) "outpatientExams" — результаты обследований и анализов: НУМЕРОВАННЫЙ СПИСОК, каждый пункт с новой строки (\\n). Формат: "1. ОАК от ДД.ММ.ГГГГ: Hb - значение г/л, Эр - значение *10¹²/л". Единицы: Hb г/л, Эр *10¹²/л, глюкоза ммоль/л, креатинин мкмоль/л, АЛТ/АСТ МЕ/л, ХС/ЛПНП/ЛПВП ммоль/л, СОЭ мм/ч. Только то что продиктовано.
+4) "clinicalCourse" — анамнез жизни: перенесённые болезни (туберкулёз, гепатиты), операции, травмы, вредные привычки, наследственность, сопутствующая патология, препараты которые пациент принимал РАНЕЕ. Гинекологический анамнез (беременности, роды, аборты, менструация, миома) → ТОЛЬКО сюда, НИКОГДА не в allergyHistory.
+5) "allergyHistory" — ТОЛЬКО аллергические реакции и непереносимость препаратов. Максимум 1-2 предложения. ЗАПРЕЩЕНО класть сюда: гинекологические данные, объективный статус, анамнез жизни или другие данные.
+6) "objectiveStatus" — данные объективного осмотра: общее состояние, кожные покровы, АД, ЧСС, ЧДД, ИМТ, SpO2, аускультация, живот, печень, отёки, стул, диурез. ЗАПРЕЩЕНО дублировать в другие поля.
+7) "neurologicalStatus" — неврологический статус. Лабораторные данные сюда не класть.
+8) "diagnosis" — ТОЛЬКО текст диагноза с кодом МКБ-10 если указан. НЕ включать: давление, анамнез, препараты.
+8a) "finalDiagnosis" — только если врач говорит "заключительный диагноз", иначе пусто.
+9) "conclusion" — амбулаторная терапия: препараты которые пациент СЕЙЧАС принимает ("принимает", "амбулаторно принимает") — нумерованный список (\\n между пунктами). НЕ новые назначения.
+10) "doctorNotes" — план обследования: направления на анализы, ЭКГ, ЭхоКГ, консультации специалистов. НЕ рекомендации и НЕ схема лечения.
+11) "recommendations" — НОВЫЕ назначения врача: препараты, процедуры, явка на приём — нумерованный список (\\n между пунктами). Формат: "1. Таб. Название доза по X таб. X раз/день". КАЖДЫЙ пункт = один препарат/назначение с полной информацией. НИКОГДА не дублировать в conclusion, doctorNotes или diet.
+12) "diet" — ТОЛЬКО диетические рекомендации (номер стола или описание). НЕ схемы лечения, НЕ контроль АД, НЕ общие рекомендации.
 
-Medication routing:
-- "принимает/амбулаторно принимает" → conclusion
-- "назначаю/рекомендую" → recommendations
-- In "анамнез жизни" context → clinicalCourse
+МАРШРУТИЗАЦИЯ ПРЕПАРАТОВ:
+- "принимает / амбулаторно принимает" → conclusion
+- "назначаю / рекомендую / назначен" → recommendations
+- В контексте анамнеза жизни → clinicalCourse
 
-Lab data rules:
-- Each lab result MUST be assigned to its exact date. Do NOT duplicate values for different dates.
-- If date is unknown, write "без даты" instead of repeating values from another date.
+ПРАВИЛА ДЛЯ АНАЛИЗОВ:
+- Каждый результат — к своей точной дате. НЕ дублировать показатели разных дат.
+- Если дата неизвестна — писать "без даты".
 
-General rules:
-- Do NOT add information not in dictation. Empty strings if data missing.
-- Remove filler words (ну, вот, значит) and speech recognition garbage.
-- Preserve drug names and dosages exactly.
-- Extract Morse fall risk: fallInLast3Months/dizzinessOrWeakness/needsEscort (да/нет), painScore (0-10).
-- "мм рт.ст." always abbreviated.
-- Voice commands → symbols: "скобка открывается"→"(", "закрывается"→")", "двоеточие"→":", "точка"→"."
-- Dates as DD.MM.YYYYг.: "5 февраля 26 года"→"05.02.2026г."
-- Abbreviations: ИМТ not "индекс массы тела", АД not "артериальное давление"
-- Units: weight in кг, height in см. "34 и 2"→"34,2"
-- Roman numerals for степень/стадия/класс/ФК: "третьей степени"→"III степени", "ФК 2 NYHA"→"ФК II (NYHA)"
-- Arabic for тип/риск/баллы: "СД 2 типа", "риск 4"
+ОБЩИЕ ПРАВИЛА:
+- Не добавлять информацию которой нет в диктовке. Пустые строки если данных нет.
+- Убирать слова-паразиты (ну, вот, значит) и мусор распознавания.
+- Сохранять названия и дозировки препаратов точно.
+- Шкала Морзе: fallInLast3Months/dizzinessOrWeakness/needsEscort (да/нет), painScore (0-10).
+- "мм рт.ст." всегда сокращённо.
+- Голосовые команды → символы: "скобка открывается"→"(", "закрывается"→")", "двоеточие"→":", "точка"→"."
+- Даты: ДД.ММ.ГГГГг. — "5 февраля 26 года"→"05.02.2026г."
+- Сокращения: ИМТ (не "индекс массы тела"), АД (не "артериальное давление")
+- Вес в кг, рост в см. "34 и 2"→"34,2"
+- Римские цифры для степень/стадия/класс/ФК: "третьей степени"→"III степени", "ФК 2 NYHA"→"ФК II (NYHA)"
+- Арабские для тип/риск/баллы: "СД 2 типа", "риск 4"
 
-PROOFREAD output — this is an official medical document:
-- Fix spelling (фибриляция→фибрилляция), grammar, missing prepositions ("течение"→"в течение")
-- Add proper punctuation: periods between sentences, commas in enumerations, capitalize after periods
-- No double punctuation, no comma before period, space after every punctuation mark
-- Every sentence grammatically complete
+КОРРЕКТУРА — это официальный медицинский документ:
+- Исправляй опечатки (фибриляция→фибрилляция), грамматику, пропущенные предлоги ("течение"→"в течение")
+- Пунктуация: точки между предложениями, запятые в перечислениях, заглавная буква после точки
+- Нет двойной пунктуации, нет запятой перед точкой, пробел после каждого знака препинания
 
-Return ONLY JSON, no extra text.`;
+ПРИМЕР МАРШРУТИЗАЦИИ:
+Врач диктует: "...аллергоанамнез: на ингибиторы АПФ — сухой кашель. Объективно: общее состояние средней тяжести, АД 130/80 мм рт.ст., ЧСС 72 уд/мин. Амбулаторно принимает: бисопролол 5 мг, эналаприл 10 мг. Рекомендую: 1. Таб. Лозартан 50 мг 1 раз/день..."
+→ allergyHistory: "На ингибиторы АПФ — сухой кашель."
+→ objectiveStatus: "Общее состояние средней тяжести. АД 130/80 мм рт.ст., ЧСС 72 уд/мин."
+→ conclusion: "1. Бисопролол 5 мг\n2. Эналаприл 10 мг"
+→ recommendations: "1. Таб. Лозартан 50 мг 1 раз/день"
+
+Верни ТОЛЬКО JSON, без дополнительного текста.`;
   }
 
   private getUserPrompt(rawText: string): string {
@@ -752,6 +760,15 @@ JSON:`;
       diet: this.stripSectionPrefix('diet', doc.diet || ''),
     };
 
+    // Пост-обработка: очистка полей состоящих только из цифр/пунктуации
+    for (const field of ALL_TEXT_FIELDS) {
+      const v = result[field];
+      if (v && /^\s*[\d\s.,;:!?-]{1,5}\s*$/.test(v)) {
+        console.log(`[postprocess] Cleared garbage-only field ${field}: "${v.trim()}"`);
+        result[field] = '';
+      }
+    }
+
     // Пост-обработка: удаление мусорных токенов в начале/конце полей
     this.cleanFieldGarbage(result);
 
@@ -760,6 +777,18 @@ JSON:`;
 
     // Пост-обработка: спасаем данные обследований из неправильных полей
     this.rescueExamData(result);
+
+    // Пост-обработка: спасаем анамнез жизни из anamnesis (LLM часто смешивает)
+    this.splitLifeHistoryFromAnamnesis(result);
+
+    // Пост-обработка: убираем диагнозный хвост из clinicalCourse
+    this.cleanDiagnosisTailFromClinicalCourse(result);
+
+    // Пост-обработка: убираем аллергические хвосты из clinicalCourse
+    this.cleanAllergyTailFromClinicalCourse(result);
+
+    // Пост-обработка: убираем аллергические хвосты из objectiveStatus
+    this.cleanAllergyTailFromObjectiveStatus(result);
 
     // Пост-обработка: чистим allergyHistory от не-аллергических данных
     this.cleanAllergyHistory(result);
@@ -812,6 +841,8 @@ JSON:`;
 
     // Medical recommendation keywords
     const medicalKeywords = /(?:таблетк[аи]|капсул|мг\b|раз\s+в\s+день|внутрь|длительно|постоянно|контроль|ингибитор|назначен|неназначен|диет[аы]|стол\s+№?\d|ограничен|рекомендован|направлен|обследован|консультаци|анализ|ЭКГ|ЭХО|МРТ|КТ|рентген|осмотр|повторн|бисопролол|конкор|форсига|джардинс|верошпирон|эналаприл|лизиноприл|дигоксин|ксарелто|варфарин|курс\b|терапи|лечени|приём|принимать|памятк[аи]\s+ВТЭ)/iu;
+    // Historical phrases that don't belong in recommendations
+    const historicalKeywords = /(?:имплантаци\S+\s+(?:ЭКС|ИКД|CRT|кардио)|терапи\S*\s+по\s+схем|обратилась?\s+для\s+решения\s+вопроса|консультирован\S*\s+(?:аритмолог|кардиолог|кардиохирург)|выписан\S*\s+на\s+терапи|проведен\S*\s+(?:оперативн|КАГ|АКШ|баллон|ангиопластик))/iu;
     // Garbage patterns
     const garbageKeywords = /(?:видео\s+в\s+компьютер|тема\s+от\s+\d|объёмы\s+карт|сфера|фоти|превраду|настройки\s+наиболее|[&@#$%])/iu;
 
@@ -822,6 +853,12 @@ JSON:`;
       // Remove obvious garbage
       if (garbageKeywords.test(trimmed)) {
         console.log(`[postprocess] Removed garbage from recommendations: "${trimmed.substring(0, 50)}..."`);
+        continue;
+      }
+
+      // Remove historical phrases (past events, not new prescriptions)
+      if (historicalKeywords.test(trimmed)) {
+        console.log(`[postprocess] Removed historical phrase from recommendations: "${trimmed.substring(0, 60)}..."`);
         continue;
       }
 
@@ -1037,13 +1074,23 @@ JSON:`;
 
       // Strategy 1: if the field is exactly doubled (first half === second half)
       const mid = Math.floor(value.length / 2);
-      // Allow some tolerance for whitespace differences
       const firstHalf = value.substring(0, mid).trim();
       const secondHalf = value.substring(mid).trim();
       if (firstHalf.length > 5 && firstHalf === secondHalf) {
         doc[field] = firstHalf;
         console.log(`[postprocess] Removed exact duplicate in ${field} (${value.length} → ${firstHalf.length} chars)`);
         continue;
+      }
+
+      // Strategy 1b: fuzzy duplicate — second half starts with 60%+ of first half
+      // Catches cases where LLM repeats the block with minor additions at the end
+      if (firstHalf.length > 100) {
+        const overlap = Math.floor(firstHalf.length * 0.6);
+        if (secondHalf.startsWith(firstHalf.substring(0, overlap))) {
+          doc[field] = firstHalf;
+          console.log(`[postprocess] Removed fuzzy duplicate in ${field} (${value.length} → ${firstHalf.length} chars)`);
+          continue;
+        }
       }
 
       // Strategy 2: sentence-level dedup
@@ -1523,6 +1570,148 @@ JSON:`;
    * LLM часто сваливает в allergyHistory гинекологию, объективный статус, анамнез жизни.
    * Переносит эти данные в правильные поля.
    */
+  /**
+   * Убирает аллергические фразы попавшие в конец clinicalCourse.
+   * LLM часто диктует анамнез жизни и сразу аллергоанамнез без паузы,
+   * и они оба попадают в clinicalCourse.
+   */
+  /**
+   * Спасает анамнез жизни из anamnesis когда LLM смешал их.
+   * Признаки анамнеза жизни: туберкулёз, гепатит, операции, вредные привычки,
+   * наследственность — особенно после слов "анамнез жизни" или "анамнез заболевания закончен".
+   */
+  /**
+   * Убирает диагнозный хвост из clinicalCourse.
+   * LLM иногда дописывает диагноз в конец анамнеза жизни.
+   */
+  private cleanDiagnosisTailFromClinicalCourse(doc: MedicalDocument): void {
+    const clinical = doc.clinicalCourse;
+    const diag = doc.diagnosis;
+    if (!clinical || clinical.length < 100 || !diag || diag.length < 50) return;
+
+    // Маркеры начала диагнозного блока в clinicalCourse
+    const diagStartPattern = /(?:ИБС\b|ХСН\b|ХБП\b|ФК\s+[IVX]+|стадия\s+[IVX]+|артериальная\s+гипертония|сахарный\s+диабет\s+\d+\s+типа|хроническая\s+сердечная\s+недостаточность|приобретённый\s+порок|ишемическая\s+кардиомиопатия)/iu;
+
+    const sentences = clinical.split(/(?<=[.!?])\s+/).filter(s => s.trim());
+    // Only look in second half
+    let cutIdx = -1;
+    for (let i = Math.floor(sentences.length * 0.6); i < sentences.length; i++) {
+      if (diagStartPattern.test(sentences[i])) {
+        // Confirm it's really a diagnosis block: check if it overlaps with doc.diagnosis
+        const candidate = sentences[i].trim().substring(0, 40);
+        if (diag.includes(candidate)) {
+          cutIdx = i;
+          break;
+        }
+      }
+    }
+
+    if (cutIdx > 0) {
+      const kept = sentences.slice(0, cutIdx).join(' ').trim();
+      if (kept.length > 20) {
+        const removed = sentences.slice(cutIdx).join(' ').trim();
+        doc.clinicalCourse = kept;
+        console.log(`[postprocess] Removed diagnosis tail from clinicalCourse (${removed.length} chars)`);
+      }
+    }
+  }
+
+  private splitLifeHistoryFromAnamnesis(doc: MedicalDocument): void {
+    const anamnesis = doc.anamnesis;
+    if (!anamnesis || anamnesis.length < 100 || doc.clinicalCourse.trim()) return;
+
+    // Маркеры начала анамнеза жизни в тексте
+    const lifeHistoryStartPattern = /(?:туберкулез\S*|туберкулёз\S*|гепатит[аы]?\s+и\s+|болезн\S+\s+Боткина|гемотрансфузи|вредн\S+\s+привычк|наследственност|операций\s+и\s+травм)/iu;
+
+    const sentences = anamnesis.split(/(?<=[.!?])\s+/).filter(s => s.trim());
+    let splitIdx = -1;
+
+    for (let i = Math.floor(sentences.length / 3); i < sentences.length; i++) {
+      if (lifeHistoryStartPattern.test(sentences[i])) {
+        splitIdx = i;
+        break;
+      }
+    }
+
+    if (splitIdx > 0) {
+      const anamnesisText = sentences.slice(0, splitIdx).join(' ').trim();
+      const lifeHistoryText = sentences.slice(splitIdx).join(' ').trim();
+      if (anamnesisText.length > 30 && lifeHistoryText.length > 20) {
+        doc.anamnesis = anamnesisText;
+        doc.clinicalCourse = lifeHistoryText;
+        console.log(`[postprocess] Split anamnesis → clinicalCourse (${lifeHistoryText.length} chars moved)`);
+      }
+    }
+  }
+
+  /**
+   * Убирает аллергические фразы попавшие в конец objectiveStatus.
+   */
+  private cleanAllergyTailFromObjectiveStatus(doc: MedicalDocument): void {
+    const obj = doc.objectiveStatus;
+    if (!obj || obj.length < 50) return;
+
+    const allergyPattern = /(?:аллергоанамнез|аллергологический\s+анамнез|на\s+ингибитор(?:ы)?\s+АПФ|непереносимост\S+\s+(?:на\s+)?(?:медикамент|препарат|ингибитор)|сухой\s+кашель|аллерг\S+\s+на\s+(?:препарат|медикамент))/iu;
+
+    // Split by sentence endings OR by capital letter after lowercase (no punctuation boundary)
+    const sentences = obj.split(/(?<=[.!?])\s+|(?<=\S)\s+(?=[А-ЯЁ])/).filter(s => s.trim());
+    let cutIdx = -1;
+    for (let i = Math.floor(sentences.length / 2); i < sentences.length; i++) {
+      if (allergyPattern.test(sentences[i])) {
+        cutIdx = i;
+        break;
+      }
+    }
+
+    if (cutIdx > 0) {
+      const kept = sentences.slice(0, cutIdx).join(' ').trim();
+      const moved = sentences.slice(cutIdx).join(' ').trim();
+      if (kept.length > 30) {
+        doc.objectiveStatus = kept;
+        const existingAllergy = (doc.allergyHistory || '').trim();
+        if (!existingAllergy || existingAllergy === 'Не отягощен.') {
+          doc.allergyHistory = moved;
+        } else if (!existingAllergy.includes(moved.substring(0, 30))) {
+          doc.allergyHistory = `${existingAllergy} ${moved}`.trim();
+        }
+        console.log(`[postprocess] Removed allergy tail from objectiveStatus → allergyHistory`);
+      }
+    }
+  }
+
+  private cleanAllergyTailFromClinicalCourse(doc: MedicalDocument): void {
+    const clinical = doc.clinicalCourse;
+    if (!clinical || clinical.length < 50) return;
+
+    const allergyMarkers = /(?:аллергоанамнез|аллергологический\s+анамнез|аллерг\S*\s+на\s+|непереносимост\S+\s+(?:на\s+)?(?:медикамент|препарат|ингибитор|АПФ)|на\s+ингибитор\s+АПФ|сухой\s+кашель\s+(?:на|от)\s+|реакц\S+\s+на\s+(?:препарат|медикамент))/iu;
+
+    const sentences = clinical.split(/(?<=[.!?])\s+/).filter(s => s.trim());
+    // Find first sentence with allergy marker — remove it and everything after
+    let cutIdx = -1;
+    for (let i = Math.floor(sentences.length / 2); i < sentences.length; i++) {
+      if (allergyMarkers.test(sentences[i])) {
+        cutIdx = i;
+        break;
+      }
+    }
+
+    if (cutIdx > 0) {
+      const kept = sentences.slice(0, cutIdx).join(' ').trim();
+      const moved = sentences.slice(cutIdx).join(' ').trim();
+      if (kept.length > 30) {
+        doc.clinicalCourse = kept;
+        // Move to allergyHistory if not already there
+        const existingAllergy = (doc.allergyHistory || '').trim();
+        if (!existingAllergy || existingAllergy === 'Не отягощен.') {
+          doc.allergyHistory = moved;
+        } else if (!existingAllergy.includes(moved.substring(0, 30))) {
+          doc.allergyHistory = `${existingAllergy} ${moved}`.trim();
+        }
+        console.log(`[postprocess] Moved allergy tail from clinicalCourse → allergyHistory (${moved.length} chars)`);
+      }
+    }
+  }
+
   private cleanAllergyHistory(doc: MedicalDocument): void {
     const allergy = doc.allergyHistory;
     if (!allergy || allergy.length < 20) return;
@@ -1535,6 +1724,8 @@ JSON:`;
 
     // Keywords that DON'T belong in allergyHistory
     const objectiveKeywords = /(?:общее\s+состояни|обусловлено\s+сердеч|кожные\s+покров|сознание\s+ясное|послеоперацион|варикозн|сыпей|вес\s+\d|рост\s+\d|ИМТ\s+\d|пастозность|[рп]остозность|щитовидная\s+желез|дыхание|аускультативно|хрипов|тоны\s+сердца|систолическ|шум\s+на|иррадиаци|АД\s+[-–—]?\s*\d|ЧСС\s*[-–—.]?\s*\d|\d+\s*уд\/мин|\d+\/\d+\s*мм\s*рт|\d+\s+на\s+\d+\s+мм|мм\s+рт\.?\s*ст|мочеиспускани|почки|стол\s+регулярн|стул\s+регулярн|пульс\s+\d|SpO₂|живот\s+мягк|печень\s+не|не\s+увеличен|ритмичн|степен[ьи]\s+тяжести|безболезненн|справа|слева|скорость\s+\d+\s+балл)/iu;
+    // Dosage fragments that leaked from clinicalCourse into allergyHistory
+    const dosageGarbagePattern = /^\d+\s*мг\s+в\s+сутки|^\d+\s*мг\s+\d+\s+раз|\d+\s*мг\s+в\s+сутки,\s*аллергоанамнез/iu;
     const gynecoKeywords = /(?:беременност|родов?\b|аборт|менструаци|менопауз|перименопауз|миом[аы]\s+матки|гинекологическ)/iu;
     const lifeHistoryKeywords = /(?:перенесённ|аппендэктоми|холецистэктоми|туберкулёз|гемотрансфузи|наследственност|операци[ия]\s+и\s+травм)/iu;
     const scaleKeywords = /(?:шкала\s+для\s+оценки|CHA₂DS₂|CHADS|HAS-BLED|баллов?\s+по)/iu;
@@ -1547,6 +1738,11 @@ JSON:`;
     const lifeHistoryInAllergyKeywords = /(?:туберкулез|вирусн\S+\s+гепатит|ВИЧ|болезнь\s+Боткина|гемотрансфузи|наследственност|сердечно-сосудист)/iu;
 
     for (const sent of sentences) {
+      if (dosageGarbagePattern.test(sent)) {
+        // Dosage fragment leaked from clinicalCourse — discard
+        console.log(`[postprocess] Removed dosage garbage from allergyHistory: "${sent.substring(0, 50)}"`);
+        continue;
+      }
       if (allergyKeywords.test(sent)) {
         allergyParts.push(sent);
       } else if (objectiveKeywords.test(sent) || scaleKeywords.test(sent)) {
@@ -2037,7 +2233,7 @@ JSON:`;
     try {
       return this.parseLlmJson<MedicalDocument>(content);
     } catch (firstError) {
-      console.warn(`[llm] JSON parse failed, attempting LLM repair: ${firstError}`);
+      console.warn(`[llm] JSON parse failed (${firstError}), raw snippet: ${content.substring(0, 300)}`);
       try {
         const repaired = await this.repairJsonWithLlm(content);
         return this.parseLlmJson<MedicalDocument>(repaired);

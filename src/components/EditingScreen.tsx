@@ -758,7 +758,7 @@ export function EditingScreen({
         </div>
 
         <div className="grid grid-cols-1 xl:grid-cols-[minmax(420px,1fr)_minmax(0,2fr)] gap-6">
-          <div className="glass-card rounded-2xl p-4 lg:sticky lg:top-4 self-start slide-up lg:max-h-[calc(100vh-180px)] flex flex-col">
+          <div className="glass-card rounded-2xl p-4 lg:sticky lg:top-4 self-start slide-up lg:max-h-[calc(100vh-180px)] flex flex-col overflow-hidden">
             <div className="flex items-center gap-2 mb-3">
               <Bot className="w-4 h-4 text-medical-700" />
               <h2 className="text-sm font-semibold text-medical-900">Чат с ИИ</h2>
@@ -818,7 +818,7 @@ export function EditingScreen({
                 <p className="text-xs text-red-600 mt-2">{voiceCommandError}</p>
               )}
             </div>
-            <div className="flex-1 overflow-y-auto bg-slate-50 rounded-xl p-3 space-y-3 mb-3 min-h-[260px]">
+            <div className="flex-1 overflow-y-auto bg-slate-50 rounded-xl p-3 space-y-3 mb-3 min-h-0">
               {chatMessages.map((msg, idx) => (
                 <div
                   key={idx}
