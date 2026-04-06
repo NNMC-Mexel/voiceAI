@@ -55,6 +55,10 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
   const recordingStoppedAtRef = useRef(0);
   // Deduplicate interim wake word triggers — store last fired transcript
   const lastWakeTranscriptRef = useRef('');
+  // Consecutive not-allowed count for exponential backoff (resets on successful onstart)
+  const notAllowedCountRef = useRef(0);
+  // Restart delay passed from onerror to onend (ms)
+  const pendingRestartDelayRef = useRef(300);
 
   const [isListening, setIsListening] = useState(false);
   const [isSupported] = useState(() => {
