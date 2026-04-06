@@ -32,8 +32,6 @@ declare global {
 
 // Cooldown after action to prevent re-triggering from buffered results
 const ACTION_COOLDOWN_MS = 3000;
-// How long after recording stops to treat mic as "still busy" (MediaRecorder release delay)
-const MIC_RELEASE_COOLDOWN_MS = 3000;
 
 interface UseWakeWordOptions {
   enabled: boolean;
@@ -51,13 +49,11 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
   const stopFiredRef = useRef(false);
   // Flag: real microphone permission denied by the browser — stop all restart attempts
   const permissionDeniedRef = useRef(false);
-  // Timestamp when recording last stopped — mic may still be held by MediaRecorder for a bit
-  const recordingStoppedAtRef = useRef(0);
   // Deduplicate interim wake word triggers — store last fired transcript
   const lastWakeTranscriptRef = useRef('');
-  // Consecutive not-allowed count for exponential backoff (resets on successful onstart)
+  // Consecutive not-allowed count — drives exponential backoff (resets on successful onstart)
   const notAllowedCountRef = useRef(0);
-  // Restart delay passed from onerror to onend (ms)
+  // Restart delay for next onend (ms) — set by onerror, consumed by onend
   const pendingRestartDelayRef = useRef(300);
 
   const [isListening, setIsListening] = useState(false);
@@ -77,9 +73,6 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
     if (isRecording) {
       stopFiredRef.current = false;
       lastWakeTranscriptRef.current = '';
-    } else {
-      // Record when recording stopped so we can ignore brief mic-busy errors
-      recordingStoppedAtRef.current = Date.now();
     }
   }, [isRecording]);
   useEffect(() => { enabledRef.current = enabled; }, [enabled]);
@@ -113,6 +106,8 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
 
     recognition.onstart = () => {
       console.log('[WakeWord] Recognition started');
+      notAllowedCountRef.current = 0;
+      pendingRestartDelayRef.current = 300;
       setIsListening(true);
     };
 
@@ -171,18 +166,16 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
       if (event.error === 'no-speech' || event.error === 'aborted') return;
 
       if (event.error === 'not-allowed') {
-        const elapsed = Date.now() - recordingStoppedAtRef.current;
-        const micStillReleasing =
-          isRecordingRef.current ||
-          elapsed < MIC_RELEASE_COOLDOWN_MS;
-
-        if (micStillReleasing) {
-          console.log(`[WakeWord] not-allowed ignored (mic releasing, ${elapsed}ms since stop)`);
-          return;
+        notAllowedCountRef.current++;
+        // Exponential backoff: 300ms → 600 → 1200 → 2400 → max 10s
+        // Never permanently disabled — mic may be transitioning from MediaRecorder
+        const delay = Math.min(300 * Math.pow(2, notAllowedCountRef.current - 1), 10000);
+        pendingRestartDelayRef.current = delay;
+        if (notAllowedCountRef.current <= 3) {
+          console.log(`[WakeWord] not-allowed #${notAllowedCountRef.current}, retrying in ${delay}ms (mic transitioning)`);
+        } else {
+          console.warn(`[WakeWord] not-allowed #${notAllowedCountRef.current}, retrying in ${delay}ms — check mic permissions`);
         }
-        // Real permission denied by user in browser settings
-        console.warn('[WakeWord] Microphone permission denied — wake word disabled until page reload');
-        permissionDeniedRef.current = true;
         return;
       }
 
@@ -192,13 +185,14 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
     recognition.onend = () => {
       setIsListening(false);
       const willRestart = enabledRef.current && !permissionDeniedRef.current;
-      console.log('[WakeWord] Recognition ended, willRestart:', willRestart);
       if (willRestart) {
+        const delay = pendingRestartDelayRef.current;
+        pendingRestartDelayRef.current = 300; // reset for next session
         restartTimeoutRef.current = window.setTimeout(() => {
           if (enabledRef.current && !permissionDeniedRef.current) {
             createAndStart();
           }
-        }, 300);
+        }, delay);
       }
     };
 
@@ -241,15 +235,13 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
     }
   }, [isRecording, createAndStart]);
 
-  // Enable/disable effect — resets permission denied flag on re-enable
+  // Enable/disable effect — resets state on re-enable
   useEffect(() => {
     if (enabled && isSupported) {
       permissionDeniedRef.current = false;
       lastWakeTranscriptRef.current = '';
-      // Treat mount as "mic just released" so that not-allowed errors within
-      // the first 3 seconds (mic transitioning from a previous MediaRecorder)
-      // are not mistaken for a real user permission denial.
-      recordingStoppedAtRef.current = Date.now();
+      notAllowedCountRef.current = 0;
+      pendingRestartDelayRef.current = 300;
       createAndStart();
     } else {
       stop();
@@ -263,10 +255,7 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
   useEffect(() => {
     if (!enabled || !isSupported) return;
     const watchdog = setInterval(() => {
-      // Skip if permission denied, mic busy, or recently stopped recording
-      if (permissionDeniedRef.current) return;
-      if (isRecordingRef.current) return;
-      if (Date.now() - recordingStoppedAtRef.current < MIC_RELEASE_COOLDOWN_MS) return;
+      if (permissionDeniedRef.current || isRecordingRef.current) return;
       if (enabledRef.current && !isListeningRef.current) {
         console.log('[WakeWord] Watchdog: not listening, restarting...');
         createAndStart();
