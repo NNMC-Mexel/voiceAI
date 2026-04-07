@@ -43,16 +43,17 @@ function App() {
   useEffect(() => {
     try {
       sessionStorage.setItem(SESSION_STEP_KEY, step);
-    } catch {
-      // ignore
+    } catch (err) {
+      console.warn('[session] не удалось сохранить step:', err);
     }
   }, [step]);
 
   useEffect(() => {
     try {
       sessionStorage.setItem(SESSION_DOC_KEY, JSON.stringify(document));
-    } catch {
-      // ignore
+    } catch (err) {
+      // QuotaExceededError при очень большом документе — диагностический сигнал
+      console.warn('[session] не удалось сохранить документ:', err);
     }
   }, [document]);
 
@@ -72,15 +73,36 @@ function App() {
     setError(null);
 
     try {
-      const result = await apiClient.processAudio(blob, filenameForBlob(blob, 'recording'));
+      const filename = filenameForBlob(blob, 'recording');
 
-      if (result.success && result.document) {
+      // Step 1: upload audio
+      const upload = await apiClient.uploadAudio(blob, filename);
+
+      // Step 2: Whisper transcription
+      console.group('%c[WHISPER] Транскрипция', 'color: #00bcd4; font-weight: bold; font-size: 13px');
+      console.log('Файл:', upload.filename);
+      const transcription = await apiClient.transcribe(upload.filename);
+      console.log('Язык:', transcription.language);
+      console.log('Длительность:', transcription.duration, 'с');
+      console.log('%cТекст Whisper:\n' + transcription.text, 'color: #00bcd4; white-space: pre-wrap');
+      console.groupEnd();
+
+      // Step 3: LLM structuring
+      console.group('%c[LLM] Структурирование', 'color: #ff9800; font-weight: bold; font-size: 13px');
+      console.log('Входной текст:', transcription.text);
+      const structured = await apiClient.structureText(transcription.text);
+      console.log('Время обработки:', structured.processingTime, 'мс');
+      console.log('%cДокумент от LLM:', 'color: #ff9800; font-weight: bold');
+      console.log(structured.document);
+      console.groupEnd();
+
+      if (structured.success && structured.document) {
         const today = new Date().toISOString().slice(0, 10);
         setDocument({
-          ...result.document,
+          ...structured.document,
           patient: {
-            ...result.document.patient,
-            complaintDate: result.document.patient.complaintDate || today,
+            ...structured.document.patient,
+            complaintDate: structured.document.patient.complaintDate || today,
           },
         });
         setStep('editing');

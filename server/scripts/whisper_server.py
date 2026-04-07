@@ -97,14 +97,48 @@ else:
 
 
 def get_audio_duration(audio_path: str) -> float:
-    """Get audio duration in seconds using ffprobe."""
+    """Get audio duration in seconds using ffprobe.
+    Falls back to stream duration or decoded frame count if format.duration is missing
+    (e.g. for webm recordings from MediaRecorder that lack duration metadata)."""
+    # Try format.duration first
     result = subprocess.run(
         ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
          "-of", "json", audio_path],
         capture_output=True, text=True, timeout=30,
     )
-    data = json.loads(result.stdout)
-    return float(data["format"]["duration"])
+    try:
+        data = json.loads(result.stdout)
+        dur = data.get("format", {}).get("duration")
+        if dur is not None:
+            return float(dur)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+
+    # Fallback: decode and count packets (works for webm without duration metadata)
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0",
+         "-show_entries", "stream=duration", "-of",
+         "default=noprint_wrappers=1:nokey=1", audio_path],
+        capture_output=True, text=True, timeout=30,
+    )
+    try:
+        val = result.stdout.strip()
+        if val and val != "N/A":
+            return float(val)
+    except ValueError:
+        pass
+
+    # Last resort: full decode to measure duration
+    result = subprocess.run(
+        ["ffmpeg", "-i", audio_path, "-f", "null", "-"],
+        capture_output=True, text=True, timeout=300,
+    )
+    m = re.search(r"time=(\d+):(\d+):([\d.]+)", result.stderr)
+    if m:
+        h, mi, s = float(m.group(1)), float(m.group(2)), float(m.group(3))
+        return h * 3600 + mi * 60 + s
+
+    raise RuntimeError(f"Could not determine duration of {audio_path}")
 
 
 def detect_silences(audio_path: str, noise_db: int = -30, min_silence_sec: float = 0.3) -> list:
@@ -176,48 +210,114 @@ def compute_split_points(duration: float, silences: list, target_sec: int = 30) 
 
 def split_audio(audio_path: str, split_points: list) -> list:
     """Split audio file at given time points using ffmpeg.
-    Returns list of temporary chunk file paths (caller must clean up)."""
+    Returns list of temporary chunk file paths (caller must clean up).
+    On exception cleans up all created files to avoid leaking tmp space."""
     chunks = []
-    for i in range(len(split_points) - 1):
-        start = split_points[i]
-        chunk_duration = split_points[i + 1] - start
-        fd, chunk_path = tempfile.mkstemp(suffix=".wav")
-        os.close(fd)
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", audio_path,
-             "-ss", f"{start:.3f}", "-t", f"{chunk_duration:.3f}",
-             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
-             chunk_path],
-            capture_output=True, timeout=60,
-        )
-        # Verify chunk was created and is non-empty
-        if os.path.isfile(chunk_path) and os.path.getsize(chunk_path) > 1000:
-            chunks.append(chunk_path)
-        else:
-            # Cleanup failed chunk
+    chunk_path = None
+    try:
+        for i in range(len(split_points) - 1):
+            start = split_points[i]
+            chunk_duration = split_points[i + 1] - start
+            fd, chunk_path = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", audio_path,
+                     "-ss", f"{start:.3f}", "-t", f"{chunk_duration:.3f}",
+                     "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
+                     chunk_path],
+                    capture_output=True, timeout=60, check=False,
+                )
+            except subprocess.TimeoutExpired:
+                logger.warning(f"ffmpeg timeout splitting chunk {i+1}, skipping")
+                try:
+                    os.unlink(chunk_path)
+                except OSError:
+                    pass
+                chunk_path = None
+                continue
+            # Verify chunk was created and is non-empty
+            if os.path.isfile(chunk_path) and os.path.getsize(chunk_path) > 1000:
+                chunks.append(chunk_path)
+            else:
+                try:
+                    os.unlink(chunk_path)
+                except OSError:
+                    pass
+            chunk_path = None
+        return chunks
+    except Exception:
+        # На любой непредвиденной ошибке — чистим всё что успели создать
+        if chunk_path and os.path.isfile(chunk_path):
             try:
                 os.unlink(chunk_path)
             except OSError:
                 pass
-    return chunks
+        for cp in chunks:
+            try:
+                os.unlink(cp)
+            except OSError:
+                pass
+        raise
+
+
+SHORT_AUDIO_SEC = 300  # < 5 мин — короткое, можно держать contextual continuation
+
+
+def _collect_segments(segments_iter):
+    """Drain a faster-whisper segments generator into (text, avg_logprob).
+    avg_logprob = duration-weighted mean of segment-level logprobs."""
+    parts = []
+    weighted = 0.0
+    total_dur = 0.0
+    for s in segments_iter:
+        parts.append(s.text.strip())
+        dur = max(0.001, (s.end or 0) - (s.start or 0))
+        weighted += (s.avg_logprob or 0) * dur
+        total_dur += dur
+    text = " ".join(p for p in parts if p)
+    avg_logprob = weighted / total_dur if total_dur > 0 else 0.0
+    return text, avg_logprob
 
 
 def transcribe_chunked(audio_path: str, language: str, beam_size: int,
-                       initial_prompt: str) -> tuple:
+                       initial_prompt: str, hotwords: str = "") -> tuple:
     """Transcribe long audio by splitting into chunks.
-    Returns (text, info, n_chunks, chunk_details)."""
+    Returns (text, info, n_chunks, chunk_details, avg_logprob)."""
     duration = get_audio_duration(audio_path)
+
+    # Адаптивные параметры по длительности:
+    # - короткое аудио (<5 мин): condition_on_previous_text=True для связности контекста
+    # - длинное: False, чтобы галлюцинации не распространялись по сегментам
+    is_short = duration <= SHORT_AUDIO_SEC
+
+    common_kwargs = dict(
+        language=language,
+        beam_size=beam_size,
+        initial_prompt=initial_prompt,
+        # VAD внутри faster-whisper — режет тишину и улучшает сегментацию,
+        # без внешнего ffmpeg-чанкинга по тишине
+        vad_filter=True,
+        vad_parameters=dict(min_silence_duration_ms=500),
+        # Repetition penalty повышен с 1.2 → 1.3 для длинных медицинских записей
+        # с естественными повторами («давление 140, давление 140»)
+        repetition_penalty=1.3,
+        condition_on_previous_text=is_short,
+        temperature=0,
+        no_speech_threshold=0.6,
+        word_timestamps=True,
+    )
+    if hotwords:
+        common_kwargs["hotwords"] = hotwords
 
     if duration <= CHUNK_THRESHOLD or not HAS_FFMPEG:
         # Short audio or no ffmpeg — transcribe as-is
-        segments, info = model.transcribe(
-            audio_path, language=language, beam_size=beam_size,
-            initial_prompt=initial_prompt,
-        )
-        text = " ".join(s.text.strip() for s in segments)
-        return text, info, 1, [{"duration": duration, "chars": len(text)}]
+        segments, info = model.transcribe(audio_path, **common_kwargs)
+        text, avg_lp = _collect_segments(segments)
+        return text, info, 1, [{"duration": duration, "chars": len(text), "avg_logprob": round(avg_lp, 3)}], avg_lp
 
-    # Long audio — chunk it
+    # Длинное аудио — оставляем chunking как safety net на случай экстремально
+    # длинных записей. Но т.к. включён vad_filter, чанков будет меньше.
     logger.info(f"Audio is {duration:.1f}s (>{CHUNK_THRESHOLD}s) — activating chunking")
     silences = detect_silences(audio_path)
     logger.info(f"Found {len(silences)} silence intervals")
@@ -230,24 +330,20 @@ def transcribe_chunked(audio_path: str, language: str, beam_size: int,
     if not chunk_paths:
         # Fallback: split failed, transcribe whole file
         logger.warning("Chunk splitting failed — falling back to whole-file transcription")
-        segments, info = model.transcribe(
-            audio_path, language=language, beam_size=beam_size,
-            initial_prompt=initial_prompt,
-        )
-        text = " ".join(s.text.strip() for s in segments)
-        return text, info, 1, [{"duration": duration, "chars": len(text)}]
+        segments, info = model.transcribe(audio_path, **common_kwargs)
+        text, avg_lp = _collect_segments(segments)
+        return text, info, 1, [{"duration": duration, "chars": len(text), "avg_logprob": round(avg_lp, 3)}], avg_lp
 
     texts = []
     chunk_details = []
     info = None
+    weighted_lp = 0.0
+    total_lp_dur = 0.0
     try:
         for i, chunk_path in enumerate(chunk_paths):
             t_chunk = time.time()
-            segments, chunk_info = model.transcribe(
-                chunk_path, language=language, beam_size=beam_size,
-                initial_prompt=initial_prompt,
-            )
-            chunk_text = " ".join(s.text.strip() for s in segments)
+            segments, chunk_info = model.transcribe(chunk_path, **common_kwargs)
+            chunk_text, chunk_lp = _collect_segments(segments)
             chunk_elapsed = time.time() - t_chunk
             chunk_dur = split_points[i + 1] - split_points[i]
 
@@ -257,10 +353,14 @@ def transcribe_chunked(audio_path: str, language: str, beam_size: int,
                 "duration": round(chunk_dur, 1),
                 "chars": len(chunk_text),
                 "elapsed": round(chunk_elapsed, 2),
+                "avg_logprob": round(chunk_lp, 3),
             })
+            weighted_lp += chunk_lp * chunk_dur
+            total_lp_dur += chunk_dur
             logger.info(
                 f"  Chunk {i+1}/{len(chunk_paths)}: "
-                f"{chunk_dur:.1f}s → {len(chunk_text)} chars in {chunk_elapsed:.2f}s"
+                f"{chunk_dur:.1f}s → {len(chunk_text)} chars in {chunk_elapsed:.2f}s "
+                f"logprob={chunk_lp:.2f}"
             )
             if info is None:
                 info = chunk_info
@@ -273,7 +373,8 @@ def transcribe_chunked(audio_path: str, language: str, beam_size: int,
                 pass
 
     text = " ".join(t for t in texts if t)
-    return text, info, len(chunk_paths), chunk_details
+    avg_lp = weighted_lp / total_lp_dur if total_lp_dur > 0 else 0.0
+    return text, info, len(chunk_paths), chunk_details, avg_lp
 
 
 class WhisperHandler(BaseHTTPRequestHandler):
@@ -334,16 +435,24 @@ class WhisperHandler(BaseHTTPRequestHandler):
             # Транскрипция — модель уже загружена, начинаем сразу
             t0 = time.time()
             initial_prompt = data.get("initial_prompt", INITIAL_PROMPT) or INITIAL_PROMPT
+            hotwords = data.get("hotwords", "") or ""
 
-            text, info, n_chunks, chunk_details = transcribe_chunked(
+            text, info, n_chunks, chunk_details, avg_logprob = transcribe_chunked(
                 audio_path, language=language, beam_size=beam_size,
-                initial_prompt=initial_prompt,
+                initial_prompt=initial_prompt, hotwords=hotwords,
             )
             elapsed = time.time() - t0
 
+            # avg_logprob — индикатор уверенности модели:
+            #   > -0.5  отлично
+            #   -0.5..-1.0  норма
+            #   < -1.0  возможны галлюцинации, требует проверки
+            confidence_warning = avg_logprob < -1.0
             logger.info(
                 f"OK  {elapsed:.2f}s | {len(text)} chars | "
-                f"lang={info.language} | chunks={n_chunks}"
+                f"lang={info.language} | chunks={n_chunks} | "
+                f"avg_logprob={avg_logprob:.2f}"
+                f"{'  [LOW CONFIDENCE]' if confidence_warning else ''}"
             )
             self._send_json(200, {
                 "text": text,
@@ -351,6 +460,8 @@ class WhisperHandler(BaseHTTPRequestHandler):
                 "elapsed": elapsed,
                 "chunks": n_chunks,
                 "chunk_details": chunk_details,
+                "avg_logprob": round(avg_logprob, 3),
+                "low_confidence": confidence_warning,
             })
         except Exception as exc:
             logger.error(f"Transcription failed: {exc}", exc_info=True)

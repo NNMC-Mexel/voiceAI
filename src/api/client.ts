@@ -1,7 +1,7 @@
 ﻿import type { MedicalDocument } from '../types';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
-const API_TIMEOUT_MS = Number.parseInt(import.meta.env.VITE_API_TIMEOUT_MS || '30000', 10);
+const API_TIMEOUT_MS = Number.parseInt(import.meta.env.VITE_API_TIMEOUT_MS || '120000', 10);
 
 interface UploadResponse {
   success: boolean;
@@ -124,57 +124,81 @@ class ApiClient {
   }
 
   private async request<T>(path: string, init?: RequestInit, timeoutMs?: number): Promise<T> {
-    const controller = new AbortController();
-    const effectiveTimeout = timeoutMs ?? API_TIMEOUT_MS;
-    const timeout = effectiveTimeout > 0
-      ? window.setTimeout(() => controller.abort(), effectiveTimeout)
-      : null;
+    // Retry только для идемпотентных GET без тела. POST с большими файлами/аудио
+    // НЕ ретраим — это опасно (двойная транскрипция, двойной LLM вызов).
+    const method = (init?.method ?? 'GET').toUpperCase();
+    const isIdempotent = method === 'GET';
+    const maxAttempts = isIdempotent ? 3 : 1;
 
-    const token = this.getToken();
-    const headers = new Headers(init?.headers);
-    if (token) {
-      headers.set('Authorization', `Bearer ${token}`);
-    }
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const controller = new AbortController();
+      const effectiveTimeout = timeoutMs ?? API_TIMEOUT_MS;
+      const timeout = effectiveTimeout > 0
+        ? window.setTimeout(() => controller.abort(), effectiveTimeout)
+        : null;
 
-    try {
-      const response = await fetch(`${this.baseUrl}${path}`, {
-        ...init,
-        headers,
-        signal: controller.signal,
-      });
+      const token = this.getToken();
+      const headers = new Headers(init?.headers);
+      if (token) {
+        headers.set('Authorization', `Bearer ${token}`);
+      }
 
-      if (!response.ok) {
-        if (response.status === 401) {
-          this.clearToken();
-          window.dispatchEvent(new Event('auth:logout'));
-        }
-        let errorMessage = `Request failed: ${response.status}`;
-        try {
-          const text = await response.text();
-          if (text) {
-            try {
-              const err = JSON.parse(text) as { error?: unknown; message?: unknown };
-              if (err?.error) errorMessage = String(err.error);
-              else if (err?.message) errorMessage = String(err.message);
-            } catch {
-              errorMessage = text;
-            }
+      try {
+        const response = await fetch(`${this.baseUrl}${path}`, {
+          ...init,
+          headers,
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          if (response.status === 401) {
+            this.clearToken();
+            window.dispatchEvent(new Event('auth:logout'));
           }
-        } catch {
-          // ignore body read errors
+          let errorMessage = `Request failed: ${response.status}`;
+          try {
+            const text = await response.text();
+            if (text) {
+              try {
+                const err = JSON.parse(text) as { error?: unknown; message?: unknown };
+                if (err?.error) errorMessage = String(err.error);
+                else if (err?.message) errorMessage = String(err.message);
+              } catch {
+                errorMessage = text;
+              }
+            }
+          } catch {
+            // ignore body read errors
+          }
+          // 4xx (кроме 408/429) — ошибка клиента, retry бесполезен
+          const transient = response.status === 408 || response.status === 429 || response.status >= 500;
+          if (!transient || attempt === maxAttempts) {
+            throw new Error(errorMessage);
+          }
+          lastError = new Error(errorMessage);
+        } else {
+          return (await response.json()) as T;
         }
-        throw new Error(errorMessage);
+      } catch (error) {
+        lastError = error;
+        if (error instanceof Error && error.name === 'AbortError') {
+          if (attempt === maxAttempts) {
+            throw new Error(`Запрос превысил таймаут ${Math.round(effectiveTimeout / 1000)}с`);
+          }
+        } else if (attempt === maxAttempts) {
+          throw error;
+        }
+      } finally {
+        if (timeout !== null) window.clearTimeout(timeout);
       }
 
-      return (await response.json()) as T;
-    } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error(`Запрос превысил таймаут ${Math.round(effectiveTimeout / 1000)}с`);
+      // Exponential backoff: 300ms, 900ms
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 300 * Math.pow(3, attempt - 1)));
       }
-      throw error;
-    } finally {
-      if (timeout !== null) window.clearTimeout(timeout);
     }
+    throw lastError instanceof Error ? lastError : new Error('Request failed');
   }
 
   async healthCheck(): Promise<{ status: string; timestamp: string }> {
@@ -232,7 +256,7 @@ class ApiClient {
     return this.request('/api/process', {
       method: 'POST',
       body: formData,
-    }, 300_000);
+    }, 600_000);
   }
 
   async processAddendum(

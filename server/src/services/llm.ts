@@ -286,7 +286,7 @@ Return JSON patch only.`;
     if (truncated) {
       console.warn(`[LLM] WARNING: Response truncated (no EOS). Prompt=${promptSize} chars, input=${rawText.length} chars, output=${raw.length} chars. Check llama.cpp n_ctx setting.`);
     }
-    const document = await this.parseDocumentWithRepair(raw);
+    const document = await this.parseDocumentWithRepair(raw, rawText);
 
     // Log raw LLM output BEFORE post-processing
     const LLM_FIELDS = ['complaints','anamnesis','clinicalCourse','allergyHistory','objectiveStatus',
@@ -347,8 +347,9 @@ Answer in Russian and use bullet points.`;
       headers: { 'Content-Type': 'application/json' },
       body: this.buildCompletionBody({
         prompt: `<|im_start|>system\n/no_think\n${systemPrompt}<|im_end|>\n<|im_start|>user\n${userPrompt}<|im_end|>\n<|im_start|>assistant\n`,
-        n_predict: 256,
-        temperature: 0,
+        n_predict: 512,
+        // 0.3 — естественнее звучит, меньше зацикливания на повторах
+        temperature: 0.3,
         stop: ['<|im_end|>'],
         stream: false,
       }),
@@ -391,8 +392,9 @@ Rules:
       headers: { 'Content-Type': 'application/json' },
       body: this.buildCompletionBody({
         prompt: `<|im_start|>system\n/no_think\n${systemPrompt}<|im_end|>\n<|im_start|>user\n${userPrompt}<|im_end|>\n<|im_start|>assistant\n`,
-        n_predict: 384,
-        temperature: 0,
+        n_predict: 1024,
+        // 0.4 — для диалога нужна вариативность, но в рамках клинической точности
+        temperature: 0.4,
         stop: ['<|im_end|>'],
         stream: false,
       }),
@@ -2235,7 +2237,7 @@ JSON:`;
     return result;
   }
 
-  private async parseDocumentWithRepair(content: string): Promise<MedicalDocument> {
+  private async parseDocumentWithRepair(content: string, rawText?: string): Promise<MedicalDocument> {
     try {
       return this.parseLlmJson<MedicalDocument>(content);
     } catch (firstError) {
@@ -2245,7 +2247,10 @@ JSON:`;
         return this.parseLlmJson<MedicalDocument>(repaired);
       } catch (repairError) {
         console.warn(`[llm] LLM repair failed: ${repairError}`);
-        throw new Error(`Failed to parse LLM JSON after repair attempt: ${firstError}`);
+        // Graceful degradation: чем потерять 7 минут аудио, лучше отдать
+        // пустой документ с сырым текстом в complaints — врач сам разнесёт по полям.
+        console.warn('[llm] Falling back to mock document with raw transcription in complaints');
+        return this.getMockStructuredDocument(rawText ?? content);
       }
     }
   }

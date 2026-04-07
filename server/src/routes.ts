@@ -105,7 +105,43 @@ export async function registerRoutes(
   }
 
   const rateMap = new Map<string, RateState>();
-  const authTokens = new Set<string>();
+
+  // Сессионные токены с TTL. Без TTL — утечка памяти от мёртвых сессий.
+  const AUTH_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 часа
+  const authTokens = new Map<string, number>(); // token → expiresAt
+  const isTokenValid = (token: string): boolean => {
+    const exp = authTokens.get(token);
+    if (!exp) return false;
+    if (Date.now() > exp) {
+      authTokens.delete(token);
+      return false;
+    }
+    return true;
+  };
+  // Периодическая очистка истёкших записей (раз в час).
+  // Без неё authTokens/loginAttempts/rateMap утекают в памяти при долгом аптайме.
+  const cleanupInterval = setInterval(() => {
+    const now = Date.now();
+    for (const [token, exp] of authTokens) {
+      if (now > exp) authTokens.delete(token);
+    }
+    for (const [ip, st] of loginAttempts) {
+      // Удаляем записи, у которых lockout истёк И счётчик не растёт > 1ч
+      if (st.lockedUntil > 0 && now > st.lockedUntil) loginAttempts.delete(ip);
+    }
+    for (const [ip, st] of rateMap) {
+      if (now - st.windowStartedAt > config.security.rateLimitWindowMs * 2) {
+        rateMap.delete(ip);
+      }
+    }
+  }, 60 * 60 * 1000);
+  cleanupInterval.unref?.();
+
+  // Brute-force защита на /api/auth/login: lockout по IP после N неудачных попыток.
+  const LOGIN_MAX_ATTEMPTS = 5;
+  const LOGIN_LOCKOUT_MS = 15 * 60 * 1000; // 15 минут
+  const LOGIN_FAIL_DELAY_MS = 500; // задержка ответа на неверный пароль
+  const loginAttempts = new Map<string, { count: number; lockedUntil: number }>();
 
   fastify.addHook('onRequest', async (request, reply) => {
     const url = request.url;
@@ -119,7 +155,7 @@ export async function registerRoutes(
       const auth = request.headers.authorization;
       const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
 
-      if (!token || !authTokens.has(token)) {
+      if (!token || !isTokenValid(token)) {
         return reply.status(401).send({ error: 'Unauthorized' });
       }
     }
@@ -158,15 +194,48 @@ export async function registerRoutes(
       return { success: true, token: 'no-auth' };
     }
 
+    const ip = request.ip || 'unknown';
+    const now = Date.now();
+    const attempt = loginAttempts.get(ip);
+
+    // Lockout по IP
+    if (attempt && attempt.lockedUntil > now) {
+      const minutesLeft = Math.ceil((attempt.lockedUntil - now) / 60000);
+      return reply.status(429).send({
+        error: `Слишком много попыток. Попробуйте через ${minutesLeft} мин.`,
+      });
+    }
+
     const body = request.body as Record<string, unknown> | null;
     const password = typeof body?.password === 'string' ? body.password : '';
 
     if (password !== config.security.authPassword) {
+      // Задержка ответа — замедляем перебор
+      await new Promise((resolve) => setTimeout(resolve, LOGIN_FAIL_DELAY_MS));
+
+      const next = attempt && attempt.lockedUntil <= now
+        ? { count: attempt.count + 1, lockedUntil: 0 }
+        : { count: (attempt?.count ?? 0) + 1, lockedUntil: 0 };
+
+      if (next.count >= LOGIN_MAX_ATTEMPTS) {
+        next.lockedUntil = now + LOGIN_LOCKOUT_MS;
+        next.count = 0;
+        loginAttempts.set(ip, next);
+        request.log.warn({ ip }, 'Login lockout triggered');
+        return reply.status(429).send({
+          error: 'Слишком много неверных попыток. Заблокировано на 15 минут.',
+        });
+      }
+
+      loginAttempts.set(ip, next);
       return reply.status(401).send({ error: 'Неверный пароль' });
     }
 
+    // Успешный логин — сбрасываем счётчик
+    loginAttempts.delete(ip);
+
     const token = randomUUID();
-    authTokens.add(token);
+    authTokens.set(token, now + AUTH_TOKEN_TTL_MS);
     return { success: true, token };
   });
 
@@ -183,7 +252,7 @@ export async function registerRoutes(
     }
     const auth = request.headers.authorization;
     const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-    if (!token || !authTokens.has(token)) {
+    if (!token || !isTokenValid(token)) {
       return reply.status(401).send({ authenticated: false });
     }
     return { authenticated: true };
@@ -281,9 +350,11 @@ export async function registerRoutes(
       };
     } catch (error) {
       console.error('Structuring error:', error);
-      return reply.status(500).send({
-        error: 'Text structuring failed',
-        message: error instanceof Error ? error.message : 'Unknown error',
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      const isTimeout = /timeout|таймаут|aborted|ECONNABORTED/i.test(message);
+      return reply.status(isTimeout ? 408 : 500).send({
+        error: isTimeout ? 'LLM request timeout' : 'Text structuring failed',
+        message,
       });
     }
   });
