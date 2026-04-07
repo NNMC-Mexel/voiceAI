@@ -1329,7 +1329,13 @@ JSON:`;
     const lines = text
       .split(/\n/)
       .map((l) => l.replace(/^\s*\d+[\.\)]\s*/, '').trim()) // убираем существующую нумерацию
-      .filter((l) => l.length > 0);
+      .filter((l) => l.length > 0)
+      // Убираем строки, которые выглядят как рекомендации (ошибка LLM: попали не в то поле)
+      .filter((l) => {
+        const isRecommendationBullet = /^[-–•]\s+.{10,}/u.test(l) &&
+          /провест|назначит|рекоменд|оценит|исключит|направит|контрол|наблюден|соблюда|избегат|проверит|получит|принима|лечени|терапи|обследовани/iu.test(l);
+        return !isRecommendationBullet;
+      });
 
     if (lines.length === 0) return text;
 
@@ -1356,7 +1362,7 @@ JSON:`;
         );
         const match = line.match(valuePattern);
         if (match) {
-          values[param.name] = match[1];
+          values[param.name] = match[1].replace(/[,.]$/, ''); // strip trailing comma/dot
         }
       }
 
