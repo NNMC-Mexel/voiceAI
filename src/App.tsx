@@ -43,16 +43,17 @@ function App() {
   useEffect(() => {
     try {
       sessionStorage.setItem(SESSION_STEP_KEY, step);
-    } catch {
-      // ignore
+    } catch (err) {
+      console.warn('[session] не удалось сохранить step:', err);
     }
   }, [step]);
 
   useEffect(() => {
     try {
       sessionStorage.setItem(SESSION_DOC_KEY, JSON.stringify(document));
-    } catch {
-      // ignore
+    } catch (err) {
+      // QuotaExceededError при очень большом документе — диагностический сигнал
+      console.warn('[session] не удалось сохранить документ:', err);
     }
   }, [document]);
 

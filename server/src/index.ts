@@ -45,6 +45,9 @@ async function main() {
   const isProduction = process.env.NODE_ENV === 'production';
 
   const fastify = Fastify({
+    // За Coolify/Nginx/CloudFlare берём реальный IP клиента из X-Forwarded-For,
+    // иначе rate-limit/brute-force защита считают всех одним IP прокси.
+    trustProxy: true,
     logger: {
       level: 'info',
       transport: {
