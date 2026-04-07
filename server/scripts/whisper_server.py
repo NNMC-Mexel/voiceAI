@@ -61,6 +61,22 @@ INITIAL_PROMPT  = os.environ.get(
     "амлодипин, метформин, омепразол, аспирин, метопролол, лизиноприл, аторвастатин.",
 )
 
+def _json_default(obj):
+    """Handle numpy types that stdlib json can't serialize (numpy.bool_, numpy.float32, etc.)."""
+    try:
+        import numpy as np
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+    except ImportError:
+        pass
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
 logger.info(f"Loading Whisper model '{MODEL_PATH}' on {DEVICE} ({COMPUTE_TYPE}) ...")
 t_start = time.time()
 
@@ -475,7 +491,8 @@ class WhisperHandler(BaseHTTPRequestHandler):
                     pass
 
     def _send_json(self, code: int, data: dict) -> None:
-        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        # default=_json_default handles numpy types (numpy.bool_, numpy.float32, etc.)
+        body = json.dumps(data, ensure_ascii=False, default=_json_default).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
