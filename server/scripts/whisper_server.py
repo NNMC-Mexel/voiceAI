@@ -61,6 +61,22 @@ INITIAL_PROMPT  = os.environ.get(
     "амлодипин, метформин, омепразол, аспирин, метопролол, лизиноприл, аторвастатин.",
 )
 
+def _json_default(obj):
+    """Handle numpy types that stdlib json can't serialize (numpy.bool_, numpy.float32, etc.)."""
+    try:
+        import numpy as np
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+    except ImportError:
+        pass
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
 logger.info(f"Loading Whisper model '{MODEL_PATH}' on {DEVICE} ({COMPUTE_TYPE}) ...")
 t_start = time.time()
 
@@ -272,11 +288,11 @@ def _collect_segments(segments_iter):
     total_dur = 0.0
     for s in segments_iter:
         parts.append(s.text.strip())
-        dur = max(0.001, (s.end or 0) - (s.start or 0))
-        weighted += (s.avg_logprob or 0) * dur
+        dur = max(0.001, float((s.end or 0) - (s.start or 0)))
+        weighted += float(s.avg_logprob or 0) * dur
         total_dur += dur
     text = " ".join(p for p in parts if p)
-    avg_logprob = weighted / total_dur if total_dur > 0 else 0.0
+    avg_logprob = float(weighted / total_dur) if total_dur > 0 else 0.0
     return text, avg_logprob
 
 
@@ -314,7 +330,7 @@ def transcribe_chunked(audio_path: str, language: str, beam_size: int,
         # Short audio or no ffmpeg — transcribe as-is
         segments, info = model.transcribe(audio_path, **common_kwargs)
         text, avg_lp = _collect_segments(segments)
-        return text, info, 1, [{"duration": duration, "chars": len(text), "avg_logprob": round(avg_lp, 3)}], avg_lp
+        return text, info, 1, [{"duration": float(duration), "chars": len(text), "avg_logprob": float(round(avg_lp, 3))}], float(avg_lp)
 
     # Длинное аудио — оставляем chunking как safety net на случай экстремально
     # длинных записей. Но т.к. включён vad_filter, чанков будет меньше.
@@ -332,7 +348,7 @@ def transcribe_chunked(audio_path: str, language: str, beam_size: int,
         logger.warning("Chunk splitting failed — falling back to whole-file transcription")
         segments, info = model.transcribe(audio_path, **common_kwargs)
         text, avg_lp = _collect_segments(segments)
-        return text, info, 1, [{"duration": duration, "chars": len(text), "avg_logprob": round(avg_lp, 3)}], avg_lp
+        return text, info, 1, [{"duration": float(duration), "chars": len(text), "avg_logprob": float(round(avg_lp, 3))}], float(avg_lp)
 
     texts = []
     chunk_details = []
@@ -350,10 +366,10 @@ def transcribe_chunked(audio_path: str, language: str, beam_size: int,
             texts.append(chunk_text)
             chunk_details.append({
                 "chunk": i + 1,
-                "duration": round(chunk_dur, 1),
+                "duration": float(round(chunk_dur, 1)),
                 "chars": len(chunk_text),
                 "elapsed": round(chunk_elapsed, 2),
-                "avg_logprob": round(chunk_lp, 3),
+                "avg_logprob": float(round(chunk_lp, 3)),
             })
             weighted_lp += chunk_lp * chunk_dur
             total_lp_dur += chunk_dur
@@ -373,7 +389,7 @@ def transcribe_chunked(audio_path: str, language: str, beam_size: int,
                 pass
 
     text = " ".join(t for t in texts if t)
-    avg_lp = weighted_lp / total_lp_dur if total_lp_dur > 0 else 0.0
+    avg_lp = float(weighted_lp / total_lp_dur) if total_lp_dur > 0 else 0.0
     return text, info, len(chunk_paths), chunk_details, avg_lp
 
 
@@ -447,7 +463,7 @@ class WhisperHandler(BaseHTTPRequestHandler):
             #   > -0.5  отлично
             #   -0.5..-1.0  норма
             #   < -1.0  возможны галлюцинации, требует проверки
-            confidence_warning = avg_logprob < -1.0
+            confidence_warning = bool(avg_logprob < -1.0)
             logger.info(
                 f"OK  {elapsed:.2f}s | {len(text)} chars | "
                 f"lang={info.language} | chunks={n_chunks} | "
@@ -460,7 +476,7 @@ class WhisperHandler(BaseHTTPRequestHandler):
                 "elapsed": elapsed,
                 "chunks": n_chunks,
                 "chunk_details": chunk_details,
-                "avg_logprob": round(avg_logprob, 3),
+                "avg_logprob": float(round(avg_logprob, 3)),
                 "low_confidence": confidence_warning,
             })
         except Exception as exc:
@@ -475,7 +491,8 @@ class WhisperHandler(BaseHTTPRequestHandler):
                     pass
 
     def _send_json(self, code: int, data: dict) -> None:
-        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        # default=_json_default handles numpy types (numpy.bool_, numpy.float32, etc.)
+        body = json.dumps(data, ensure_ascii=False, default=_json_default).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
