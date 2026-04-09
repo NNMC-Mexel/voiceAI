@@ -18,50 +18,20 @@ interface WhisperServerResponse {
 // КОРОТКИЙ initial_prompt — только структура консультации.
 // Whisper hard limit: 224 токена. Всё что сверху — молча обрезается с НАЧАЛА.
 // Предметную лексику передаём через hotwords (faster-whisper ≥1.0) — нет лимита.
+// КОРОТКИЙ initial_prompt — только структура консультации.
+// Whisper hard limit: 224 токена. Всё что сверху — молча обрезается с НАЧАЛА.
+// НЕ включать единицы измерения (мм рт.ст., уд/мин) и аббревиатуры —
+// они «протекают» в транскрипцию как мусорные фрагменты.
 const MEDICAL_INITIAL_PROMPT =
-  'Медицинская консультация. Жалобы пациента, анамнез заболевания, объективный осмотр, ' +
-  'диагноз, план обследования, рекомендации. АД мм рт.ст., ЧСС уд/мин, SpO2.';
+  'Медицинская консультация. Жалобы, анамнез, осмотр, диагноз, рекомендации.';
 
-// HOTWORDS: терминологический буст для decoder. Не занимает место в context.
-// Все слова разделяем пробелами.
-const MEDICAL_HOTWORDS = [
-  // Аббревиатуры и шкалы
-  'АД ЧСС ИМТ SpO2 ЭКГ ЭхоКГ ХМЭКГ КАГ СМАД УЗДГ БЦА ОАК ОАМ ProBNP',
-  'ПМЖВ ПКА ОВ ЛКА РСДЛА ФВ КДО КСО КДР КСР МЖП NYHA CCS EHRA CHADS2 VASc МКБ-10',
-  'шкала Морзе риск падения оценка боли',
-  // Диагнозы
-  'ИБС ХСН СССУ НРС ОНМК ДГПЖ АИТ ДН ОКС ТЭЛА',
-  'фибрилляция предсердий стенокардия напряжения артериальная гипертензия',
-  'дилатационная кардиомиопатия трикуспидальная регургитация митральная регургитация',
-  'аортальная недостаточность диффузный гипокинез атеросклероз аорты',
-  'тахисистолический пароксизмальная перманентная',
-  // Процедуры
-  'стентирование имплантация ЭКС электрокардиостимулятор',
-  'РЧА ВСЭФИ ЭФИ криоаблация кардиоресинхронизирующее CRT-D',
-  'кардиовертер-дефибриллятор репозиция электрода',
-  // Устройства
-  'Medtronic Quadra Assura Brava Quad EssentioDR Sphera DR DDDR VVIR',
-  // Аритмии
-  'ЖЭС НЖЭС ЖТ НЖТ АВ блокада АВ узловая риентри slow-fast',
-  'предсердная экстрасистолия желудочковая экстрасистолия',
-  // Антикоагулянты
-  'ксарелто ривароксабан дабигатран прадакса каптоприл нитроглицерин',
-  'тромбопол тромбоАСС кардиомагнил',
-  // Бета-блокаторы / ингибиторы / сартаны
-  'бисопролол конкор сотогексал стопресс периндоприл рамиприл хартил',
-  'кантаб кандесартан физиотенз моксонидин престилол',
-  // Статины
-  'розувастатин аторвастатин аторис розулип роксера',
-  // Антиаритмики / прочие кардио
-  'этацизин кордарон амиодарон дилтиазем дигоксин',
-  'джардинс форсига эплеренон эспиро альдарон верошпирон',
-  'индапамид торасемид тригрим нолипрел валодип илпио короним амлодипин L-тироксин',
-  // ЖКТ
-  'омепразол пантопразол нольпаза антарис глюконил',
-  // Прочие
-  'гипотиреоз гипокалиемия гемотрансфузия бронхиальная астма сахарный диабет',
-  'варикозное расширение вен пастозность иррадиация аускультативно везикулярное дыхание',
-].join(' ');
+// HOTWORDS: ОТКЛЮЧЕНЫ.
+// Тестирование показало, что любой список hotwords в faster-whisper вызывает:
+// 1) Галлюцинации-циклы (одна фраза повторяется 10-15+ раз)
+// 2) «Протекание» hotwords в текст транскрипции как мусор
+// Все ошибки распознавания медтерминов исправляются в medical-dictionary.ts
+// (постобработка), что надёжнее и не вызывает побочных эффектов.
+const MEDICAL_HOTWORDS = '';
 
 export class WhisperService {
   private config: WhisperConfig;
@@ -115,9 +85,28 @@ export class WhisperService {
    * Also removes trailing garbage ("Дождь. Дождь. Дождь..." etc.)
    */
   private cleanWhisperHallucinations(text: string): string {
-    // 1. Remove repeated phrases (3+ consecutive repetitions of 1-5 word phrases)
-    // e.g. "снижение памяти, снижение памяти, снижение памяти" → "снижение памяти"
+    // 1a. Remove long repeated phrases (3+ repetitions of 3-12 token phrases including numbers/dates)
+    // e.g. "Общий анализ крови от 05-10-2025 года 295 Общий анализ крови от 05-10-2025 года 295..."
     let cleaned = text.replace(
+      /((?:[\wа-яёА-ЯЁ][\wа-яёА-ЯЁ.,\-]*\s+){2,11}[\wа-яёА-ЯЁ][\wа-яёА-ЯЁ.,\-]*)\s+(?:\1\s+){2,}/giu,
+      '$1 '
+    );
+
+    // 1b. Remove near-identical repeated phrases where only trailing number changes
+    // e.g. "X от DATE года 295 X от DATE года 296 X от DATE года 297" → "X от DATE года 295"
+    cleaned = cleaned.replace(
+      /((?:[а-яёА-ЯЁ]+\s+){2,6}\d[\d.\-]+(?:\s+года?)?)\s+\d+(?:\s+\1\s+\d+){2,}/giu,
+      (match) => {
+        // Keep only the first occurrence
+        const firstEnd = match.indexOf(match.trim().split(/\s+/).slice(0, 4).join(' '), 1);
+        if (firstEnd > 0) return match.substring(0, firstEnd).trim();
+        return match.split(/(?=Общий|ОАК|Б\/х|БХ|ЭКГ|ЭхоКГ|УЗДГ|Ферритин|ОАМ)/iu)[0].trim();
+      }
+    );
+
+    // 1c. Remove repeated phrases (3+ consecutive repetitions of 1-5 word phrases)
+    // e.g. "снижение памяти, снижение памяти, снижение памяти" → "снижение памяти"
+    cleaned = cleaned.replace(
       /((?:[а-яёА-ЯЁa-zA-Z]+\s+){1,4}[а-яёА-ЯЁa-zA-Z]+)[,.\s]+(?:\1[,.\s]+){2,}/giu,
       '$1, '
     );
@@ -209,6 +198,18 @@ export class WhisperService {
     cleaned = cleaned.replace(
       /(?:\s+[A-Z][a-z]+){2,}\s*\.?\s*$/g,
       ''
+    );
+
+    // 7. Remove leaked initial_prompt / hotword fragments
+    // These appear when Whisper injects prompt/hotword text into transcription
+    // e.g. "АД мм рт.ст., ЧСС уд/мин, SpO2." or "Жалобы пациента, анамнез заболевания"
+    cleaned = cleaned.replace(
+      /\s*АД\s+мм\s+рт\.?\s*ст\.?,?\s*ЧСС\s+уд[\s/\-]*мин,?\s*SpO2\.?\s*/giu,
+      ' '
+    );
+    cleaned = cleaned.replace(
+      /\s*Жалобы\s+пациента,?\s+анамнез\s+заболевания,?\s+объективный\s+осмотр[^.]*\.?\s*/giu,
+      ' '
     );
 
     return cleaned.trim();
@@ -316,18 +317,14 @@ export class WhisperService {
       const response = await fetch(`${this.config.serverUrl}/transcribe`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        // НЕ передаём initial_prompt и hotwords — сервер использует свои встроенные.
+        // Тесты показали, что:
+        // 1) hotwords вызывают галлюцинации-циклы (одна фраза x15)
+        // 2) клиентский initial_prompt хуже серверного (протекает в текст)
+        // Серверный INITIAL_PROMPT содержит медтермины и работает стабильнее.
         body: JSON.stringify({
           audio_base64: audioBase64,
           language: this.config.language,
-          initial_prompt: MEDICAL_INITIAL_PROMPT,
-          hotwords: MEDICAL_HOTWORDS,
-          temperature: 0,
-          no_speech_threshold: 0.6,
-          condition_on_previous_text: false,
-          // Hallucination prevention: repetition_penalty suppresses Whisper loops
-          // ("снижение памяти" x30, "Дождь" x10 etc.)
-          repetition_penalty: 1.2,
-          word_timestamps: true,
         }),
         signal: controller.signal,
       });
