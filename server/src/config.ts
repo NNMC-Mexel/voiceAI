@@ -1,4 +1,4 @@
-﻿import { ServerConfig, defaultConfig } from './types.js';
+﻿import { ServerConfig, LLMProviderKind, defaultConfig } from './types.js';
 
 function parseIntSafe(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(value ?? '', 10);
@@ -21,6 +21,23 @@ function parseCorsOrigins(raw: string | undefined, fallback: string[]): string[]
     .split(',')
     .map((x) => x.trim())
     .filter(Boolean);
+}
+
+function resolveLlmProvider(): LLMProviderKind {
+  const raw = process.env.LLM_PROVIDER?.trim().toLowerCase();
+  if (raw === 'anthropic') return 'anthropic';
+  return 'llama';
+}
+
+function resolveAnthropicConfig() {
+  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+  if (!apiKey) return undefined;
+  return {
+    apiKey,
+    model: process.env.ANTHROPIC_MODEL?.trim() || 'claude-haiku-4-5',
+    maxTokens: parseIntSafe(process.env.ANTHROPIC_MAX_TOKENS, 4096),
+    maxRetries: parseIntSafe(process.env.ANTHROPIC_MAX_RETRIES, 3),
+  };
 }
 
 function resolveLlmServerUrl(): string {
@@ -46,6 +63,7 @@ export function loadConfig(): ServerConfig {
       serverUrl: process.env.WHISPER_SERVER_URL?.trim() || undefined,
     },
     llm: {
+      provider: resolveLlmProvider(),
       serverUrl: resolveLlmServerUrl(),
       model: process.env.LLM_MODEL || defaultConfig.llm.model,
       maxTokens: parseIntSafe(process.env.LLM_MAX_TOKENS, defaultConfig.llm.maxTokens),
@@ -53,6 +71,7 @@ export function loadConfig(): ServerConfig {
       parallelSlots: parseIntSafe(process.env.LLM_PARALLEL_SLOTS, defaultConfig.llm.parallelSlots),
       requestTimeoutMs: parseIntSafe(process.env.LLM_TIMEOUT_MS, defaultConfig.llm.requestTimeoutMs),
       allowMockOnFailure: parseBoolean(process.env.ALLOW_MOCK_LLM, defaultConfig.llm.allowMockOnFailure),
+      anthropic: resolveAnthropicConfig(),
     },
     tts: {
       serverUrl: process.env.TTS_SERVER_URL?.trim() || '',
