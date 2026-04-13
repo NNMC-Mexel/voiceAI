@@ -2,6 +2,7 @@
 import { findExamTemplate, formatExamLine, parseExamValuesFromText, parseExamDate, examTemplates } from '../data/examTemplates.js';
 import { findDietTemplate } from '../data/dietTemplates.js';
 import { applyMedicalDictionary } from './medical-dictionary.js';
+import { AnthropicProvider } from './anthropic-provider.js';
 
 const DEFAULT_RISK_ASSESSMENT: RiskAssessment = {
   fallInLast3Months: 'нет',
@@ -41,12 +42,33 @@ const ALL_TEXT_FIELDS: RewriteableField[] = [
 
 export class LLMService {
   private config: LLMConfig;
+  private _rescuedReferrals: string[] = [];
+  private anthropic: AnthropicProvider | null = null;
 
   constructor(config: LLMConfig) {
     this.config = config;
+    if (config.provider === 'anthropic') {
+      if (!config.anthropic?.apiKey) {
+        throw new Error('LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is missing in server/.env');
+      }
+      this.anthropic = new AnthropicProvider({
+        apiKey: config.anthropic.apiKey,
+        model: config.anthropic.model,
+        maxTokens: config.anthropic.maxTokens,
+        temperature: config.temperature,
+        requestTimeoutMs: config.requestTimeoutMs,
+        maxRetries: config.anthropic.maxRetries,
+      });
+      console.log(`[llm] provider=anthropic model=${config.anthropic.model}`);
+    } else {
+      console.log(`[llm] provider=llama serverUrl=${config.serverUrl} model=${config.model}`);
+    }
   }
 
   async healthCheck(): Promise<boolean> {
+    if (this.anthropic) {
+      return this.anthropic.healthCheck();
+    }
     try {
       const response = await this.fetchWithTimeout(`${this.config.serverUrl}/health`, {
         method: 'GET',
@@ -61,7 +83,9 @@ export class LLMService {
     const startTime = Date.now();
 
     try {
-      const document = await this.structureWithLlamaCpp(rawText);
+      const document = this.anthropic
+        ? await this.structureWithAnthropic(rawText)
+        : await this.structureWithLlamaCpp(rawText);
       return {
         document,
         rawText,
@@ -104,6 +128,23 @@ Addendum:
 ${addendumText}
 
 Return JSON patch only.`;
+
+    if (this.anthropic) {
+      const raw = await this.anthropic.completeJson({
+        systemPrompt,
+        userPrompt,
+        jsonSchema: this.getAddendumPatchJsonSchema() as any,
+        toolName: 'submit_document_patch',
+        toolDescription: 'Submit a JSON patch with only the fields that changed.',
+        maxTokens: 4096,
+        temperature: 0,
+        operation: 'applyAddendum',
+      });
+      console.log(`[llm anthropic] applyAddendum: raw ${raw.length} chars`);
+      const patch = await this.parsePatchWithRepair(raw);
+      const merged = this.mergeDocumentWithPatch(document, patch, addendumText);
+      return this.validateAndCleanDocument(merged);
+    }
 
     const response = await this.fetchWithTimeout(`${this.config.serverUrl}/completion`, {
       method: 'POST',
@@ -164,6 +205,22 @@ Instruction:
 ${normalizedInstruction}
 
 Return JSON patch only.`;
+
+    if (this.anthropic) {
+      const raw = await this.anthropic.completeJson({
+        systemPrompt,
+        userPrompt,
+        jsonSchema: this.getAddendumPatchJsonSchema() as any,
+        toolName: 'submit_document_patch',
+        toolDescription: 'Submit a JSON patch with only the fields that changed.',
+        maxTokens: 2048,
+        temperature: 0,
+        operation: 'applyInstruction',
+      });
+      const patch = await this.parsePatchWithRepair(raw);
+      const merged = this.mergeDocumentWithInstructionPatch(document, patch);
+      return this.validateAndCleanDocument(merged);
+    }
 
     const response = await this.fetchWithTimeout(`${this.config.serverUrl}/completion`, {
       method: 'POST',
@@ -251,6 +308,65 @@ Return JSON patch only.`;
       });
     }
     return null;
+  }
+
+  private async structureWithAnthropic(rawText: string): Promise<MedicalDocument> {
+    if (!this.anthropic) throw new Error('structureWithAnthropic called but provider not initialized');
+
+    const systemPrompt = this.getSystemPrompt();
+    const userPrompt = this.getUserPrompt(rawText);
+    const schema = this.getDocumentJsonSchema() as {
+      type: 'object';
+      properties: Record<string, unknown>;
+      required?: string[];
+      additionalProperties?: boolean;
+    };
+
+    const raw = await this.anthropic.completeJson({
+      systemPrompt,
+      userPrompt,
+      jsonSchema: schema,
+      toolName: 'submit_medical_document',
+      toolDescription: 'Submit the structured medical consultation document extracted from the doctor dictation.',
+      maxTokens: 8192,
+      temperature: 0,
+      operation: 'structureText',
+    });
+
+    console.log(`[LLM anthropic] structureText raw length: ${raw.length}`);
+    const document = await this.parseDocumentWithRepair(raw, rawText);
+
+    const LLM_FIELDS = ['complaints','anamnesis','clinicalCourse','allergyHistory','objectiveStatus',
+      'diagnosis','finalDiagnosis','conclusion','recommendations','diet','doctorNotes','outpatientExams'] as const;
+    console.log('\n\x1b[35m━━━ [LLM RAW — anthropic] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m');
+    for (const f of LLM_FIELDS) {
+      const v = (document as any)[f];
+      if (v && typeof v === 'string' && v.trim()) {
+        console.log(`  \x1b[35m${f}:\x1b[0m ${v}`);
+      }
+    }
+    console.log('\x1b[35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m\n');
+
+    const cleaned = this.validateAndCleanDocument(document);
+    const enriched = this.enrichPatientFromRawText(cleaned, rawText);
+    // rescueExamsFromRawText намеренно пропущен для Anthropic: Claude с tool-use
+    // надёжно извлекает все лабораторные значения, а rescue создаёт дубли (пытается
+    // добавить данные, которые уже корректно уложены в основном блоке).
+    this.rescueDiagnosisFromRawText(enriched, rawText);
+    this.rescueRecommendationsFromRawText(enriched, rawText);
+
+    const FINAL_FIELDS = ['complaints','anamnesis','clinicalCourse','allergyHistory','objectiveStatus',
+      'diagnosis','finalDiagnosis','conclusion','recommendations','diet','doctorNotes','outpatientExams'] as const;
+    console.log('\n\x1b[32m━━━ [FINAL — anthropic] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m');
+    for (const f of FINAL_FIELDS) {
+      const v = (enriched as any)[f];
+      if (v && typeof v === 'string' && v.trim()) {
+        console.log(`  \x1b[32m${f}:\x1b[0m ${v}`);
+      }
+    }
+    console.log('\x1b[32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m\n');
+
+    return enriched;
   }
 
   private async structureWithLlamaCpp(rawText: string): Promise<MedicalDocument> {
@@ -342,6 +458,16 @@ ${JSON.stringify(document, null, 2)}
 Return up to 6 practical recommendations for the doctor.
 Answer in Russian and use bullet points.`;
 
+    if (this.anthropic) {
+      return this.anthropic.completeText({
+        systemPrompt,
+        userPrompt,
+        maxTokens: 1024,
+        temperature: 0.3,
+        operation: 'generateRecommendations',
+      });
+    }
+
     const response = await this.fetchWithTimeout(`${this.config.serverUrl}/completion`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -387,6 +513,16 @@ Rules:
 
     const userPrompt = `${contextBlock}${historyText ? `Conversation history:\n${historyText}\n\n` : ''}Question:\n${question}\n\nAnswer in Russian plain text.`;
 
+    if (this.anthropic) {
+      return this.anthropic.completeText({
+        systemPrompt,
+        userPrompt,
+        maxTokens: 2048,
+        temperature: 0.4,
+        operation: 'chat',
+      });
+    }
+
     const response = await this.fetchWithTimeout(`${this.config.serverUrl}/completion`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -425,6 +561,16 @@ Do not add new facts.
 
 Text:
 ${normalized}`;
+
+    if (this.anthropic) {
+      return this.anthropic.completeText({
+        systemPrompt,
+        userPrompt,
+        maxTokens: 768,
+        temperature: 0,
+        operation: 'rewriteField',
+      });
+    }
 
     const response = await this.fetchWithTimeout(`${this.config.serverUrl}/completion`, {
       method: 'POST',
@@ -625,17 +771,17 @@ ${normalized}`;
 ПОЛЯ И ЧТО В НИХ КЛАСТЬ:
 1) "complaints" — жалобы пациента
 2) "anamnesis" — анамнез заболевания (история текущей болезни, хронология)
-3) "outpatientExams" — результаты обследований и анализов: НУМЕРОВАННЫЙ СПИСОК, каждый пункт с новой строки (\\n). Формат: "1. ОАК от ДД.ММ.ГГГГ: Hb - значение г/л, Эр - значение *10¹²/л". Единицы: Hb г/л, Эр *10¹²/л, глюкоза ммоль/л, креатинин мкмоль/л, АЛТ/АСТ МЕ/л, ХС/ЛПНП/ЛПВП ммоль/л, СОЭ мм/ч. Только то что продиктовано.
+3) "outpatientExams" — результаты обследований и анализов: НУМЕРОВАННЫЙ СПИСОК, каждый пункт с новой строки (\\n). Формат: "1. ОАК от ДД.ММ.ГГГГ: Hb - значение г/л, Эр - значение *10¹²/л, Л - значение *10⁹/л, Тр - значение *10⁹/л, СОЭ - значение мм/ч". КРИТИЧЕСКИ ВАЖНО: включай ВСЕ продиктованные показатели без исключения. Если врач назвал лейкоциты, тромбоциты, ХС общий, ХС ЛПНП, СРБ, относительную плотность мочи, лейкоциты/эритроциты в п/з — ВСЁ это должно быть в результате. Единицы: Hb г/л, Эр *10¹²/л, Л *10⁹/л, Тр *10⁹/л, глюкоза ммоль/л, креатинин мкмоль/л, АЛТ/АСТ МЕ/л, ХС/ЛПНП/ЛПВП ммоль/л, ТГ ммоль/л, СРБ (без единиц если не указаны), СОЭ мм/ч, ферритин нг/мл. Для ОАМ: отн. плотность, белок г/л, Л в п/з, Эр в п/з. Только то что продиктовано, но ВСЁ что продиктовано.
 4) "clinicalCourse" — анамнез жизни: перенесённые болезни (туберкулёз, гепатиты), операции, травмы, вредные привычки, наследственность, сопутствующая патология, препараты которые пациент принимал РАНЕЕ. Гинекологический анамнез (беременности, роды, аборты, менструация, миома) → ТОЛЬКО сюда, НИКОГДА не в allergyHistory.
 5) "allergyHistory" — ТОЛЬКО аллергические реакции и непереносимость препаратов. Максимум 1-2 предложения. ЗАПРЕЩЕНО класть сюда: гинекологические данные, объективный статус, анамнез жизни или другие данные.
-6) "objectiveStatus" — данные объективного осмотра: общее состояние, кожные покровы, АД, ЧСС, ЧДД, ИМТ, SpO2, аускультация, живот, печень, отёки, стул, диурез. ЗАПРЕЩЕНО дублировать в другие поля.
+6) "objectiveStatus" — данные объективного осмотра, СТРУКТУРИРОВАТЬ ПО СИСТЕМАМ ОРГАНОВ:\\n- Общие данные: вес, рост, ИМТ, общее состояние, кожные покровы, слизистые, лимфоузлы, вены.\\n- Система органов дыхания: ЧДД, форма грудной клетки, перкуссия, аускультация лёгких.\\n- Сердечно-сосудистая система: тоны сердца, АД, ЧСС/пульс.\\n- Система органов пищеварения: язык, живот, печень, селезёнка, стул.\\n- Система мочевыделения: симптом поколачивания, мочеиспускание.\\nЗАПРЕЩЕНО дублировать в другие поля.
 7) "neurologicalStatus" — неврологический статус. Лабораторные данные сюда не класть.
 8) "diagnosis" — ТОЛЬКО текст диагноза с кодом МКБ-10 если указан. НЕ включать: давление, анамнез, препараты.
 8a) "finalDiagnosis" — только если врач говорит "заключительный диагноз", иначе пусто.
 9) "conclusion" — амбулаторная терапия: препараты которые пациент СЕЙЧАС принимает ("принимает", "амбулаторно принимает") — нумерованный список (\\n между пунктами). НЕ новые назначения.
-10) "doctorNotes" — план обследования: направления на анализы, ЭКГ, ЭхоКГ, консультации специалистов. НЕ рекомендации и НЕ схема лечения.
-11) "recommendations" — НОВЫЕ назначения врача: препараты, процедуры, явка на приём — нумерованный список (\\n между пунктами). Формат: "1. Таб. Название доза по X таб. X раз/день". КАЖДЫЙ пункт = один препарат/назначение с полной информацией. НИКОГДА не дублировать в conclusion, doctorNotes или diet.
-12) "diet" — ТОЛЬКО диетические рекомендации (номер стола или описание). НЕ схемы лечения, НЕ контроль АД, НЕ общие рекомендации.
+10) "doctorNotes" — план обследования: ТОЛЬКО направления на лабораторные анализы и инструментальные исследования (КНТЖ, ТТГ, Холтер, СМАД и т.д.). НЕ включать сюда: консультации специалистов, рекомендации по питанию, схемы лечения.
+11) "recommendations" — ВСЕ рекомендации врача: назначения препаратов, консультации специалистов (маммолог, гинеколог-эндокринолог и т.д.), образ жизни, физическая активность, повторный осмотр — нумерованный список (\\n между пунктами). Формат: "1. Питание: ... 2. Физическая активность: ... 3. Консультация специалиста". НИКОГДА не дублировать диетические рекомендации в поле diet — если диета часть рекомендаций, она идёт ТОЛЬКО сюда.
+12) "diet" — ТОЛЬКО если врач отдельно выделяет диету как самостоятельный раздел (номер стола или названная диета). Если диета упомянута в рекомендациях — оставить ПУСТЫМ, не дублировать.
 
 МАРШРУТИЗАЦИЯ ПРЕПАРАТОВ:
 - "принимает / амбулаторно принимает" → conclusion
@@ -648,6 +794,8 @@ ${normalized}`;
 - ЗАПРЕЩЕНО дублировать обследования. Если врач диктует одно и то же обследование дважды (например, подробно и кратко), бери ТОЛЬКО первый полный вариант. Каждый тип обследования (ОАК, Б/х, ОАМ, ЭхоКГ, УЗДГ БЦА и т.д.) может быть ТОЛЬКО ОДИН РАЗ для каждой даты.
 - Игнорируй слова "Пункт 1", "Пункт 2", "Пункт три" — это метки структуры, а не часть данных.
 - Если текст содержит расшифровки аббревиатур ("ОАК — общий анализ крови", "ФВ — фракция выброса"), используй ТОЛЬКО аббревиатуру в выходном JSON.
+- outpatientExams — ТОЛЬКО результаты УЖЕ ПРОВЕДЁННЫХ обследований (с датами и значениями). Направления на обследования ("сделать УЗИ", "назначить маммографию") → в recommendations, НЕ в outpatientExams.
+- ОАМ: если продиктованы Л (лейкоциты) в п/з и Эр (эритроциты) в п/з — ОБЯЗАТЕЛЬНО включить.
 
 ОБЩИЕ ПРАВИЛА:
 - Не добавлять информацию которой нет в диктовке. Пустые строки если данных нет.
@@ -700,17 +848,17 @@ Return STRICT JSON (use empty strings if data is missing):
   },
   "complaints": "Жалобы пациента",
   "anamnesis": "Анамнез заболевания (история текущей болезни, хронология)",
-  "outpatientExams": "Данные имеющихся дополнительных исследований — НУМЕРОВАННЫЙ СПИСОК. Каждое обследование с датой и единицами измерения. Формат: 1. ОАК от дата: Hb - значение г/л, Эр - значение *10¹²/л, ... 2. Б/х анализ крови от дата: ... Всегда подставлять единицы измерения.",
+  "outpatientExams": "Данные имеющихся дополнительных исследований — НУМЕРОВАННЫЙ СПИСОК. ВСЕ продиктованные показатели без пропусков. Формат: 1. ОАК от дата: Hb - значение г/л, Эр - значение *10¹²/л, Л - значение *10⁹/л, Тр - значение *10⁹/л, СОЭ - значение мм/ч. 2. Б/х анализ крови от дата: креатинин, глюкоза, АЛТ, АСТ, билирубин, ХС общий, ХС ЛПНП, ТГ, СРБ — ВСЁ что продиктовано. 3. ОАМ: отн. плотность, белок, Л в п/з, Эр в п/з.",
   "clinicalCourse": "Анамнез жизни (перенесённые заболевания: туберкулёз, гепатиты, операции, травмы, наследственность, вредные привычки, сопутствующая патология, препараты которые принимал РАНЕЕ)",
   "allergyHistory": "Аллергологический анамнез (непереносимость препаратов, пищевых продуктов)",
-  "objectiveStatus": "Объективный статус (осмотр, аускультация, пульс, АД, температура, ИМТ, SpO2)",
+  "objectiveStatus": "Объективный статус — структурировать по системам органов: Общие данные (вес, рост, ИМТ, состояние, кожа, слизистые). Система органов дыхания (ЧДД, перкуссия, аускультация). Сердечно-сосудистая система (тоны, АД, ЧСС). Система органов пищеварения (язык, живот, печень, стул). Система мочевыделения (симптом поколачивания, мочеиспускание).",
   "neurologicalStatus": "Неврологический статус",
   "diagnosis": "Предварительный диагноз (с кодом МКБ-10 если озвучен)",
   "finalDiagnosis": "Заключительный диагноз (если озвучен отдельно, иначе пусто)",
   "conclusion": "Амбулаторная терапия (ТОЛЬКО препараты которые пациент СЕЙЧАС принимает амбулаторно — НУМЕРОВАННЫЙ СПИСОК)",
-  "doctorNotes": "План обследования (направления на анализы, ЭКГ, ЭхоКГ, консультации специалистов)",
-  "recommendations": "Рекомендации / План лечения (НОВЫЕ назначения: НУМЕРОВАННЫЙ СПИСОК. 1. Таб.название дозировка по ... в день; 2. ...)",
-  "diet": "Диета (номер диеты или описание диетических рекомендаций, если озвучены)"
+  "doctorNotes": "План обследования (ТОЛЬКО лабораторные анализы и инструментальные исследования: КНТЖ, ТТГ, Холтер, СМАД и т.д.)",
+  "recommendations": "Рекомендации / План лечения (ВСЕ рекомендации: препараты, питание, физ. активность, консультации специалистов, повторный осмотр — НУМЕРОВАННЫЙ СПИСОК). НЕ дублировать диету в поле diet.",
+  "diet": "Диета (ТОЛЬКО если выделена как отдельный раздел. Если диета в рекомендациях — оставить ПУСТЫМ)"
 }
 
 JSON:`;
@@ -774,6 +922,17 @@ JSON:`;
       }
     }
 
+    // Пост-обработка: вычищаем placeholder-фразы которые LLM иногда подставляет
+    // в пустые поля ("Не указаны", "Нет данных" и т.п.) — должны быть пустыми строками.
+    const PLACEHOLDER_RE = /^\s*(?:не\s+указан[ыоа]?|нет\s+данн[ыхое]+|отсутству[юет]+|не\s+предъявл[яет]+|не\s+выявлен[ыоа]?|не\s+отмечает|жалоб\s+нет|без\s+особенност[ейи]+|—|-)\s*\.?\s*$/iu;
+    for (const field of ALL_TEXT_FIELDS) {
+      const v = result[field];
+      if (v && PLACEHOLDER_RE.test(v)) {
+        console.log(`[postprocess] Cleared placeholder field ${field}: "${v.trim()}"`);
+        result[field] = '';
+      }
+    }
+
     // Пост-обработка: удаление мусорных токенов в начале/конце полей
     this.cleanFieldGarbage(result);
 
@@ -824,6 +983,17 @@ JSON:`;
         result.finalDiagnosis.trim() === result.diagnosis.trim()) {
       console.log('[postprocess] finalDiagnosis is identical to diagnosis, clearing');
       result.finalDiagnosis = '';
+    }
+
+    // Пост-обработка: перемещение направлений из outpatientExams в recommendations
+    if (this._rescuedReferrals.length > 0) {
+      const referralText = this._rescuedReferrals.join('\n');
+      const existing = result.recommendations.trim();
+      result.recommendations = existing
+        ? `${existing}\n${referralText}`
+        : referralText;
+      console.log(`[postprocess] Moved ${this._rescuedReferrals.length} referral(s) from outpatientExams → recommendations`);
+      this._rescuedReferrals = [];
     }
 
     // Пост-обработка: повторное применение медицинского словаря
@@ -1340,6 +1510,19 @@ JSON:`;
         const isRecommendationBullet = /^[-–•]\s+.{10,}/u.test(l) &&
           /провест|назначит|рекоменд|оценит|исключит|направит|контрол|наблюден|соблюда|избегат|проверит|получит|принима|лечени|терапи|обследовани/iu.test(l);
         return !isRecommendationBullet;
+      })
+      // Убираем направления (без даты и без значений — это назначения, не результаты)
+      .filter((l) => {
+        // Если строка содержит "УЗИ/маммография/консультация" БЕЗ даты "от DD.MM" — это направление
+        const isReferral = /(?:УЗИ|маммограф|консультаци|направлени|скрининг)/iu.test(l) &&
+          !/от\s+\d{2}[./]\d{2}/iu.test(l) &&
+          !/\d{2}\.\d{2}\.\d{4}/u.test(l);
+        if (isReferral) {
+          // Сохраняем для перемещения в recommendations (будет добавлено ниже)
+          this._rescuedReferrals = this._rescuedReferrals || [];
+          this._rescuedReferrals.push(l);
+        }
+        return !isReferral;
       });
 
     if (lines.length === 0) return text;
@@ -2259,6 +2442,18 @@ JSON:`;
   }
 
   private async repairJsonWithLlm(brokenJson: string, schema: object = this.getDocumentJsonSchema()): Promise<string> {
+    if (this.anthropic) {
+      return this.anthropic.completeJson({
+        systemPrompt: 'Fix invalid JSON. Return only valid JSON. Do not add new facts.',
+        userPrompt: `Make this JSON valid:\n${brokenJson}`,
+        jsonSchema: schema as any,
+        toolName: 'submit_repaired_json',
+        toolDescription: 'Submit the repaired JSON object.',
+        maxTokens: 8192,
+        temperature: 0,
+        operation: 'repairJson',
+      });
+    }
     const response = await this.fetchWithTimeout(`${this.config.serverUrl}/completion`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

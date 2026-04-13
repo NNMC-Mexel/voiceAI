@@ -49,7 +49,10 @@ export interface WhisperConfig {
   serverUrl?: string; // Если задан — используется persistent HTTP whisper-сервер
 }
 
+export type LLMProviderKind = 'llama' | 'anthropic';
+
 export interface LLMConfig {
+  provider: LLMProviderKind;
   serverUrl: string;
   model: string;
   maxTokens: number;
@@ -57,6 +60,12 @@ export interface LLMConfig {
   parallelSlots: number;
   requestTimeoutMs: number;
   allowMockOnFailure: boolean;
+  anthropic?: {
+    apiKey: string;
+    model: string;
+    maxTokens: number;
+    maxRetries: number;
+  };
 }
 
 export interface SecurityConfig {
@@ -92,6 +101,7 @@ export const defaultConfig: ServerConfig = {
     device: 'cuda',
   },
   llm: {
+    provider: 'llama',
     serverUrl: 'http://localhost:8080',
     model: 'qwen3-8b',
     maxTokens: 512,
