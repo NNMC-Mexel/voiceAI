@@ -1,7 +1,7 @@
 ﻿import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { pipeline } from 'stream/promises';
 import { createWriteStream } from 'fs';
-import { mkdir, unlink } from 'fs/promises';
+import { mkdir, unlink, appendFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
@@ -344,6 +344,25 @@ export async function registerRoutes(
 
     try {
       const result = await llmService.structureText(text);
+      try {
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const logDir = path.join(config.uploadDir, '..', 'temp', 'structure-logs');
+        await mkdir(logDir, { recursive: true });
+        const logPath = path.join(logDir, `${ts}.log`);
+        const dump = [
+          `=== ${ts} ===`,
+          `--- RAW WHISPER TEXT (${text.length} chars) ---`,
+          text,
+          '',
+          `--- LLM STRUCTURED RESULT ---`,
+          JSON.stringify(result, null, 2),
+          '',
+        ].join('\n');
+        await appendFile(logPath, dump, 'utf-8');
+        console.log(`[structure-log] wrote ${logPath}`);
+      } catch (logErr) {
+        console.warn('[structure-log] failed:', logErr);
+      }
       return {
         success: true,
         ...result,
@@ -539,6 +558,26 @@ export async function registerRoutes(
 
       const structured = await llmService.structureText(transcription.text);
       const t3 = Date.now();
+
+      try {
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const logDir = path.join(config.uploadDir, '..', 'temp', 'structure-logs');
+        await mkdir(logDir, { recursive: true });
+        const logPath = path.join(logDir, `${ts}_${sourceName}.log`);
+        const dump = [
+          `=== ${ts} | source=${sourceName} ===`,
+          `--- RAW WHISPER TEXT (${transcription.text.length} chars) ---`,
+          transcription.text,
+          '',
+          `--- LLM STRUCTURED RESULT ---`,
+          JSON.stringify(structured.document, null, 2),
+          '',
+        ].join('\n');
+        await appendFile(logPath, dump, 'utf-8');
+        console.log(`[structure-log] wrote ${logPath}`);
+      } catch (logErr) {
+        console.warn('[structure-log] failed:', logErr);
+      }
 
       fastify.log.info(
         {
