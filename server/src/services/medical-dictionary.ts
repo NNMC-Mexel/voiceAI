@@ -78,6 +78,8 @@ const LATIN_CARDIOLOGY_ABBREVIATIONS: ReplacementRule[] = [
   wordRule('НАЙХА', 'NYHA'),
   wordRule('ноха', 'NYHA'),
   wordRule('НОХА', 'NYHA'),
+  wordRule('ноэча', 'NYHA'),
+  wordRule('НОЭЧА', 'NYHA'),
   wordRule('энвайэйч', 'NYHA'),
   wordRule('цэцэс', 'CCS'),
   wordRule('ЦЦС', 'CCS'),
@@ -349,7 +351,7 @@ const DRUG_NAME_CORRECTIONS: ReplacementRule[] = [
   wordRule('нолипрел', 'нолипрел'),
   wordRule('валодип', 'валодип'),
   wordRule('кантаб', 'кантаб'),
-  wordRule('илпио', 'илпио'),
+  wordRule('илпио', 'Илпио'),
   wordRule('престилол', 'Престилол'),
   wordRule('пристилол', 'Престилол'),
   wordRule('перендаприл', 'периндоприл'),
@@ -508,6 +510,10 @@ const PHONETIC_CORRECTIONS: ReplacementRule[] = [
   // "эн уай эйч эй" → NYHA (если проскользнуло)
   wordRule('эн уай эйч эй', 'NYHA'),
   wordRule('си эйч эй ди эс', 'CHA₂DS₂-VASc'),
+
+  // "напатливость" → "потливость" (Whisper слышит н- в начале слова из ничего)
+  wordRule('напатливость', 'потливость'),
+  wordRule('напатливости', 'потливости'),
 
   // Классы ХСН
   regexRule(/функциональный\s+класс\s+(\d)/giu, 'ФК $1'),

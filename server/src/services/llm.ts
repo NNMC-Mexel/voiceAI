@@ -2173,6 +2173,117 @@ JSON:`;
     // которые уже перечислены в conclusion (Whisper-артефактный echo-хвост).
     // Запускаем в самом конце, чтобы убрать последний эхо-дубль.
     this.dedupRecommendationsAgainstConclusion(doc);
+    this.filterGarbageRecommendationItems(doc);
+    this.dedupOutpatientExamsAgainstDoctorNotes(doc);
+  }
+
+  /**
+   * P1.7: фильтрует мусор-пункты в recommendations, которые Claude иногда
+   * выдаёт в виде ALL-CAPS псевдо-заголовков («РЕКОМЕНДАЦИЯ ПИТАНИЕ …»,
+   * «НАЗНАЧЕНИЕ ОБСЛЕДОВАНИЕ …») — эхо структуры промпта, попавшее в текст.
+   */
+  private filterGarbageRecommendationItems(doc: MedicalDocument): void {
+    const reco = doc.recommendations;
+    if (!reco) return;
+
+    const lines = reco.split(/\n+/)
+      .map(l => l.replace(/^\s*\d+[\.\)]\s*/, '').trim())
+      .filter(Boolean);
+
+    const kept: string[] = [];
+    let dropped = 0;
+    for (const body of lines) {
+      // Псевдо-заголовок: строка начинается с двух ALL-CAPS слов подряд,
+      // первое ≥6 букв («РЕКОМЕНДАЦИЯ …», «НАЗНАЧЕНИЕ …», «ОБСЛЕДОВАНИЕ …»).
+      // Обычный drug-пункт начинается с одного Capitalized-слова, поэтому
+      // паттерн ALL-CAPS+ALL-CAPS надёжно изолирует мусор.
+      if (/^[А-ЯЁ]{6,}\s+[А-ЯЁ]{4,}/u.test(body)) {
+        dropped++;
+        continue;
+      }
+      kept.push(body);
+    }
+    if (dropped === 0) return;
+    doc.recommendations = kept.map((l, i) => `${i + 1}. ${l}`).join('\n');
+    console.log(`[postprocess] P1.7: dropped ${dropped} ALL-CAPS pseudo-header item(s) from recommendations`);
+  }
+
+  /**
+   * P3: убирает из outpatientExams «плановые» обследования, которые уже
+   * перечислены в doctorNotes (План обследования). В outpatientExams должны
+   * остаться только РЕЗУЛЬТАТЫ (с датами/значениями), а не список названий.
+   */
+  private dedupOutpatientExamsAgainstDoctorNotes(doc: MedicalDocument): void {
+    const exams = doc.outpatientExams;
+    const notes = doc.doctorNotes;
+    if (!exams || !notes) return;
+
+    // Сигнатуры названий из doctorNotes: Capitalized-токены ≥3 букв,
+    // аббревиатуры (ЭКГ, СМАД, ЭхоКГ, УЗДГБЦ, ОАК, ОАМ).
+    const noteSignatures = new Set<string>();
+    const tokens = (notes.match(/[А-ЯЁA-Z][А-ЯЁA-Zа-яёa-z\-]{2,}/gu) || []);
+    for (const t of tokens) {
+      noteSignatures.add(t.toLowerCase().replace(/ё/g, 'е'));
+    }
+    if (noteSignatures.size === 0) return;
+
+    // Внутри-строчное усечение: Claude иногда приклеивает перечисление
+    // планируемых обследований ХВОСТОМ к последнему «настоящему» обследованию
+    // (напр. «Заключение: … хронический бронхит. С-реактивный белок ЭК, СМАД,
+    // ЭХОКАГ, УЗДГБЦ, УЗИ почек.»). Такой хвост — запятая-разделённый список
+    // имён без числовых значений, состоящий из сигнатур doctorNotes.
+    const trimTail = (line: string): { text: string; trimmed: boolean } => {
+      // Находим последнюю точку, после которой идёт только comma-separated список.
+      const tailMatch = line.match(/\.\s+([А-ЯЁA-Z][^.]*?(?:,\s+[А-ЯЁA-Z][^.]*?){1,})\.?\s*$/u);
+      if (!tailMatch) return { text: line, trimmed: false };
+      const tail = tailMatch[1];
+      // Хвост не должен содержать числовых значений (дата/доза/результат).
+      if (/\d/u.test(tail)) return { text: line, trimmed: false };
+      const tailItems = tail.split(/,\s+/u).map(s => s.trim()).filter(Boolean);
+      if (tailItems.length < 2) return { text: line, trimmed: false };
+      // Каждый пункт должен быть коротким (1-4 слова) и иметь хоть один
+      // Capitalized-токен из сигнатур doctorNotes.
+      let matched = 0;
+      for (const item of tailItems) {
+        const tokens = (item.match(/[А-ЯЁA-Z][А-ЯЁA-Zа-яёa-z\-]{2,}/gu) || [])
+          .map(t => t.toLowerCase().replace(/ё/g, 'е'));
+        if (tokens.some(t => noteSignatures.has(t))) matched++;
+      }
+      // Жёсткий порог: ≥ 70% пунктов хвоста — сигнатуры плана.
+      if (matched / tailItems.length < 0.7) return { text: line, trimmed: false };
+      const cut = line.slice(0, tailMatch.index! + 1).trim();
+      return { text: cut, trimmed: true };
+    };
+
+    const lines = exams.split(/\n+/).map(l => l.trim()).filter(Boolean);
+    const kept: string[] = [];
+    let dropped = 0;
+    let trimmed = 0;
+    for (const body of lines) {
+      // Пункт с «данными» (дата/значение/ед.изм.) — оставляем, но пробуем обрезать хвост.
+      const hasData = /\d+[,.]?\d*\s*(?:мг|мкг|мкмоль|ммоль|г\/л|мм|мс|мл|%|л\/мин|удар|мм\s*рт|ед\b|ме\b)|\d{2}[\.\/]\d{2}[\.\/]\d{2,4}|(?:^|\s)(?:от|на)\s+\d/iu.test(body);
+      if (hasData) {
+        const { text, trimmed: wasTrimmed } = trimTail(body);
+        if (wasTrimmed) trimmed++;
+        kept.push(text);
+        continue;
+      }
+
+      const lineTokens = (body.match(/[А-ЯЁA-Z][А-ЯЁA-Zа-яёa-z\-]{2,}/gu) || [])
+        .map(t => t.toLowerCase().replace(/ё/g, 'е'));
+      if (lineTokens.length === 0) { kept.push(body); continue; }
+      const overlap = lineTokens.filter(t => noteSignatures.has(t)).length;
+      // ≥2 совпадения ИЛИ полное вхождение (все токены) — это перечисление плана.
+      if (overlap >= 2 || (overlap >= 1 && overlap === lineTokens.length)) {
+        dropped++;
+        continue;
+      }
+      kept.push(body);
+    }
+    if (dropped === 0 && trimmed === 0) return;
+    doc.outpatientExams = kept.join('\n');
+    if (dropped > 0) console.log(`[postprocess] P3: dropped ${dropped} plan-like item(s) from outpatientExams (duplicated in doctorNotes)`);
+    if (trimmed > 0) console.log(`[postprocess] P3: trimmed exam-list tail from ${trimmed} line(s) in outpatientExams`);
   }
 
   /**
@@ -2673,9 +2784,14 @@ JSON:`;
       return null;
     }
     const low = trimmed.toLowerCase();
+    // Физическая активность / образ жизни — даже если содержит «раз в день»
+    // и «длительно», это НЕ препарат (частый ложный матч: «Заниматься 30 мин
+    // по 10 минут один раз в день утром длительно»).
+    const isLifestyle = /(?:заниматься|заним[ауе]|ходьб|\bбег\b|бег\s+трусц|плаван|велосип|аэробн|физическ\w*\s+(?:актив|нагруз)|минут\s+в\s+день|\d+\s*[–\-]\s*\d+\s*минут|постепенно\s+увелич)/iu.test(low);
     // Препараты / назначения
-    if (/(?:таблетк|капсул|раствор|инъекц|ампул|\bмг\b|\bмкг\b|\bмл\b|раз\s+в\s+день|раз\s+в\s+сутки|по\s+\d+\s+(?:т\b|табл|капс))/iu.test(low)) {
-      return /продолжать|принимает\s+постоянн|амбулаторно\s+принима/iu.test(low) ? 'conclusion' : 'recommendations';
+    if (!isLifestyle && /(?:таблетк|капсул|раствор|инъекц|ампул|\bмг\b|\bмкг\b|\bмл\b|раз\s+в\s+день|раз\s+в\s+сутки|по\s+\d+\s+(?:т\b|табл|капс))/iu.test(low)) {
+      // «длительно», «постоянно» — маркеры долгосрочной терапии (conclusion).
+      return /продолжать|принимает\s+постоянн|амбулаторно\s+принима|длительно|постоянн\w*\s+прием/iu.test(low) ? 'conclusion' : 'recommendations';
     }
     // Исследования / лаборатория
     if (/(?:\bоак\b|\bоам\b|б\/х|биохим\w*|\bэкг\b|эхо[\-\s]?кг|\bмрт\b|\bкт\b|\bузи\b|холтер\w*|\bсмад\b|рентген\w*|гликирован\w*|hba1c|узд[гс])/iu.test(low)) {
