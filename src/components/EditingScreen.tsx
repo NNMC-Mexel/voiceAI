@@ -25,7 +25,6 @@
   ShieldAlert,
   Volume2,
   VolumeX,
-  UtensilsCrossed,
   ChevronDown,
 } from 'lucide-react';
 import type { MedicalDocument, PatientInfo, RiskAssessment } from '../types';
@@ -115,8 +114,23 @@ const sectionIcons: Record<keyof Omit<MedicalDocument, 'patient' | 'riskAssessme
   conclusion: <Pill className="w-4 h-4" />,
   doctorNotes: <FlaskConical className="w-4 h-4" />,
   recommendations: <ListTodo className="w-4 h-4" />,
-  diet: <UtensilsCrossed className="w-4 h-4" />,
 };
+
+const DIET_ITEM_RE =
+  /^(\s*\d+[\.\)]\s*).{0,600}?(?:диет\S*|стол\s*(?:№?\s*)?\d+|гипохолестерин\S*|гипонатриев\S*)/iu;
+
+function applyDietTemplateToRecommendations(current: string, templateText: string): string {
+  const lines = (current || '').split(/\n+/).filter((l) => l.length > 0);
+  const matchIdx = lines.findIndex((l) => DIET_ITEM_RE.test(l));
+  if (matchIdx >= 0) {
+    const prefix = lines[matchIdx].match(/^\s*\d+[\.\)]\s*/)?.[0] ?? '';
+    lines[matchIdx] = prefix + templateText;
+    return lines.join('\n');
+  }
+  const nextNumber = lines.length + 1;
+  const appended = (lines.length ? lines.join('\n') + '\n' : '') + `${nextNumber}. ${templateText}`;
+  return appended;
+}
 
 const MIN_TEXTAREA_HEIGHT = 100;
 const MAX_TEXTAREA_HEIGHT = 420;
@@ -1208,18 +1222,18 @@ export function EditingScreen({
                           />
                         </div>
                       </div>
-                    ) : field === 'diet' ? (
+                    ) : field === 'recommendations' ? (
                       <div className="space-y-3">
                         <textarea
-                          ref={bindTextareaRef('diet')}
-                          value={document.diet}
-                          onChange={(e) => handleFieldChange('diet', e.target.value)}
+                          ref={bindTextareaRef('recommendations')}
+                          value={document.recommendations}
+                          onChange={(e) => handleFieldChange('recommendations', e.target.value)}
                           onInput={handleTextareaInput}
                           onMouseDown={handleTextareaMouseDown}
-                          onContextMenu={(e) => handleTextareaContextMenu(e, 'diet')}
-                          placeholder="Введите диету..."
+                          onContextMenu={(e) => handleTextareaContextMenu(e, 'recommendations')}
+                          placeholder={`Введите ${fieldLabels[field].toLowerCase()}...`}
                           className="textarea-field"
-                          rows={3}
+                          rows={4}
                         />
                         <div>
                           <button
@@ -1227,7 +1241,7 @@ export function EditingScreen({
                             className="flex items-center gap-2 text-sm font-medium text-medical-700 hover:text-medical-900 transition-colors"
                           >
                             <ChevronDown className={`w-4 h-4 transition-transform ${isDietListOpen ? 'rotate-180' : ''}`} />
-                            Выбрать диету из списка
+                            Вставить / заменить диету из шаблона
                           </button>
                           {isDietListOpen && (
                             <div className="mt-2 max-h-60 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 divide-y divide-slate-200">
@@ -1235,7 +1249,10 @@ export function EditingScreen({
                                 <button
                                   key={diet.id}
                                   onClick={() => {
-                                    handleFieldChange('diet', diet.description);
+                                    handleFieldChange(
+                                      'recommendations',
+                                      applyDietTemplateToRecommendations(document.recommendations, diet.description)
+                                    );
                                     setIsDietListOpen(false);
                                   }}
                                   className="w-full text-left px-3 py-2 hover:bg-medical-50 transition-colors"
@@ -1258,7 +1275,7 @@ export function EditingScreen({
                         onContextMenu={(e) => handleTextareaContextMenu(e, field)}
                         placeholder={`Введите ${fieldLabels[field].toLowerCase()}...`}
                         className="textarea-field"
-                        rows={field === 'recommendations' || field === 'anamnesis' ? 4 : 3}
+                        rows={field === 'anamnesis' ? 4 : 3}
                       />
                     )}
                   </CollapsibleSection>

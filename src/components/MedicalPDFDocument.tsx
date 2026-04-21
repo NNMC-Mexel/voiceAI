@@ -141,7 +141,6 @@ export function MedicalPDFDocument({ document }: MedicalPDFDocumentProps) {
     { title: 'План обследования', content: document.doctorNotes },
     { title: 'Рекомендации / План лечения', content: document.recommendations },
     { title: 'Амбулаторная терапия', content: document.conclusion },
-    { title: 'Диета', content: document.diet },
   ].filter((s) => s.content);
 
   return (

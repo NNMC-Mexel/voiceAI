@@ -213,30 +213,36 @@ class ApiClient {
     const formData = new FormData();
     formData.append('file', audioBlob, filename);
 
+    // 3-8МБ webm через LAN обычно <1с, но если backend занят другим запросом
+    // (одновременная транскрипция/LLM) — default 120с может не хватать.
     return this.request('/api/upload', {
       method: 'POST',
       body: formData,
-    });
+    }, 300_000);
   }
 
   async transcribe(filename: string): Promise<TranscriptionResponse> {
+    // Транскрипция длинного аудио (3-5 мин) на загруженном Whisper может
+    // превышать 120с — даём 10 мин, как у processAudio.
     return this.request('/api/transcribe', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ filename }),
-    });
+    }, 600_000);
   }
 
   async structureText(text: string): Promise<StructureResponse> {
+    // Структурирование 8k+ символов Claude Haiku занимает 30-50с;
+    // с retry/сетью возможны 2+ минуты.
     return this.request('/api/structure', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ text }),
-    });
+    }, 300_000);
   }
 
   async augmentDocument(document: MedicalDocument, text: string): Promise<AugmentResponse> {

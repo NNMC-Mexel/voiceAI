@@ -26,8 +26,7 @@ export interface MedicalDocument {
   finalDiagnosis: string;       // Заключительный диагноз
   conclusion: string;           // Сопутствующий диагноз
   doctorNotes: string;          // План обследования
-  recommendations: string;      // План лечения
-  diet: string;                 // Диета
+  recommendations: string;      // План лечения (включая диету пунктом списка)
 }
 
 export interface TranscriptionResult {
