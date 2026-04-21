@@ -137,7 +137,7 @@ export function MedicalPDFDocument({ document }: MedicalPDFDocumentProps) {
     { title: 'Объективный статус', content: document.objectiveStatus },
     { title: 'Неврологический статус', content: document.neurologicalStatus },
     { title: 'Предварительный диагноз', content: document.diagnosis },
-    { title: 'Заключительный диагноз', content: document.finalDiagnosis },
+    { title: 'Заключение', content: document.finalDiagnosis },
     { title: 'План обследования', content: document.doctorNotes },
     { title: 'Рекомендации / План лечения', content: document.recommendations },
     { title: 'Амбулаторная терапия', content: document.conclusion },

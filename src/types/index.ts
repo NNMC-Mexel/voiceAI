@@ -76,7 +76,7 @@ export const fieldLabels: Record<keyof Omit<MedicalDocument, 'patient' | 'riskAs
   objectiveStatus: 'Объективный статус',
   neurologicalStatus: 'Неврологический статус',
   diagnosis: 'Предварительный диагноз',
-  finalDiagnosis: 'Заключительный диагноз',
+  finalDiagnosis: 'Заключение',
   doctorNotes: 'План обследования',
   recommendations: 'Рекомендации / План лечения',
   conclusion: 'Амбулаторная терапия',

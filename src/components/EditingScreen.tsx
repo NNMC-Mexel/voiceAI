@@ -1208,7 +1208,7 @@ export function EditingScreen({
                           />
                         </div>
                         <div>
-                          <label className="block text-sm font-medium text-text-secondary mb-1">Заключительный диагноз</label>
+                          <label className="block text-sm font-medium text-text-secondary mb-1">Заключение</label>
                           <textarea
                             ref={bindTextareaRef('finalDiagnosis')}
                             value={document.finalDiagnosis}
@@ -1216,7 +1216,7 @@ export function EditingScreen({
                             onInput={handleTextareaInput}
                             onMouseDown={handleTextareaMouseDown}
                             onContextMenu={(e) => handleTextareaContextMenu(e, 'finalDiagnosis')}
-                            placeholder="Введите заключительный диагноз..."
+                            placeholder="Введите заключение (клиническое обоснование, резюме случая)..."
                             className="textarea-field"
                             rows={3}
                           />

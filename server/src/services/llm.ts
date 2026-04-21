@@ -800,7 +800,7 @@ A) ПЕРЕНОСИ ДИКТОВКУ ДОСЛОВНО. Ты инструмент
 6) objectiveStatus — осмотр по системам: общее состояние, кожные покровы, дыхательная, сердечно-сосудистая (АД, ЧСС, тоны), пищеварения, мочевыделения.
 7) neurologicalStatus — ТОЛЬКО неврологический статус. Если не произносился — пусто.
 8) diagnosis — предварительный/клинический диагноз. Если врач упомянул диагноз внутри блока диагноза — всё попадает сюда дословно.
-8a) finalDiagnosis — только если произнесено «заключительный диагноз», иначе пусто.
+8a) finalDiagnosis — ЗАКЛЮЧЕНИЕ / клиническое обоснование случая: нарративный абзац ПОСЛЕ диагноза, резюмирующий приём (начинается с «Пациент(ка) обратил(а)ся…», «На основании жалоб…», «Проведено клинико-анамнестическое…», «Состояние отягощено коморбидной патологией…», заканчивается «направляется на госпитализацию…» и/или «Согласовано с руководителем…»). Также сюда идёт заключительный диагноз, если произнесён отдельно. Если ни того ни другого нет — пусто.
 9) conclusion — СОПУТСТВУЮЩИЙ ДИАГНОЗ (если произнесён). Если не произносился — пусто.
 10) doctorNotes — ПЛАН ОБСЛЕДОВАНИЯ: направления на анализы/исследования (контроль СМАД, КАГ в плановом порядке, повторный ТТГ и т.п.). Нумерованный список.
 11) recommendations — РЕКОМЕНДАЦИИ / ПЛАН ЛЕЧЕНИЯ. СТРОГИЙ ФОРМАТ:
@@ -882,7 +882,7 @@ Return STRICT JSON (use empty strings if data is missing):
   "objectiveStatus": "Объективный статус — структурировать по системам органов: Общие данные (вес, рост, ИМТ, состояние, кожа, слизистые). Система органов дыхания (ЧДД, перкуссия, аускультация). Сердечно-сосудистая система (тоны, АД, ЧСС). Система органов пищеварения (язык, живот, печень, стул). Система мочевыделения (симптом поколачивания, мочеиспускание).",
   "neurologicalStatus": "Неврологический статус",
   "diagnosis": "Предварительный диагноз (с кодом МКБ-10 если озвучен)",
-  "finalDiagnosis": "Заключительный диагноз (если озвучен отдельно, иначе пусто)",
+  "finalDiagnosis": "Заключение — клиническое обоснование / резюме случая: нарративный абзац после диагноза (начинается обычно с «Пациент(ка) обратил(а)ся…», «На основании…», «Проведено клинико-анамнестическое…», «Состояние отягощено…», заканчивается «направляется на госпитализацию…», «Согласовано с…»). Если нет — пусто.",
   "conclusion": "Амбулаторная терапия (ТОЛЬКО препараты которые пациент СЕЙЧАС принимает амбулаторно — НУМЕРОВАННЫЙ СПИСОК)",
   "doctorNotes": "План обследования (ТОЛЬКО лабораторные анализы и инструментальные исследования: КНТЖ, ТТГ, Холтер, СМАД и т.д.)",
   "recommendations": "Рекомендации / План лечения (ВСЕ рекомендации: препараты, питание, физ. активность, консультации специалистов, повторный осмотр — НУМЕРОВАННЫЙ СПИСОК). ДИЕТА — один из пунктов этого списка."
@@ -2342,16 +2342,50 @@ JSON:`;
             const head = this.extractDrugHead(sentence);
             if (head && head.length >= 4) drugHeads.push(head);
           }
+          // Inline: Whisper часто склеивает «Drug A … Drug B … Drug C» БЕЗ точек.
+          // Ищем кандидатов по шаблону CAPS+lowers + дозировочный/требовательный маркер.
+          // Паддим пробелом, чтобы lookbehind срабатывал и на позиции 0.
+          const paddedBlock = ' ' + block;
+          const inlineRe = /(?<=[.\s])([А-ЯЁ][а-яё\-]{3,})(?=\s+(?:[Пп]о\s+|\d+[,.]?\d*\s*(?:мг|мкг|мл|МЕ|ЕД|IU|г\b)|две\s+целых|один\s+раз|\d))/gu;
+          let mInline: RegExpExecArray | null;
+          while ((mInline = inlineRe.exec(paddedBlock)) !== null) {
+            const cand = mInline[1];
+            if (cand.length >= 4 && !drugHeads.some(dh => this.sameDrugHead(dh, cand))) {
+              drugHeads.push(cand);
+            }
+          }
           if (drugHeads.length > 0) {
-            const lines = (doc.recommendations || '').split(/\n+/).filter(l => l.trim());
+            // Pre-split: Claude иногда возвращает весь numbered-список одной строкой.
+            let recLines = (doc.recommendations || '').split(/\n+/).filter(l => l.trim());
+            if (recLines.length === 1) {
+              const splitParts = recLines[0].split(/(?<=\.)\s+(?=\d+[\.\)]\s+[А-ЯЁA-Z])/u);
+              if (splitParts.length > 1) recLines = splitParts;
+            }
             const keep: string[] = [];
             const moved: string[] = [];
-            for (const line of lines) {
+            for (const line of recLines) {
               const body = line.replace(/^\s*\d+[\.\)]\s*/, '').trim();
               const lineHead = this.extractDrugHead(body);
               if (lineHead && drugHeads.some(dh => this.sameDrugHead(dh, lineHead))) {
-                moved.push(body);
-                coverageHints?.add(body);
+                // Разбиваем склеенный body «Drug A …. Drug B …. Drug C.» на отдельные пункты.
+                const parts = body.split(/\.\s+(?=[А-ЯЁ][а-яё\-]{3,})/u)
+                  .map(p => p.trim())
+                  .filter(Boolean);
+                for (const p of parts) {
+                  const item = p.endsWith('.') ? p : p + '.';
+                  // Госпитализация/Направляется — не препарат, возвращаем в recommendations.
+                  if (/^(?:госпитализ|направ(?:ля|ить|ляется))/iu.test(p)) {
+                    keep.push(item);
+                    continue;
+                  }
+                  const pHead = this.extractDrugHead(p);
+                  if (pHead) {
+                    moved.push(item);
+                    coverageHints?.add(p);
+                  } else {
+                    keep.push(item);
+                  }
+                }
               } else {
                 keep.push(body);
               }
@@ -2445,6 +2479,7 @@ JSON:`;
       .filter(Boolean);
 
     const kept: string[] = [];
+    const movedToFinal: string[] = [];
     let dropped = 0;
     let droppedNarrative = 0;
     for (const body of lines) {
@@ -2457,22 +2492,28 @@ JSON:`;
       }
       // Длинный non-drug пункт в conclusion — почти наверняка синтезированный
       // Claude-ом эпикриз/резюме («Пациентка обратилась с жалобами...
-      // направляется на госпитализацию»). Его место — в recommendations или
-      // anamnesis, но в conclusion (амб. терапия) он не нужен. Порог 150 chars
-      // оставляет короткие технические пометки вроде «продолжать по схеме».
+      // направляется на госпитализацию»). Его место — в finalDiagnosis (секция
+      // «Заключение» в PDF), но в conclusion (амб. терапия) он не нужен. Порог
+      // 150 chars оставляет короткие технические пометки вроде «продолжать по схеме».
       if (body.length >= 150) {
         droppedNarrative++;
+        movedToFinal.push(body);
         continue;
       }
       kept.push(body);
     }
     if (dropped === 0 && droppedNarrative === 0) return;
     doc.conclusion = kept.map((l, i) => `${i + 1}. ${l}`).join('\n');
+    if (movedToFinal.length > 0) {
+      const current = (doc.finalDiagnosis || '').trim();
+      const addition = movedToFinal.join(' ').trim();
+      doc.finalDiagnosis = current ? `${current}\n\n${addition}` : addition;
+    }
     if (dropped > 0) {
       console.log(`[postprocess] P1.5: dropped ${dropped} non-drug item(s) from conclusion (covered in clinicalCourse/diagnosis)`);
     }
     if (droppedNarrative > 0) {
-      console.log(`[postprocess] P1.5: dropped ${droppedNarrative} narrative item(s) from conclusion (synthesized summary)`);
+      console.log(`[postprocess] P1.5: moved ${droppedNarrative} narrative item(s) from conclusion → finalDiagnosis (клинич. обоснование)`);
     }
   }
 
@@ -3114,7 +3155,7 @@ JSON:`;
       objectiveStatus: 'Объективный статус',
       neurologicalStatus: 'Неврологический статус',
       diagnosis: 'Предварительный диагноз',
-      finalDiagnosis: 'Заключительный диагноз',
+      finalDiagnosis: 'Заключение',
       conclusion: 'Амбулаторная терапия',
       doctorNotes: 'План обследования',
       recommendations: 'Рекомендации / План лечения',
