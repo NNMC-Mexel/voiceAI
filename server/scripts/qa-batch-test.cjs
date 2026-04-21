@@ -72,12 +72,16 @@ async function processFile(filePath) {
   const data = await resp.json();
   console.log(`Total: ${elapsed}s`);
 
+  const raw = data.transcription?.text || '';
+  console.log(`\n--- RAW WHISPER TEXT [${raw.length} chars] ---`);
+  console.log(raw);
+
   const doc = data.document || {};
   const fields = [
     'complaints', 'anamnesis', 'outpatientExams', 'clinicalCourse',
     'allergyHistory', 'objectiveStatus', 'neurologicalStatus',
     'diagnosis', 'finalDiagnosis', 'conclusion',
-    'doctorNotes', 'recommendations', 'diet', 'riskAssessment'
+    'doctorNotes', 'recommendations', 'riskAssessment'
   ];
 
   for (const field of fields) {

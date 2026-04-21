@@ -111,10 +111,13 @@ export class WhisperService {
       '$1, '
     );
 
-    // 2. Remove trailing hallucination garbage — non-medical babble at the end
-    // Matches repeated short phrases at the very end of text
+    // 2. Remove trailing hallucination garbage — non-medical babble at the end.
+    // NB: слова «Раз», «Или», «Вы» убраны — в медицинской диктовке «раз в день»,
+    // «или в течение», «вы принимаете» встречаются часто; на двойном повторе
+    // («одну раз раз в день») regex уничтожал весь хвост документа.
+    // Ужесточено до {3,} — три повтора точно галлюцинация, два могут быть речью.
     cleaned = cleaned.replace(
-      /(?:\s+(?:Дождь|Осторожно|Всё хорошо|Раз|Или|не знаю|Тогда мы|Вы)[.,!?]?\s*){2,}[\s\S]*$/gi,
+      /(?:\s+(?:Дождь|Осторожно|Всё хорошо|не знаю|Тогда мы)[.,!?]?\s*){3,}[\s\S]*$/gi,
       ''
     );
 

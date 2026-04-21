@@ -26,8 +26,7 @@ export interface MedicalDocument {
   finalDiagnosis: string;       // Заключительный диагноз
   conclusion: string;           // Амбулаторная терапия
   doctorNotes: string;          // План обследования
-  recommendations: string;      // Рекомендации / План лечения
-  diet: string;                 // Диета
+  recommendations: string;      // Рекомендации / План лечения (включая диету пунктом списка)
 }
 
 export type AppStep = 'recording' | 'processing' | 'editing' | 'preview';
@@ -66,7 +65,6 @@ export const emptyDocument: MedicalDocument = {
   conclusion: '',
   doctorNotes: '',
   recommendations: '',
-  diet: '',
 };
 
 export const fieldLabels: Record<keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>, string> = {
@@ -78,11 +76,10 @@ export const fieldLabels: Record<keyof Omit<MedicalDocument, 'patient' | 'riskAs
   objectiveStatus: 'Объективный статус',
   neurologicalStatus: 'Неврологический статус',
   diagnosis: 'Предварительный диагноз',
-  finalDiagnosis: 'Заключительный диагноз',
+  finalDiagnosis: 'Заключение',
   doctorNotes: 'План обследования',
   recommendations: 'Рекомендации / План лечения',
   conclusion: 'Амбулаторная терапия',
-  diet: 'Диета',
 };
 
 export const patientFieldLabels: Record<keyof PatientInfo, string> = {

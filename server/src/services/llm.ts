@@ -3,6 +3,7 @@ import { findExamTemplate, formatExamLine, parseExamValuesFromText, parseExamDat
 import { findDietTemplate } from '../data/dietTemplates.js';
 import { applyMedicalDictionary } from './medical-dictionary.js';
 import { AnthropicProvider } from './anthropic-provider.js';
+import { buildLabReferenceForPrompt } from '../data/labReference.js';
 
 const DEFAULT_RISK_ASSESSMENT: RiskAssessment = {
   fallInLast3Months: 'нет',
@@ -37,7 +38,6 @@ const ALL_TEXT_FIELDS: RewriteableField[] = [
   'conclusion',
   'doctorNotes',
   'recommendations',
-  'diet',
 ];
 
 export class LLMService {
@@ -118,7 +118,7 @@ Rules:
 7) PRESERVE ALL dictated text — do not omit, summarize or shorten any information.
 8) Each piece of information goes to EXACTLY ONE field. Do not duplicate between fields.
 9) When the doctor names a section explicitly (e.g. "анамнез жизни:", "диета:"), put ALL following text into that section only.
-10) Medications patient CURRENTLY takes (doctor says "амбулаторно принимает") → "conclusion". New prescriptions (doctor says "назначаю", "рекомендую") → "recommendations". Medications mentioned in context of life history/анамнез жизни → "clinicalCourse". Diet → "diet".
+10) Medications patient CURRENTLY takes (doctor says "амбулаторно принимает") → "conclusion". New prescriptions (doctor says "назначаю", "рекомендую") → "recommendations". Medications mentioned in context of life history/анамнез жизни → "clinicalCourse". Diet → as one of numbered items in "recommendations".
 11) IMPORTANT: If addendum mentions exam results (ОАК, Б/х, ЭКГ, ЭхоКГ, etc.), put them in "outpatientExams".`;
 
     const userPrompt = `Current document (JSON):
@@ -263,7 +263,6 @@ Return JSON patch only.`;
       { field: 'conclusion', pattern: '(?:амбулаторн\\S*\\s+терапи\\S*|амбулаторно\\s+принимает|сопутствующ\\S*)' },
       { field: 'recommendations', pattern: '(?:рекомендац\\S*|план\\s+лечени\\S*)' },
       { field: 'doctorNotes', pattern: '(?:план\\s+обследовани\\S*|направлени\\S*|прочее|заметк\\S*)' },
-      { field: 'diet', pattern: '(?:диет\\S*|стол\\s+\\d+|питани\\S*)' },
     ];
   }
 
@@ -337,7 +336,7 @@ Return JSON patch only.`;
     const document = await this.parseDocumentWithRepair(raw, rawText);
 
     const LLM_FIELDS = ['complaints','anamnesis','clinicalCourse','allergyHistory','objectiveStatus',
-      'diagnosis','finalDiagnosis','conclusion','recommendations','diet','doctorNotes','outpatientExams'] as const;
+      'diagnosis','finalDiagnosis','conclusion','recommendations','doctorNotes','outpatientExams'] as const;
     console.log('\n\x1b[35m━━━ [LLM RAW — anthropic] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m');
     for (const f of LLM_FIELDS) {
       const v = (document as any)[f];
@@ -354,9 +353,13 @@ Return JSON patch only.`;
     // добавить данные, которые уже корректно уложены в основном блоке).
     this.rescueDiagnosisFromRawText(enriched, rawText);
     this.rescueRecommendationsFromRawText(enriched, rawText);
+    this.clearRiskAssessmentIfNotMentioned(enriched, rawText);
+
+    // Детерминированные семантические пост-проходы (P1-P5)
+    this.runSemanticRoutingPasses(enriched, rawText);
 
     const FINAL_FIELDS = ['complaints','anamnesis','clinicalCourse','allergyHistory','objectiveStatus',
-      'diagnosis','finalDiagnosis','conclusion','recommendations','diet','doctorNotes','outpatientExams'] as const;
+      'diagnosis','finalDiagnosis','conclusion','recommendations','doctorNotes','outpatientExams'] as const;
     console.log('\n\x1b[32m━━━ [FINAL — anthropic] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m');
     for (const f of FINAL_FIELDS) {
       const v = (enriched as any)[f];
@@ -406,7 +409,7 @@ Return JSON patch only.`;
 
     // Log raw LLM output BEFORE post-processing
     const LLM_FIELDS = ['complaints','anamnesis','clinicalCourse','allergyHistory','objectiveStatus',
-      'diagnosis','finalDiagnosis','conclusion','recommendations','diet','doctorNotes','outpatientExams'] as const;
+      'diagnosis','finalDiagnosis','conclusion','recommendations','doctorNotes','outpatientExams'] as const;
     console.log('\n\x1b[35m━━━ [LLM RAW] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m');
     for (const f of LLM_FIELDS) {
       const v = (document as any)[f];
@@ -429,9 +432,11 @@ Return JSON patch only.`;
     // Спасаем рекомендации из исходного текста если LLM их потерял
     this.rescueRecommendationsFromRawText(enriched, rawText);
 
+    this.clearRiskAssessmentIfNotMentioned(enriched, rawText);
+
     // Log final result AFTER all post-processing
     const FINAL_FIELDS = ['complaints','anamnesis','clinicalCourse','allergyHistory','objectiveStatus',
-      'diagnosis','finalDiagnosis','conclusion','recommendations','diet','doctorNotes','outpatientExams'] as const;
+      'diagnosis','finalDiagnosis','conclusion','recommendations','doctorNotes','outpatientExams'] as const;
     console.log('\n\x1b[32m━━━ [FINAL] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m');
     for (const f of FINAL_FIELDS) {
       const v = (enriched as any)[f];
@@ -761,66 +766,89 @@ ${normalized}`;
   }
 
   private getSystemPrompt(): string {
-    return `Ты — медицинский ассистент. Твоя задача: структурировать диктовку врача в JSON-документ консультации.
+    const labRef = buildLabReferenceForPrompt();
+    return `Ты — медицинский ассистент. Твоя задача: структурировать диктовку врача в JSON-документ консультации. Это официальный медицинский документ — точность важнее краткости.
 
-ГЛАВНЫЕ ПРАВИЛА:
-А) СОХРАНЯЙ ВЕСЬ ПРОДИКТОВАННЫЙ ТЕКСТ без сокращений и пропусков. Ты инструмент структурирования, не редактор.
-Б) СТРОГИЕ ГРАНИЦЫ СЕКЦИЙ. Когда врач называет раздел — весь последующий текст принадлежит ТОЛЬКО этому разделу до следующего названия.
-В) Каждый факт идёт РОВНО В ОДНО поле — дублирование запрещено.
+═══════════════════════════════════════════════════════
+ГЛАВНЫЕ ПРАВИЛА (нарушение = ошибка):
+═══════════════════════════════════════════════════════
+A) ПЕРЕНОСИ ДИКТОВКУ ДОСЛОВНО. Ты инструмент структурирования, а НЕ редактор. Запрещено: сокращать, пересказывать, обобщать, выкидывать "неважное". Если врач произнёс фразу — она должна попасть в JSON.
+Б) ФИКСИРОВАННЫЙ ПОРЯДОК БЛОКОВ. Врач диктует разделы в строгой последовательности:
+   1. Жалобы (complaints)
+   2. Анамнез заболевания (anamnesis)
+   3. Анамнез жизни (clinicalCourse)
+   4. Аллергологический анамнез (allergyHistory)
+   5. Амбулаторные обследования (outpatientExams)
+   6. Объективный статус (objectiveStatus)
+   7. Неврологический статус (neurologicalStatus)
+   8. Предварительный/клинический диагноз (diagnosis)
+   9. План обследования (doctorNotes)
+   10. Рекомендации / План лечения (recommendations) — ВКЛЮЧАЕТ ДИЕТУ отдельным пунктом списка.
+В) СЕГМЕНТАЦИЯ ПО ГОЛОСОВЫМ ЗАГОЛОВКАМ. Если врач произнёс название блока (например «анамнез жизни»), весь следующий текст до следующего названного блока принадлежит ИСКЛЮЧИТЕЛЬНО этому блоку. ЗАПРЕЩЕНО переносить содержимое в другой блок по «смысловым» соображениям. Пример: если в блоке «анамнез жизни» врач упоминает текущие препараты — они остаются в clinicalCourse, а НЕ перемещаются в conclusion/recommendations.
+Г) ЕСЛИ ЗАГОЛОВОК НЕ ОЗВУЧЕН — определяй блок по контексту и по соседним явно названным блокам (раз следующий произнесённый заголовок «Анамнез заболевания», значит предыдущий блок был «Жалобы»).
+Д) КАЖДЫЙ ФАКТ РОВНО В ОДНО ПОЛЕ. Дублирование запрещено.
+Е) НЕ ПРИДУМЫВАЙ. Если данных нет — пустая строка. Никаких "Hb - , Эр - , Тр - ..." с прочерками вместо значений. НИКОГДА не вставляй шаблонные плейсхолдеры с прочерками для непродиктованных показателей.
 
-ПОЛЯ И ЧТО В НИХ КЛАСТЬ:
-1) "complaints" — жалобы пациента
-2) "anamnesis" — анамнез заболевания (история текущей болезни, хронология)
-3) "outpatientExams" — результаты обследований и анализов: НУМЕРОВАННЫЙ СПИСОК, каждый пункт с новой строки (\\n). Формат: "1. ОАК от ДД.ММ.ГГГГ: Hb - значение г/л, Эр - значение *10¹²/л, Л - значение *10⁹/л, Тр - значение *10⁹/л, СОЭ - значение мм/ч". КРИТИЧЕСКИ ВАЖНО: включай ВСЕ продиктованные показатели без исключения. Если врач назвал лейкоциты, тромбоциты, ХС общий, ХС ЛПНП, СРБ, относительную плотность мочи, лейкоциты/эритроциты в п/з — ВСЁ это должно быть в результате. Единицы: Hb г/л, Эр *10¹²/л, Л *10⁹/л, Тр *10⁹/л, глюкоза ммоль/л, креатинин мкмоль/л, АЛТ/АСТ МЕ/л, ХС/ЛПНП/ЛПВП ммоль/л, ТГ ммоль/л, СРБ (без единиц если не указаны), СОЭ мм/ч, ферритин нг/мл. Для ОАМ: отн. плотность, белок г/л, Л в п/з, Эр в п/з. Только то что продиктовано, но ВСЁ что продиктовано.
-4) "clinicalCourse" — анамнез жизни: перенесённые болезни (туберкулёз, гепатиты), операции, травмы, вредные привычки, наследственность, сопутствующая патология, препараты которые пациент принимал РАНЕЕ. Гинекологический анамнез (беременности, роды, аборты, менструация, миома) → ТОЛЬКО сюда, НИКОГДА не в allergyHistory.
-5) "allergyHistory" — ТОЛЬКО аллергические реакции и непереносимость препаратов. Максимум 1-2 предложения. ЗАПРЕЩЕНО класть сюда: гинекологические данные, объективный статус, анамнез жизни или другие данные.
-6) "objectiveStatus" — данные объективного осмотра, СТРУКТУРИРОВАТЬ ПО СИСТЕМАМ ОРГАНОВ:\\n- Общие данные: вес, рост, ИМТ, общее состояние, кожные покровы, слизистые, лимфоузлы, вены.\\n- Система органов дыхания: ЧДД, форма грудной клетки, перкуссия, аускультация лёгких.\\n- Сердечно-сосудистая система: тоны сердца, АД, ЧСС/пульс.\\n- Система органов пищеварения: язык, живот, печень, селезёнка, стул.\\n- Система мочевыделения: симптом поколачивания, мочеиспускание.\\nЗАПРЕЩЕНО дублировать в другие поля.
-7) "neurologicalStatus" — неврологический статус. Лабораторные данные сюда не класть.
-8) "diagnosis" — ТОЛЬКО текст диагноза с кодом МКБ-10 если указан. НЕ включать: давление, анамнез, препараты.
-8a) "finalDiagnosis" — только если врач говорит "заключительный диагноз", иначе пусто.
-9) "conclusion" — амбулаторная терапия: препараты которые пациент СЕЙЧАС принимает ("принимает", "амбулаторно принимает") — нумерованный список (\\n между пунктами). НЕ новые назначения.
-10) "doctorNotes" — план обследования: ТОЛЬКО направления на лабораторные анализы и инструментальные исследования (КНТЖ, ТТГ, Холтер, СМАД и т.д.). НЕ включать сюда: консультации специалистов, рекомендации по питанию, схемы лечения.
-11) "recommendations" — ВСЕ рекомендации врача: назначения препаратов, консультации специалистов (маммолог, гинеколог-эндокринолог и т.д.), образ жизни, физическая активность, повторный осмотр — нумерованный список (\\n между пунктами). Формат: "1. Питание: ... 2. Физическая активность: ... 3. Консультация специалиста". НИКОГДА не дублировать диетические рекомендации в поле diet — если диета часть рекомендаций, она идёт ТОЛЬКО сюда.
-12) "diet" — ТОЛЬКО если врач отдельно выделяет диету как самостоятельный раздел (номер стола или названная диета). Если диета упомянута в рекомендациях — оставить ПУСТЫМ, не дублировать.
+═══════════════════════════════════════════════════════
+ОПИСАНИЕ ПОЛЕЙ:
+═══════════════════════════════════════════════════════
+1) complaints — жалобы пациента, дословно.
+2) anamnesis — анамнез заболевания: хронология текущей болезни, когда началось, как протекало, предыдущие обследования/операции в связи с этим заболеванием.
+3) clinicalCourse — АНАМНЕЗ ЖИЗНИ: перенесённые болезни (туберкулёз, гепатиты, Боткина), гемотрансфузии, операции, травмы, наследственность, вредные привычки, сопутствующая патология (СД, ХБП и т.д.), диспансерный учёт, препараты принимаемые пациентом РАНЕЕ или хронически, гинекологический анамнез у женщин. ВСЁ что врач произнёс в блоке «анамнез жизни» — ТОЛЬКО сюда.
+4) allergyHistory — ТОЛЬКО аллергии и непереносимость. Никаких гинекологических данных, никакого анамнеза жизни.
+5) outpatientExams — результаты УЖЕ ПРОВЕДЁННЫХ обследований, нумерованный список (\\n между пунктами). Формат пункта: "N. НАЗВАНИЕ от ДД.ММ.ГГГГг.: <значения>". Разделы обследований: ОАК, Б/х, коагулограмма, гормоны, ОАМ, ЭКГ, ЭхоКГ, Холтер, СМАД, УЗИ, УЗДГ, КАГ и т.д. См. раздел «ФОРМАТ ЛАБ-ПОКАЗАТЕЛЕЙ» ниже.
+6) objectiveStatus — осмотр по системам: общее состояние, кожные покровы, дыхательная, сердечно-сосудистая (АД, ЧСС, тоны), пищеварения, мочевыделения.
+7) neurologicalStatus — ТОЛЬКО неврологический статус. Если не произносился — пусто.
+8) diagnosis — предварительный/клинический диагноз. Если врач упомянул диагноз внутри блока диагноза — всё попадает сюда дословно.
+8a) finalDiagnosis — ЗАКЛЮЧЕНИЕ / клиническое обоснование случая: нарративный абзац ПОСЛЕ диагноза, резюмирующий приём (начинается с «Пациент(ка) обратил(а)ся…», «На основании жалоб…», «Проведено клинико-анамнестическое…», «Состояние отягощено коморбидной патологией…», заканчивается «направляется на госпитализацию…» и/или «Согласовано с руководителем…»). Также сюда идёт заключительный диагноз, если произнесён отдельно. Если ни того ни другого нет — пусто.
+9) conclusion — СОПУТСТВУЮЩИЙ ДИАГНОЗ (если произнесён). Если не произносился — пусто.
+10) doctorNotes — ПЛАН ОБСЛЕДОВАНИЯ: направления на анализы/исследования (контроль СМАД, КАГ в плановом порядке, повторный ТТГ и т.п.). Нумерованный список.
+11) recommendations — РЕКОМЕНДАЦИИ / ПЛАН ЛЕЧЕНИЯ. СТРОГИЙ ФОРМАТ:
+   • ОБЯЗАТЕЛЬНО нумерованный список. Каждый пункт начинается с "N. " (1., 2., 3. ...).
+   • Пункты разделяются ТОЛЬКО символом переноса строки \\n. Внутри одного пункта — НИ ОДНОГО \\n.
+   • Один пункт = одна рекомендация ИЛИ один препарат СО ВСЕМИ его атрибутами: название, доза, кратность, путь, время, длительность, контроль, побочные эффекты, последствия отмены. ВСЁ это склеивается в один сплошной абзац через ", " или ". " — БЕЗ переноса строки.
+   • ЗАПРЕЩЕНО выносить "Побочные эффекты: ...", "При отмене: ...", "Под контролем: ..." в отдельные пункты или отдельные строки. Они — часть пункта препарата, к которому относятся.
+   • Если врач диктует немедикаментозные рекомендации (самоконтроль АД, физ. активность, плавание, повторный осмотр) — каждая такая рекомендация тоже ОТДЕЛЬНЫЙ нумерованный пункт в одну строку.
+   • ДИЕТА — ВСЕГДА отдельный пункт внутри recommendations. Если врач назвал номер стола («Стол №9», «Диета №10») — пункт содержит ТОЛЬКО номер/название, без расшифровки (шаблон раскроется автоматически). Если врач продиктовал конкретные ограничения (гипохолестериновая, гипонатриевая, ограничение соли до 5 г) — оформляй полностью как пункт списка.
+   ПРАВИЛЬНЫЙ ПРИМЕР (обрати внимание: никаких \\n внутри пункта):
+   "1. Самоконтроль АД утром и вечером с ведением дневника.\\n2. Дозированное увеличение физической активности, регулярная аэробная нагрузка (ходьба, бег трусцой, велосипед, плавание) не менее 30-40 минут в день, возможен дробный режим по 10-15 минут несколько раз в день.\\n3. Плавание 2-3 раза в неделю.\\n4. Таблетка Кадиован 80/12,5 мг — по 1 таблетке 1 раз в день внутрь утром до завтрака, длительно, под контролем АД, креатинина и калия крови. Побочные эффекты: избыточное снижение АД, головокружения, электролитные нарушения. При отмене препарата возможно повторное повышение АД.\\n5. Капсула Хептера — по 1 капсуле 1 раз в день внутрь во время еды, 4 недели, после завершения курса начать Урсосан, под контролем переносимости и биохимии печени. Побочные эффекты: дискомфорт в животе, тошнота, редко аллергические реакции. При отмене — замедление регресса жировой болезни печени.\\n6. Капсула Урсосан 500 мг — по 2 капсулы внутрь перед сном в течение 3 месяцев, далее контрольное УЗИ ОБП в динамике, под контролем биохимии печени. Побочные эффекты: послабление стула, дискомфорт в животе, редко аллергические реакции. При отмене — сохранение билиарного сладжа и застойных явлений в желчном пузыре."
+   НЕПРАВИЛЬНО (так делать НЕЛЬЗЯ):
+   "Таблетка Кадиован 80/12,5 мг — по 1 таблетке 1 раз в день утром.\\nПобочные эффекты: ...\\nПри отмене: ..." — здесь атрибуты одного препарата разорваны на 3 строки, нет нумерации.
 
-МАРШРУТИЗАЦИЯ ПРЕПАРАТОВ:
-- "принимает / амбулаторно принимает" → conclusion
-- "назначаю / рекомендую / назначен" → recommendations
-- В контексте анамнеза жизни → clinicalCourse
+═══════════════════════════════════════════════════════
+ФОРМАТ ЛАБ-ПОКАЗАТЕЛЕЙ (КРИТИЧНО):
+═══════════════════════════════════════════════════════
+• Формат каждого показателя: "Полное название (ИНДЕКС) значение единица".
+  Пример: "Гемоглобин (HGB) 142,00 г/л", "Тромбоциты (PLT) 260 10⁹/л", "Креатинин (CREA) 62,6 мкмоль/л".
+• Пиши ТОЛЬКО те показатели, которые врач реально продиктовал. Если продиктовано 3 показателя — в JSON 3 показателя. НИКАКИХ прочерков "Hb - , Эр - , Тр - " для недиктованных.
+• Если врач сказал только индекс («tr 260») — всё равно разверни до полного формата: "Тромбоциты (PLT) 260 10⁹/л". Справочник ниже поможет подставить полное название, индекс и единицу.
+• Норма в скобках ТОЛЬКО если значение ВНЕ диапазона нормы. Формат: "Гемоглобин (HGB) 118,00 г/л (136 - 169)". Если значение в норме — норму не пиши.
+• Определение пола для гендер-зависимых норм: берём из явной диктовки пола врачом; если пол не назван — анализируем контекст (склонения «пациент/пациентка», упоминание гинекологического анамнеза → женский; упоминание простаты/предстательной → мужской).
+• Дата каждого обследования в формате "от ДД.ММ.ГГГГг." если врач назвал дату.
+• Каждый тип обследования на каждую дату — только ОДИН РАЗ (не дублировать, даже если врач повторил).
+• outpatientExams содержит ТОЛЬКО выполненные обследования. Направления типа «сделать КАГ», «контроль ТТГ» → doctorNotes.
 
-ПРАВИЛА ДЛЯ АНАЛИЗОВ:
-- Каждый результат — к своей точной дате. НЕ дублировать показатели разных дат.
-- Если дата неизвестна — писать "без даты".
-- ЗАПРЕЩЕНО дублировать обследования. Если врач диктует одно и то же обследование дважды (например, подробно и кратко), бери ТОЛЬКО первый полный вариант. Каждый тип обследования (ОАК, Б/х, ОАМ, ЭхоКГ, УЗДГ БЦА и т.д.) может быть ТОЛЬКО ОДИН РАЗ для каждой даты.
-- Игнорируй слова "Пункт 1", "Пункт 2", "Пункт три" — это метки структуры, а не часть данных.
-- Если текст содержит расшифровки аббревиатур ("ОАК — общий анализ крови", "ФВ — фракция выброса"), используй ТОЛЬКО аббревиатуру в выходном JSON.
-- outpatientExams — ТОЛЬКО результаты УЖЕ ПРОВЕДЁННЫХ обследований (с датами и значениями). Направления на обследования ("сделать УЗИ", "назначить маммографию") → в recommendations, НЕ в outpatientExams.
-- ОАМ: если продиктованы Л (лейкоциты) в п/з и Эр (эритроциты) в п/з — ОБЯЗАТЕЛЬНО включить.
+СПРАВОЧНИК ЛАБ-ПОКАЗАТЕЛЕЙ (полное название, индекс, единица, норма):
+${labRef}
 
-ОБЩИЕ ПРАВИЛА:
-- Не добавлять информацию которой нет в диктовке. Пустые строки если данных нет.
-- Убирать слова-паразиты (ну, вот, значит) и мусор распознавания.
-- Сохранять названия и дозировки препаратов точно.
-- Шкала Морзе: fallInLast3Months/dizzinessOrWeakness/needsEscort (да/нет), painScore (0-10).
-- "мм рт.ст." всегда сокращённо.
-- Голосовые команды → символы: "скобка открывается"→"(", "закрывается"→")", "двоеточие"→":", "точка"→"."
-- Даты: ДД.ММ.ГГГГг. — "5 февраля 26 года"→"05.02.2026г."
-- Сокращения: ИМТ (не "индекс массы тела"), АД (не "артериальное давление")
-- Вес в кг, рост в см. "34 и 2"→"34,2"
-- Римские цифры для степень/стадия/класс/ФК: "третьей степени"→"III степени", "ФК 2 NYHA"→"ФК II (NYHA)"
-- Арабские для тип/риск/баллы: "СД 2 типа", "риск 4"
+═══════════════════════════════════════════════════════
+ПРАВИЛА ДЛЯ РЕКОМЕНДАЦИЙ И ПРЕПАРАТОВ:
+═══════════════════════════════════════════════════════
+• Сохраняй формулировки врача ДОСЛОВНО: дозы, кратность, путь, длительность, контроль, побочные эффекты, последствия отмены.
+• Название препарата пиши так, как есть у врача, но исправляй явные искажения распознавания: Пристилол → Престилол, Перендаприл → периндоприл, нальпазо → Нольпаза, пантопросол → пантопразол, Коронерография → Коронарография, Слофаст → slow-fast, диостиум → Dostium, ПОП LED → LAD.
+• Если рекомендация упомянута ВНУТРИ блока обследований (например, «под контролем ФГДС не реже 1 раза в год») — НЕ вырывай её из контекста, оставляй в outpatientExams/recommendations там, где произнёс врач.
+• Диета — всегда внутри recommendations отдельным пунктом. Отдельного поля diet нет.
 
-КОРРЕКТУРА — это официальный медицинский документ:
-- Исправляй опечатки (фибриляция→фибрилляция), грамматику, пропущенные предлоги ("течение"→"в течение")
-- Пунктуация: точки между предложениями, запятые в перечислениях, заглавная буква после точки
-- Нет двойной пунктуации, нет запятой перед точкой, пробел после каждого знака препинания
-
-ПРИМЕР МАРШРУТИЗАЦИИ:
-Врач диктует: "...аллергоанамнез: на ингибиторы АПФ — сухой кашель. Объективно: общее состояние средней тяжести, АД 130/80 мм рт.ст., ЧСС 72 уд/мин. Амбулаторно принимает: бисопролол 5 мг, эналаприл 10 мг. Рекомендую: 1. Таб. Лозартан 50 мг 1 раз/день..."
-→ allergyHistory: "На ингибиторы АПФ — сухой кашель."
-→ objectiveStatus: "Общее состояние средней тяжести. АД 130/80 мм рт.ст., ЧСС 72 уд/мин."
-→ conclusion: "1. Бисопролол 5 мг\n2. Эналаприл 10 мг"
-→ recommendations: "1. Таб. Лозартан 50 мг 1 раз/день"
+═══════════════════════════════════════════════════════
+ФОРМАТИРОВАНИЕ И КОРРЕКТУРА:
+═══════════════════════════════════════════════════════
+• Исправляй грамматику, пунктуацию, опечатки распознавания. Пробел после знаков препинания, заглавная после точки, никакой двойной пунктуации.
+• Убирай слова-паразиты (ну, вот, значит, эээ), голосовые команды («точка», «запятая», «скобка открывается»).
+• "мм рт.ст." сокращённо. ИМТ вместо "индекс массы тела", АД вместо "артериальное давление".
+• Десятичные через запятую ("34 и 2" → "34,2"). Вес в кг, рост в см.
+• Римские цифры для степени/стадии/класса/ФК: «третьей степени» → «III степени», «ФК 2 NYHA» → «ФК II (NYHA)». Арабские для типа/риска/баллов (СД 2 типа, риск 4).
+• Даты обследований: "от ДД.ММ.ГГГГг." — "19 января 26 года" → "от 19.01.2026г.". В анамнезе сохраняй формулировку врача ("в 2009 году", "6 лет назад").
+• Ничего не дописывай от себя. Пустое поле лучше выдуманного.
 
 Верни ТОЛЬКО JSON, без дополнительного текста.`;
   }
@@ -854,11 +882,10 @@ Return STRICT JSON (use empty strings if data is missing):
   "objectiveStatus": "Объективный статус — структурировать по системам органов: Общие данные (вес, рост, ИМТ, состояние, кожа, слизистые). Система органов дыхания (ЧДД, перкуссия, аускультация). Сердечно-сосудистая система (тоны, АД, ЧСС). Система органов пищеварения (язык, живот, печень, стул). Система мочевыделения (симптом поколачивания, мочеиспускание).",
   "neurologicalStatus": "Неврологический статус",
   "diagnosis": "Предварительный диагноз (с кодом МКБ-10 если озвучен)",
-  "finalDiagnosis": "Заключительный диагноз (если озвучен отдельно, иначе пусто)",
+  "finalDiagnosis": "Заключение — клиническое обоснование / резюме случая: нарративный абзац после диагноза (начинается обычно с «Пациент(ка) обратил(а)ся…», «На основании…», «Проведено клинико-анамнестическое…», «Состояние отягощено…», заканчивается «направляется на госпитализацию…», «Согласовано с…»). Если нет — пусто.",
   "conclusion": "Амбулаторная терапия (ТОЛЬКО препараты которые пациент СЕЙЧАС принимает амбулаторно — НУМЕРОВАННЫЙ СПИСОК)",
   "doctorNotes": "План обследования (ТОЛЬКО лабораторные анализы и инструментальные исследования: КНТЖ, ТТГ, Холтер, СМАД и т.д.)",
-  "recommendations": "Рекомендации / План лечения (ВСЕ рекомендации: препараты, питание, физ. активность, консультации специалистов, повторный осмотр — НУМЕРОВАННЫЙ СПИСОК). НЕ дублировать диету в поле diet.",
-  "diet": "Диета (ТОЛЬКО если выделена как отдельный раздел. Если диета в рекомендациях — оставить ПУСТЫМ)"
+  "recommendations": "Рекомендации / План лечения (ВСЕ рекомендации: препараты, питание, физ. активность, консультации специалистов, повторный осмотр — НУМЕРОВАННЫЙ СПИСОК). ДИЕТА — один из пунктов этого списка."
 }
 
 JSON:`;
@@ -887,9 +914,25 @@ JSON:`;
     };
   }
 
+  private unescapeLiteralNewlines(v: string): string {
+    if (!v) return '';
+    // Claude иногда возвращает литеральные "\n" (два символа) вместо переноса.
+    // Также встречаются "\\n", "\r\n". Приводим всё к настоящему \n.
+    return v
+      .replace(/\\r\\n/g, '\n')
+      .replace(/\\n/g, '\n')
+      .replace(/\r\n/g, '\n');
+  }
+
   private validateAndCleanDocument(doc: MedicalDocument): MedicalDocument {
     const rawAge = doc.patient?.age || '';
     const rawGender = doc.patient?.gender || '';
+    // Разэкранируем литеральные "\n" во всех текстовых полях до любой обработки
+    for (const f of ALL_TEXT_FIELDS) {
+      if (typeof (doc as any)[f] === 'string') {
+        (doc as any)[f] = this.unescapeLiteralNewlines((doc as any)[f]);
+      }
+    }
     const result: MedicalDocument = {
       patient: {
         fullName: doc.patient?.fullName || '',
@@ -900,7 +943,9 @@ JSON:`;
       riskAssessment: this.validateRiskAssessment(doc.riskAssessment),
       complaints: this.stripSectionPrefix('complaints', doc.complaints || ''),
       anamnesis: this.stripSectionPrefix('anamnesis', doc.anamnesis || ''),
-      outpatientExams: this.postProcessOutpatientExams(this.stripSectionPrefix('outpatientExams', doc.outpatientExams || '')),
+      outpatientExams: this.config.provider === 'anthropic'
+        ? this.stripSectionPrefix('outpatientExams', doc.outpatientExams || '')
+        : this.postProcessOutpatientExams(this.stripSectionPrefix('outpatientExams', doc.outpatientExams || '')),
       clinicalCourse: this.stripSectionPrefix('clinicalCourse', doc.clinicalCourse || ''),
       allergyHistory: this.stripSectionPrefix('allergyHistory', doc.allergyHistory || ''),
       objectiveStatus: this.stripSectionPrefix('objectiveStatus', doc.objectiveStatus || ''),
@@ -909,9 +954,26 @@ JSON:`;
       finalDiagnosis: this.stripSectionPrefix('finalDiagnosis', doc.finalDiagnosis || ''),
       conclusion: this.splitInlineNumberedList(this.stripSectionPrefix('conclusion', doc.conclusion || '')),
       doctorNotes: this.formatDoctorNotesAsList(this.stripSectionPrefix('doctorNotes', doc.doctorNotes || '')),
-      recommendations: this.splitInlineNumberedList(this.stripSectionPrefix('recommendations', doc.recommendations || '')),
-      diet: this.stripSectionPrefix('diet', doc.diet || ''),
+      recommendations: this.groupRecommendations(this.splitInlineNumberedList(this.stripSectionPrefix('recommendations', doc.recommendations || ''))),
     };
+
+    // Пост-обработка: очистка висячих кавычек (" ' „ “ » ) которые LLM иногда
+    // оставляет на концах полей после обрыва фразы. Не трогаем парные кавычки.
+    for (const field of ALL_TEXT_FIELDS) {
+      const v = result[field];
+      if (!v) continue;
+      let cleaned = v;
+      // Убираем одиночные висячие кавычки в конце
+      cleaned = cleaned.replace(/\s*["'„“”«»]+\s*$/u, '');
+      // Убираем одиночные висячие кавычки в начале (если их нет в паре)
+      const quoteCount = (cleaned.match(/["'„“”«»]/gu) || []).length;
+      if (quoteCount === 1) {
+        cleaned = cleaned.replace(/^\s*["'„“”«»]\s*/u, '');
+      }
+      if (cleaned !== v) {
+        result[field] = cleaned.trim();
+      }
+    }
 
     // Пост-обработка: очистка полей состоящих только из цифр/пунктуации
     for (const field of ALL_TEXT_FIELDS) {
@@ -957,20 +1019,14 @@ JSON:`;
     // Пост-обработка: чистим allergyHistory от не-аллергических данных
     this.cleanAllergyHistory(result);
 
-    // Пост-обработка: дедупликация диеты из recommendations/conclusion
-    this.deduplicateDiet(result);
-
-    // Пост-обработка: подстановка шаблона диеты по номеру
-    this.expandDietTemplate(result);
+    // Пост-обработка: раскрытие шаблона диеты ВНУТРИ recommendations
+    this.expandDietTemplateInRecommendations(result);
 
     // Пост-обработка: чистка diagnosis от нерелевантных данных (анамнез жизни, обследования)
     this.cleanDiagnosis(result);
 
     // Пост-обработка: дедупликация внутри полей (LLM иногда дублирует весь блок)
     this.deduplicateFields(result);
-
-    // Пост-обработка: чистка diet от данных рекомендаций
-    this.cleanDietField(result);
 
     // Пост-обработка: чистка recommendations от мусора Whisper
     this.cleanRecommendations(result);
@@ -1010,16 +1066,18 @@ JSON:`;
     const reco = doc.recommendations;
     if (!reco || reco.length < 30) return;
 
-    // Split by numbered items or sentences
-    const items = reco.split(/(?=\d+\.\s)|(?<=[.!?])\s+/).filter(s => s.trim());
+    // Split строго по строкам — groupRecommendations уже сгруппировал препараты,
+    // ломать его split-ом по точкам нельзя.
+    const items = reco.split(/\n+/).filter(s => s.trim());
     const clean: string[] = [];
 
     // Medical recommendation keywords
     const medicalKeywords = /(?:таблетк[аи]|капсул|мг\b|раз\s+в\s+день|внутрь|длительно|постоянно|контроль|ингибитор|назначен|неназначен|диет[аы]|стол\s+№?\d|ограничен|рекомендован|направлен|обследован|консультаци|анализ|ЭКГ|ЭХО|МРТ|КТ|рентген|осмотр|повторн|бисопролол|конкор|форсига|джардинс|верошпирон|эналаприл|лизиноприл|дигоксин|ксарелто|варфарин|курс\b|терапи|лечени|приём|принимать|памятк[аи]\s+ВТЭ)/iu;
     // Historical phrases that don't belong in recommendations
     const historicalKeywords = /(?:имплантаци\S+\s+(?:ЭКС|ИКД|CRT|кардио)|терапи\S*\s+по\s+схем|обратилась?\s+для\s+решения\s+вопроса|консультирован\S*\s+(?:аритмолог|кардиолог|кардиохирург)|выписан\S*\s+на\s+терапи|проведен\S*\s+(?:оперативн|КАГ|АКШ|баллон|ангиопластик))/iu;
-    // Garbage patterns
-    const garbageKeywords = /(?:видео\s+в\s+компьютер|тема\s+от\s+\d|объёмы\s+карт|сфера|фоти|превраду|настройки\s+наиболее|[&@#$%])/iu;
+    // Garbage patterns. ВАЖНО: «%» — валидный медицинский символ (5% массы тела, ФВ 58%),
+    // поэтому в classkey НЕ включаем.
+    const garbageKeywords = /(?:видео\s+в\s+компьютер|тема\s+от\s+\d|объёмы\s+карт|сфера|фоти|превраду|настройки\s+наиболее|[&@#$])/iu;
 
     for (const item of items) {
       const trimmed = item.trim();
@@ -1051,14 +1109,18 @@ JSON:`;
       }
     }
 
-    if (clean.length < items.length) {
-      // Remove orphan numbers left after deleting numbered items (e.g. lone "2\n")
-      const joined = clean.join('\n')
-        .replace(/^\d+\s*$/gm, '')
-        .replace(/\n{2,}/g, '\n')
-        .trim();
-      doc.recommendations = joined;
-      console.log(`[postprocess] Cleaned recommendations: ${items.length} → ${clean.length} items`);
+    // Перенумеровываем всегда — на входе строки могут уже иметь номера, либо
+    // быть без них. Сначала срезаем существующие номера, затем нумеруем заново.
+    const renumbered = clean
+      .map(l => l.replace(/^\s*\d+[\.\)]\s*/, '').trim())
+      .filter(l => l.length > 0)
+      .map((l, i) => `${i + 1}. ${l}`)
+      .join('\n');
+    if (renumbered !== reco) {
+      doc.recommendations = renumbered;
+      if (clean.length < items.length) {
+        console.log(`[postprocess] Cleaned recommendations: ${items.length} → ${clean.length} items`);
+      }
     }
   }
 
@@ -1116,34 +1178,9 @@ JSON:`;
       diagText = diag.substring(0, recoBlockMatch.index!).trim();
       console.log(`[postprocess] Extracted "Рекомендации" block from diagnosis (${recoBlock.length} chars)`);
 
-      // Parse recommendations block: split diet vs medication/other recs
-      const dietParts: string[] = [];
-      const recoParts: string[] = [];
-
-      // Split by numbered items or sentence boundaries
+      // Весь извлечённый блок идёт в recommendations — диета теперь внутри него.
       const recoItems = recoBlock.split(/(?=\d+\.\s)/).filter(s => s.trim());
-      const dietKeywords = /(?:диет[аы]|стол\s*(?:№?\s*)?\d+|гипохолестерин|ограничен\S*\s+(?:соли|жидкости)|питание)/iu;
-      const nonDietRecoKeywords = /(?:таблетк[аи]|капсул|мг\s+по|раз\s+в\s+день|внутрь|длительно|постоянно|контроль\s+(?:АД|ЧСС|пульса)|памятк[аи]\s+ВТЭ|ингибитор|назначен|неназначен|титров)/iu;
-
-      for (const item of recoItems) {
-        const trimmed = item.trim();
-        if (!trimmed) continue;
-        if (dietKeywords.test(trimmed) && !nonDietRecoKeywords.test(trimmed)) {
-          dietParts.push(trimmed);
-        } else {
-          recoParts.push(trimmed);
-        }
-      }
-
-      // Append diet parts to doc.diet
-      if (dietParts.length > 0) {
-        const dietText = dietParts.join(' ').trim();
-        const existingDiet = (doc.diet || '').trim();
-        if (!existingDiet || !existingDiet.includes(dietText.substring(0, Math.min(30, dietText.length)))) {
-          doc.diet = existingDiet ? `${existingDiet} ${dietText}`.trim() : dietText;
-        }
-        console.log(`[postprocess] Moved diet from diagnosis recommendations → diet (${dietText.length} chars)`);
-      }
+      const recoParts: string[] = recoItems.map(s => s.trim()).filter(Boolean);
 
       // Append reco parts to doc.recommendations
       if (recoParts.length > 0) {
@@ -1290,86 +1327,6 @@ JSON:`;
     }
   }
 
-  /**
-   * Чистит diet от данных, которые не относятся к диете.
-   * LLM иногда сваливает рекомендации, памятки и контроль АД в diet.
-   */
-  private cleanDietField(doc: MedicalDocument): void {
-    let diet = doc.diet;
-    if (!diet || diet.length < 30) return;
-
-    // Step 0: Remove Whisper garbage — sentences containing Latin non-medical words
-    const medicalLatinWords = /(?:CRTD|MRI|NYHA|EHRA|CRT|VVI|DDD|VVIR|BRAVO|Medtronic|CRT-D|SpO|HbA|BNP|DASH|PCI|SCORE)/i;
-    diet = diet.split(/(?<=[.!?])\s+/).filter(sentence => {
-      // Check for non-medical Latin words (3+ chars, lowercase or capitalized)
-      const latinWords = sentence.match(/\b[a-zA-Z]{3,}\b/g) || [];
-      const nonMedicalLatin = latinWords.filter(w => !medicalLatinWords.test(w));
-      if (nonMedicalLatin.length >= 2) {
-        console.log(`[postprocess] Removed Whisper garbage from diet: "${sentence.substring(0, 50)}..."`);
-        return false;
-      }
-      // Remove sentences with special chars garbage (&, @, #, etc.)
-      if (/[&@#$%]+/.test(sentence)) {
-        console.log(`[postprocess] Removed garbage chars from diet: "${sentence.substring(0, 50)}..."`);
-        return false;
-      }
-      return true;
-    }).join(' ');
-
-    // Split by newlines AND sentences (diet often comes as one block)
-    const lines = diet.split(/\n|(?<=[.!?])\s+/).filter(l => l.trim());
-    const dietLines: string[] = [];
-
-    // Keywords that BELONG in diet
-    const dietKeywords = /(?:диет[аы]|стол\s*(?:№?\s*)?\d+|гипохолестерин|ограничен\S*\s+(?:соли|жидкости|жиров)|исключить|калорийност|питание|рацион|продукт|овощи|фрукт|молочн|каш[иу]|хлеб|мясо|рыб[аыу]|жареное|солёное|копчён|номер\s+\d+|литр[аов]?\b|памятк\S*\s+на\s+руки|на\s+руки)/iu;
-
-    // Keywords that DON'T belong in diet
-    const nonDietKeywords = /(?:таблетк[аи]|капсул[аы]|инъекци|мг\s+по|раз\s+в\s+день|внутрь|длительно|постоянно|контроль\s+(?:АД|ЧСС|пульса)|памятк[аи]\s+ВТЭ|ингибитор|назначен|неназначен|титров)/iu;
-
-    for (const line of lines) {
-      const cleaned = line.replace(/^\d+\.\s*/, '').trim();
-      if (!cleaned) continue;
-
-      if (nonDietKeywords.test(cleaned) && !dietKeywords.test(cleaned)) {
-        console.log(`[postprocess] Removed non-diet content from diet: "${cleaned.substring(0, 50)}..."`);
-      } else if (!dietKeywords.test(cleaned) && cleaned.length > 5) {
-        // No diet keywords at all — likely Whisper garbage
-        console.log(`[postprocess] Removed non-diet garbage from diet: "${cleaned.substring(0, 50)}..."`);
-      } else {
-        dietLines.push(line);
-      }
-    }
-
-    doc.diet = dietLines.join('\n').trim();
-
-    // Remove number-sequence garbage: "1. 2. 3. 4. 5. 6. 7. 8. 9. 10."
-    doc.diet = doc.diet.replace(/(?:\s*\d+\.\s*){4,}\s*$/gu, '').trim();
-    // Remove "cycling/following" + garbage
-    doc.diet = doc.diet.replace(/\s*(?:cycling|following|next)\s*[.\s]*(?:\d+\.\s*)*.*$/giu, '').trim();
-
-    // Remove duplicate diet descriptions (exact and substring-level)
-    if (doc.diet) {
-      const parts = doc.diet.split(/[.\n]+/).filter(p => p.trim());
-      const unique: string[] = [];
-      for (const part of parts) {
-        const norm = part.trim().toLowerCase().replace(/\s+/g, ' ');
-        if (norm.length < 3) continue;
-        // Check if this part is already contained in an existing part (substring dedup)
-        const isDup = unique.some(existing => {
-          const existNorm = existing.trim().toLowerCase().replace(/\s+/g, ' ');
-          return existNorm === norm || existNorm.includes(norm) || norm.includes(existNorm);
-        });
-        if (isDup) {
-          console.log(`[postprocess] Removed duplicate diet part: "${part.trim().substring(0, 40)}..."`);
-          continue;
-        }
-        unique.push(part.trim());
-      }
-      doc.diet = unique.join('. ').trim();
-      if (doc.diet && !doc.diet.endsWith('.')) doc.diet += '.';
-    }
-  }
-
   private reapplyMedicalDictionary(doc: MedicalDocument): void {
     for (const field of ALL_TEXT_FIELDS) {
       const value = doc[field];
@@ -1390,6 +1347,64 @@ JSON:`;
     // Разбиваем по номерам: "1. ... 2. ... 3. ..."
     const split = text.replace(/\s+(\d+)\.\s+/g, '\n$1. ');
     return split.trim();
+  }
+
+  /**
+   * Группирует recommendations: строки с атрибутами препарата
+   * ("Побочные эффекты:", "При отмене...", "Под контролем...") склеиваются
+   * с предыдущим пунктом. Результат нумеруется.
+   */
+  private groupRecommendations(text: string): string {
+    if (!text.trim()) return '';
+
+    // Режем КАЖДУЮ строку по предложениям, чтобы достать препараты, спрятанные
+    // внутри длинной строки рядом с другим пунктом.
+    const sentenceSplit = (s: string) =>
+      s.replace(/([.!?;])\s+(?=[А-ЯЁA-Z])/g, '$1\n').split(/\n+/);
+
+    const rawLines = text
+      .split(/\n+/)
+      .flatMap(sentenceSplit)
+      .map((l) => l.replace(/^\s*\d+[\.\)]\s*/, '').trim())
+      .filter((l) => l.length > 0);
+
+    if (rawLines.length === 0) return '';
+
+    // Маркеры начала нового самостоятельного пункта:
+    // 1) Лекарственная форма (Таблетка/Капсула/...)
+    // 2) Знакомые рубрики режима/образа жизни.
+    const drugFormRe = /^(?:таблетк|капсул|раствор|инъекц|ампул|сироп|свеч|мазь|крем|гель|порошок|суспенз|спрей|ингалятор|пластыр|драже|флакон|саше|капл)/iu;
+    const lifestyleStartRe = /^(?:гипонатриев|гипохолестерин|сбалансированн|низкокалорийн|нормализаци|прекращени|постепенн|дозированн|регулярн|самоконтрол|контрол(?:ь|ировать)|вестибулярн|повторн|консультаци|диет|питани|физическ|увеличени|ограничени|памятк|пациент(?:ка|у)?\s|рекомендован|плавани|ходьб|массаж|гимнастик)/iu;
+    // Явные продолжения предыдущего пункта.
+    const continuationRe = /^(?:побочны[йе]\s+эффект|при\s+отмене|под\s+контролем|длительно|постоянно|в\s+течение\s+\d|после\s+завершения|далее\s+контрольн|по\s+(?:одн|дв|тр|пол|\d)|утром|вечером|на\s+ночь|до\s+(?:еды|завтрак)|после\s+(?:еды|ужин|завтрак)|во\s+время\s+ед)/iu;
+
+    // Препарат без слова «Таблетка»: «Индапамид + тельмисартан 2,5 мг», «Бетасерк 24 мг».
+    // Эвристика: начинается с заглавной кириллической/латинской буквы И содержит
+    // дозу (число + мг|мкг|г|мл|МЕ|IU|ЕД) в первых ~80 символах.
+    const drugByNameRe = /^[А-ЯЁA-Z][А-ЯЁA-Zа-яёa-z\-]+.{0,80}?\d+[.,]?\d*\s*(?:мг|мкг|г|мл|МЕ|IU|ЕД)\b/u;
+    // Торговое название без единицы измерения в той же фразе:
+    // «Индапамид плюс тельмисартан», «Илпио 2,5 на 80», «Ко-Диован 80/12,5».
+    // Триггеры: начинается с заглавной (>=5 симв в корне), далее число / «плюс Имя» / «+» / «(...)».
+    const drugTradeNameRe = /^[А-ЯЁA-Z][а-яёa-z\-]{4,}(?:\s+\d+(?:[.,]\d+)?|\s+плюс\s+[а-яёa-zА-ЯЁA-Z]|\s*\+\s*[А-ЯЁA-Zа-яёa-z]|\s*\([^)]{1,25}\))/u;
+
+    const grouped: string[] = [];
+    for (const line of rawLines) {
+      const isContinuation = continuationRe.test(line);
+      const startsNewItem = !isContinuation && (
+        drugFormRe.test(line) ||
+        lifestyleStartRe.test(line) ||
+        drugByNameRe.test(line) ||
+        drugTradeNameRe.test(line)
+      );
+      if (grouped.length === 0 || startsNewItem) {
+        grouped.push(line);
+      } else {
+        const prev = grouped[grouped.length - 1];
+        grouped[grouped.length - 1] = prev.replace(/\.\s*$/, '') + '. ' + line;
+      }
+    }
+
+    return grouped.map((l, i) => `${i + 1}. ${l}`).join('\n');
   }
 
   /**
@@ -1588,8 +1603,7 @@ JSON:`;
       { pattern: /данны\S*\s+объективн\S*\s+(?:исследовани|осмотр)\S*\s*[:.,-]?\s*/iu, target: 'objectiveStatus' },
       { pattern: /амбулаторн\S*\s+терапи\S*\s*[:.,-]?\s*/iu, target: 'conclusion' },
       { pattern: /амбулаторно\s+принимает\s*[:.,-]?\s*/iu, target: 'conclusion' },
-      { pattern: /(?:рекомендаци\S*|рекомендован\S*|план\s+лечени\S*)\s*[:.,-]?\s*/iu, target: 'recommendations' },
-      { pattern: /диет\S*\s*(?:№?\s*\d+\S*)?\s*[:.,-]?\s*/iu, target: 'diet' },
+      { pattern: /(?:рекомендаци\S*|рекомендован\S*|план\s+лечени\S*|диет\S*\s*(?:№?\s*\d+\S*)?)\s*[:.,-]?\s*/iu, target: 'recommendations' },
       { pattern: /(?:предварительн\S*\s+)?диагноз\S*\s*[:.,-]?\s*/iu, target: 'diagnosis' },
       { pattern: /план\s+обследовани\S*\s*[:.,-]?\s*/iu, target: 'doctorNotes' },
     ];
@@ -1636,37 +1650,6 @@ JSON:`;
           break; // перезапускаем цикл чтобы работать с обновлённым текстом
         }
       }
-    }
-  }
-
-  /**
-   * Убирает дублирование диеты: если diet не пустое и та же информация есть
-   * в recommendations или conclusion — убирает её оттуда.
-   */
-  private deduplicateDiet(doc: MedicalDocument): void {
-    const diet = doc.diet.trim();
-    if (!diet) return;
-
-    // Паттерны для обнаружения диетной информации в других полях
-    const dietPatterns = [
-      /диет\S*\s*(?:№?\s*\d+\S*)?[^.]*\.?\s*/giu,
-      /стол\s*(?:№?\s*)?\d+\S*[^.]*\.?\s*/giu,
-    ];
-
-    for (const field of ['recommendations', 'conclusion'] as RewriteableField[]) {
-      let text = doc[field];
-      if (!text) continue;
-
-      for (const pattern of dietPatterns) {
-        const before = text;
-        text = text.replace(pattern, '').trim();
-        if (text !== before) {
-          console.log(`[postprocess] Removed duplicate diet info from ${field}`);
-        }
-      }
-
-      // Убираем пустые строки оставшиеся после удаления
-      doc[field] = text.replace(/\n{3,}/g, '\n\n').trim();
     }
   }
 
@@ -2071,6 +2054,37 @@ JSON:`;
   }
 
   /**
+   * Если в диктовке нет ни одного маркера шкалы Морзе/падений/боли/сопровождения —
+   * riskAssessment должен быть пустым (дефолтные «нет/0»). Иначе Claude галлюцинирует
+   * и подставляет «да» в dizzinessOrWeakness/needsEscort без каких-либо оснований.
+   */
+  private clearRiskAssessmentIfNotMentioned(doc: MedicalDocument, rawText: string): void {
+    const text = (rawText || '').toLowerCase();
+    const triggers = [
+      /морзе/u,
+      /\bпада(?:л|ть|ет|ю|ли|ла|ло)\b/u,
+      /\bпадени[яйею]/u,
+      /\bупал[аи]?\b/u,
+      /головокруж/u,
+      /\bслабост/u,
+      /сопровожд/u,
+      /шкал\w*\s+бол/u,
+      /\bбол[ьи]\s+по\s+шкал/u,
+      /\b(?:оценк|балл\w*)\s+бол/u,
+      /\bриск\s+падени/u,
+    ];
+    const hasTrigger = triggers.some((re) => re.test(text));
+    if (hasTrigger) return;
+
+    const before = JSON.stringify(doc.riskAssessment);
+    doc.riskAssessment = { ...DEFAULT_RISK_ASSESSMENT };
+    const after = JSON.stringify(doc.riskAssessment);
+    if (before !== after) {
+      console.log(`[postprocess] riskAssessment cleared (no Morse triggers in raw): ${before} → ${after}`);
+    }
+  }
+
+  /**
    * Спасает диагноз из сырого текста, если LLM его обрезал.
    * Ищет блок "диагноз:" в raw-тексте и сравнивает длину с тем что вернул LLM.
    */
@@ -2136,24 +2150,576 @@ JSON:`;
   }
 
   /**
-   * Подставляет шаблон диеты по номеру.
-   * Если в поле diet указан только номер диеты (например "Стол 10", "Диета 5"),
-   * заменяет его на полный текст шаблона.
+   * Детерминированный набор финальных пост-проходов, исправляющих типовые ошибки
+   * маршрутизации LLM: препараты для постоянного приёма уезжают в conclusion,
+   * "продолжать" из recommendations → conclusion, дубли токенов, утерянный контент.
+   * Вызывается после всех rescue-проходов, один раз на документ.
    */
-  private expandDietTemplate(doc: MedicalDocument): void {
-    const diet = doc.diet.trim();
-    if (!diet) return;
+  private runSemanticRoutingPasses(doc: MedicalDocument, rawText: string): void {
+    // Подсказки покрытия для P5: исходные «сырые» фрагменты, которые P1/P2
+    // уже растащили по другим полям. P5 не должен считать их утерянным
+    // контентом и роутить обратно в recommendations.
+    const coverageHints = new Set<string>();
+    this.extractConstantMedsFromClinicalCourse(doc, coverageHints, rawText);
+    this.extractContinuedDrugsFromRecommendations(doc, coverageHints);
+    this.cleanupNonDrugConclusionItems(doc);
+    // P5 должен идти до словаря, чтобы восстановленный текст прошёл нормализацию.
+    this.recoverMissingContent(doc, rawText, coverageHints);
+    // Словарь может ДОБАВЛЯТЬ токены (напр. «HbA1c» после «гликированный гемоглобин»),
+    // поэтому применяем ПЕРЕД P4 — иначе P4 удалит дубль, а словарь его вернёт.
+    this.reapplyMedicalDictionary(doc);
+    this.fixRedundantTokens(doc);
+    // Финальный дедуп: P5 мог вернуть в recommendations строку с препаратами,
+    // которые уже перечислены в conclusion (Whisper-артефактный echo-хвост).
+    // Запускаем в самом конце, чтобы убрать последний эхо-дубль.
+    this.dedupRecommendationsAgainstConclusion(doc);
+  }
 
-    // Только подставляем шаблон если врач продиктовал ТОЛЬКО номер диеты (без конкретных инструкций).
-    // Если текст длиннее ~25 символов — это конкретные рекомендации врача, оставляем как есть.
-    const isJustDietNumber = diet.length <= 25;
-    if (!isJustDietNumber) return;
+  /**
+   * Нормализует существующий блок как нумерованный список:
+   * - если уже есть "1. ..." — возвращает как есть;
+   * - иначе оборачивает всё содержимое в один пункт "1. ...".
+   * Гарантирует, что `appendNumberedItem` правильно считает следующий номер.
+   */
+  private ensureNumberedList(text: string): string {
+    const trimmed = (text || '').trim();
+    if (!trimmed) return '';
+    if (/^\s*\d+[\.\)]\s/mu.test(trimmed)) return trimmed;
+    return `1. ${trimmed.replace(/\n+/g, ' ').trim()}`;
+  }
 
-    const template = findDietTemplate(diet);
-    if (template) {
-      console.log(`[postprocess] Expanded diet template: "${diet}" → "${template.name}"`);
-      doc.diet = template.description;
+  /**
+   * Безопасно добавляет item в нумерованное поле с корректной нумерацией.
+   */
+  private appendNumberedItem(existing: string, item: string): string {
+    const normalized = this.ensureNumberedList(existing);
+    if (!normalized) return `1. ${item}`;
+    const count = (normalized.match(/^\s*\d+[\.\)]\s/gmu) || []).length;
+    return `${normalized}\n${count + 1}. ${item}`;
+  }
+
+  /** Извлекает "голову" drug-name (первое слово с заглавной) из строки. */
+  private extractDrugHead(s: string): string | null {
+    const m = s.trim().match(/^([А-ЯЁA-Z][а-яёa-z\-]{2,})/u);
+    return m ? m[1] : null;
+  }
+
+  /**
+   * Сопоставляет drug-head'ы по префиксу — устойчив к хвостовым искажениям
+   * Whisper (Симбикорд/Симбикорт) и словоформам (Бетасерк/Бетасерка): 5+ букв
+   * общего префикса достаточно (drug names почти всегда уникальны в первых 5).
+   */
+  private sameDrugHead(a: string, b: string): boolean {
+    const norm = (s: string) => s.toLowerCase().replace(/ё/g, 'е');
+    const la = norm(a);
+    const lb = norm(b);
+    if (la === lb) return true;
+    if (la.length >= 5 && lb.startsWith(la)) return true;
+    if (lb.length >= 5 && la.startsWith(lb)) return true;
+    // Общий префикс ≥5 символов (одинаковый корень с разным хвостом)
+    const minLen = Math.min(la.length, lb.length);
+    if (minLen >= 5 && la.slice(0, 5) === lb.slice(0, 5)) return true;
+    return false;
+  }
+
+  /**
+   * Добавляет препарат в conclusion с дедупом по drug-head. Если в conclusion
+   * уже есть пункт на тот же препарат — побеждает более длинный (детальный).
+   */
+  private mergeConclusionDrug(doc: MedicalDocument, item: string): void {
+    const head = this.extractDrugHead(item);
+    const current = doc.conclusion || '';
+    if (!head || !current) {
+      doc.conclusion = this.appendNumberedItem(current, item);
+      return;
     }
+    const lines = current.split(/\n+/).map(l => l.replace(/^\s*\d+[\.\)]\s*/, '').trim()).filter(Boolean);
+    let replaced = false;
+    const merged = lines.map((body) => {
+      const bodyHead = this.extractDrugHead(body);
+      if (bodyHead && this.sameDrugHead(bodyHead, head)) {
+        replaced = true;
+        return item.length > body.length ? item : body;
+      }
+      return body;
+    });
+    if (!replaced) merged.push(item);
+    doc.conclusion = merged.map((l, i) => `${i + 1}. ${l}`).join('\n');
+  }
+
+  /**
+   * P1: "Постоянный прием медикаментов: X" → conclusion.
+   * Сканирует clinicalCourse (LLM кладёт туда амбулаторную терапию из «анамнеза
+   * жизни») и recommendations (иногда LLM дублирует туда тот же блок отдельным
+   * пунктом). Дополнительно выполняет rescue по rawText: Whisper часто пишет «.»
+   * вместо «:» после «Постоянный прием медикаментов», и Claude разносит
+   * препараты отдельными пунктами в recommendations без маркера-префикса;
+   * P1 находит drug-head'ы и перетаскивает соответствующие пункты в conclusion.
+   */
+  private extractConstantMedsFromClinicalCourse(doc: MedicalDocument, coverageHints?: Set<string>, rawText?: string): void {
+    const splitDrugList = (drugs: string): string[] => {
+      const cleaned = drugs.replace(/[,.\s]+$/, '');
+      return cleaned
+        .split(/,\s+(?=[А-ЯЁA-Z][а-яёa-z\-]{2,})/u)
+        .map(s => s.trim())
+        .filter(s => s.length >= 3);
+    };
+    const isBlacklisted = (drugs: string): boolean => {
+      if (/отрица|не\s+принима|отсутств|нет\b/iu.test(drugs)) return true;
+      // \b не работает с кириллицей в JS — используем lookbehind по буквам.
+      if (/(?<![а-яёa-z])(?:алкогол|табак|спиртн|наркотик|токсин|вод[ауые]|пищ[ауе]|кофе|ча[йяею])/iu.test(drugs)) return true;
+      return drugs.length < 3;
+    };
+
+    const extracted: string[] = [];
+
+    // --- 1. clinicalCourse: inline-фраза посреди прозы. ---
+    let cc = doc.clinicalCourse;
+    if (cc) {
+      const re = /(?<=^|[.\s])(?:Постоянн(?:ый|о)\s+прием\s+медикаментов|Принимает\s+постоянно|Амбулаторно\s+принима(?:ет|ю)|Постоянно\s+принима(?:ет|ю))\s*[:,—–-]?\s*([^.\n]+?)\.?(?=$|\n|\s{2,}|\.\s)/giu;
+      const matches = Array.from(cc.matchAll(re));
+      // Идём с конца, чтобы удаление не сбивало индексы
+      for (let i = matches.length - 1; i >= 0; i--) {
+        const m = matches[i];
+        const drugs = m[1].trim();
+        if (isBlacklisted(drugs)) continue;
+        const parts = splitDrugList(drugs);
+        for (let j = parts.length - 1; j >= 0; j--) {
+          extracted.unshift(parts[j]);
+        }
+        // Регистрируем «сырой» фрагмент в подсказках покрытия для P5
+        coverageHints?.add(m[0]);
+        cc = cc.slice(0, m.index!) + cc.slice(m.index! + m[0].length);
+      }
+      doc.clinicalCourse = cc
+        .replace(/\s+/g, ' ')
+        .replace(/\s+\./g, '.')
+        .replace(/\.{2,}/g, '.')
+        .trim();
+    }
+
+    // --- 2. recommendations: целый numbered-пункт с префиксом-триггером. ---
+    const reco = doc.recommendations;
+    if (reco) {
+      const reLine = /^(?:Постоянн(?:ый|о)\s+прием\s+медикаментов|Принимает\s+постоянно|Амбулаторно\s+принима(?:ет|ю)|Постоянно\s+принима(?:ет|ю))\s*[:,.\-—–]?\s*(.+?)\.?$/iu;
+      const lines = reco.split(/\n+/).filter(l => l.trim());
+      const keep: string[] = [];
+      const movedFromReco: string[] = [];
+      for (const line of lines) {
+        const body = line.replace(/^\s*\d+[\.\)]\s*/, '').trim();
+        const m = body.match(reLine);
+        if (m && !isBlacklisted(m[1].trim())) {
+          movedFromReco.push(...splitDrugList(m[1].trim()));
+          coverageHints?.add(body);
+        } else {
+          keep.push(body);
+        }
+      }
+      if (movedFromReco.length > 0) {
+        extracted.push(...movedFromReco);
+        doc.recommendations = keep
+          .map((l, i) => `${i + 1}. ${l}`)
+          .join('\n');
+      }
+    }
+
+    // --- 3. Rescue по rawText: Whisper пишет «.» вместо «:», Claude режет ---
+    //      препараты на отдельные numbered-пункты в recommendations БЕЗ префикса.
+    //      Находим drug-head'ы в блоке после «Постоянный прием медикаментов.» и
+    //      перетаскиваем пункты с совпадающими drug-head'ами из recommendations.
+    if (rawText && doc.recommendations) {
+      // Принимаем «.» как допустимый разделитель (ключевое отличие от шагов 1-2).
+      // ВАЖНО: \w в JS-regex НЕ матчит кириллицу даже с /u, поэтому используем
+      // явные классы [а-яёa-z0-9]* для суффиксов слов-терминаторов.
+      const reRaw = /(?<=^|[.\s])(?:Постоянн(?:ый|о)\s+прием\s+медикаментов|Принимает\s+постоянно|Амбулаторно\s+принима(?:ет|ю)|Постоянно\s+принима(?:ет|ю))\s*[:,.\-—–]\s+([^]*?)(?=\n\s*\n|Аллерголог[а-яёa-z]*\s+анамнез|Объективн[а-яёa-z]*\s+статус|Неврологическ[а-яёa-z]*\s+статус|Предварительн[а-яёa-z]*\s+диагноз|План\s+обследован|Рекомендации|Данные\s+проведенн|Диагноз\s+предвари|$)/iu;
+      const rawMatch = rawText.match(reRaw);
+      if (rawMatch) {
+        const block = rawMatch[1].trim();
+        if (!isBlacklisted(block.slice(0, 80))) {
+          const drugHeads: string[] = [];
+          // Первое слово-заглавное каждого предложения блока — кандидат в drug-head.
+          for (const sentence of block.split(/\.\s+|\n+/)) {
+            const head = this.extractDrugHead(sentence);
+            if (head && head.length >= 4) drugHeads.push(head);
+          }
+          // Inline: Whisper часто склеивает «Drug A … Drug B … Drug C» БЕЗ точек.
+          // Ищем кандидатов по шаблону CAPS+lowers + дозировочный/требовательный маркер.
+          // Паддим пробелом, чтобы lookbehind срабатывал и на позиции 0.
+          const paddedBlock = ' ' + block;
+          const inlineRe = /(?<=[.\s])([А-ЯЁ][а-яё\-]{3,})(?=\s+(?:[Пп]о\s+|\d+[,.]?\d*\s*(?:мг|мкг|мл|МЕ|ЕД|IU|г\b)|две\s+целых|один\s+раз|\d))/gu;
+          let mInline: RegExpExecArray | null;
+          while ((mInline = inlineRe.exec(paddedBlock)) !== null) {
+            const cand = mInline[1];
+            if (cand.length >= 4 && !drugHeads.some(dh => this.sameDrugHead(dh, cand))) {
+              drugHeads.push(cand);
+            }
+          }
+          if (drugHeads.length > 0) {
+            // Pre-split: Claude иногда возвращает весь numbered-список одной строкой.
+            let recLines = (doc.recommendations || '').split(/\n+/).filter(l => l.trim());
+            if (recLines.length === 1) {
+              const splitParts = recLines[0].split(/(?<=\.)\s+(?=\d+[\.\)]\s+[А-ЯЁA-Z])/u);
+              if (splitParts.length > 1) recLines = splitParts;
+            }
+            const keep: string[] = [];
+            const moved: string[] = [];
+            for (const line of recLines) {
+              const body = line.replace(/^\s*\d+[\.\)]\s*/, '').trim();
+              const lineHead = this.extractDrugHead(body);
+              if (lineHead && drugHeads.some(dh => this.sameDrugHead(dh, lineHead))) {
+                // Разбиваем склеенный body «Drug A …. Drug B …. Drug C.» на отдельные пункты.
+                const parts = body.split(/\.\s+(?=[А-ЯЁ][а-яё\-]{3,})/u)
+                  .map(p => p.trim())
+                  .filter(Boolean);
+                for (const p of parts) {
+                  const item = p.endsWith('.') ? p : p + '.';
+                  // Госпитализация/Направляется — не препарат, возвращаем в recommendations.
+                  if (/^(?:госпитализ|направ(?:ля|ить|ляется))/iu.test(p)) {
+                    keep.push(item);
+                    continue;
+                  }
+                  const pHead = this.extractDrugHead(p);
+                  if (pHead) {
+                    moved.push(item);
+                    coverageHints?.add(p);
+                  } else {
+                    keep.push(item);
+                  }
+                }
+              } else {
+                keep.push(body);
+              }
+            }
+            if (moved.length > 0) {
+              extracted.push(...moved);
+              doc.recommendations = keep.map((l, i) => `${i + 1}. ${l}`).join('\n');
+              // Сам «Постоянный прием медикаментов…» тоже подсказка для P5
+              coverageHints?.add(rawMatch[0]);
+            }
+          }
+        }
+      }
+    }
+
+    if (extracted.length === 0) return;
+
+    // Дедуп с слиянием: «Бетасерк» + «Бетасерк 24 мг …» → побеждает длинный.
+    for (const item of extracted) {
+      this.mergeConclusionDrug(doc, item);
+    }
+
+    console.log(`[postprocess] P1: ${extracted.length} constant-med item(s) → conclusion`);
+  }
+
+  /**
+   * P2: препараты с маркером "продолжать" переносятся recommendations → conclusion.
+   * Только когда в пункте НЕТ маркеров нового назначения ("назначаю", "начать", "добавить" и т.п.).
+   */
+  private extractContinuedDrugsFromRecommendations(doc: MedicalDocument, coverageHints?: Set<string>): void {
+    const reco = doc.recommendations;
+    if (!reco) return;
+
+    const lines = reco.split(/\n+/).filter(l => l.trim());
+    if (lines.length === 0) return;
+
+    const keep: string[] = [];
+    const moved: string[] = [];
+
+    for (const line of lines) {
+      const body = line.replace(/^\s*\d+[\.\)]\s*/, '').trim();
+      const hasDrugMarker = /(?:таблетк|капсул|раствор|инъекц|ампул|\s\d+\s*(?:мг|мкг|мл|МЕ|ЕД|IU)\b|раз\s+в\s+день|раз\s+в\s+сутки|по\s+\d+\s+(?:т\b|табл|капс))/iu.test(body);
+      // ВНИМАНИЕ: \b в JS-regex работает только для ASCII-слов, для кириллицы
+      // используем lookaround по кириллическим буквам.
+      const hasContinueMarker = /(?<![а-яёa-z])продолжать(?![а-яёa-z])|продолжает\s+прием|продолжить\s+прием|постоянный\s+прием/iu.test(body);
+      // Расширенный набор маркеров нового назначения. Если оба маркера
+      // ("продолжать" + "начать/добавить") встречаются в одном пункте, значит
+      // там коктейль препаратов — безопаснее не перетаскивать, пусть остаётся
+      // в recommendations (врач разберёт вручную).
+      const hasNewPrescription = /(?<![а-яёa-z])(?:назнача(?:ю|ть|ет)|назначить|рекомендую\s+препарат|начат\w*\s+(?:прием|терап)|начать\s+прием|начать\s+тера|добав(?:ить|ляю)\s+(?:к\s+|препарат|к\s+терап)|впервые\s+назнач|стартова|инициац|приступить|первичн\w*\s+назнач)(?![а-яёa-z])/iu.test(body);
+
+      if (hasDrugMarker && hasContinueMarker && !hasNewPrescription) {
+        moved.push(body);
+        coverageHints?.add(body);
+      } else {
+        keep.push(body);
+      }
+    }
+
+    if (moved.length === 0) return;
+
+    doc.recommendations = keep
+      .map(l => l.replace(/^\s*\d+[\.\)]\s*/, '').trim())
+      .filter(l => l.length > 0)
+      .map((l, i) => `${i + 1}. ${l}`)
+      .join('\n');
+
+    for (const item of moved) {
+      this.mergeConclusionDrug(doc, item);
+    }
+
+    console.log(`[postprocess] P2: moved ${moved.length} "продолжать" drug(s) recommendations → conclusion`);
+  }
+
+  /**
+   * P1.5: убирает из conclusion пункты без drug-маркеров, которые уже покрыты
+   * clinicalCourse/diagnosis (LLM иногда дублирует «Сопутствующую патологию» или
+   * сам диагноз в conclusion, хотя там должна быть только амбулаторная терапия).
+   */
+  private cleanupNonDrugConclusionItems(doc: MedicalDocument): void {
+    const concl = doc.conclusion;
+    if (!concl) return;
+
+    const hasDrugMarker = (s: string): boolean =>
+      /(?:\d+\s*(?:мг|мкг|мл|г|%|ме\b|ед\b|iu\b)|таблетк|капсул|вдох|капел\w|раствор|инъекц|ампул|раз\s+в\s+(?:день|сутки|неделю|месяц)|по\s+\d+\s+(?:т\b|табл|капс|мл|капел)|\bпо\s+\d+\s+вдох|продолжать(?![а-яёa-z])|постоянн\w+\s+прием)/iu.test(s);
+
+    const other = [doc.clinicalCourse || '', doc.diagnosis || '', doc.finalDiagnosis || ''].join(' ').toLowerCase();
+
+    const lines = concl.split(/\n+/)
+      .map(l => l.replace(/^\s*\d+[\.\)]\s*/, '').trim())
+      .filter(Boolean);
+
+    const kept: string[] = [];
+    const movedToFinal: string[] = [];
+    let dropped = 0;
+    let droppedNarrative = 0;
+    for (const body of lines) {
+      if (hasDrugMarker(body)) { kept.push(body); continue; }
+      const key = body.toLowerCase().replace(/[^a-zа-я0-9\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+      const head = key.split(' ').slice(0, 4).join(' ');
+      if (head.length >= 10 && other.includes(head)) {
+        dropped++;
+        continue;
+      }
+      // Длинный non-drug пункт в conclusion — почти наверняка синтезированный
+      // Claude-ом эпикриз/резюме («Пациентка обратилась с жалобами...
+      // направляется на госпитализацию»). Его место — в finalDiagnosis (секция
+      // «Заключение» в PDF), но в conclusion (амб. терапия) он не нужен. Порог
+      // 150 chars оставляет короткие технические пометки вроде «продолжать по схеме».
+      if (body.length >= 150) {
+        droppedNarrative++;
+        movedToFinal.push(body);
+        continue;
+      }
+      kept.push(body);
+    }
+    if (dropped === 0 && droppedNarrative === 0) return;
+    doc.conclusion = kept.map((l, i) => `${i + 1}. ${l}`).join('\n');
+    if (movedToFinal.length > 0) {
+      const current = (doc.finalDiagnosis || '').trim();
+      const addition = movedToFinal.join(' ').trim();
+      doc.finalDiagnosis = current ? `${current}\n\n${addition}` : addition;
+    }
+    if (dropped > 0) {
+      console.log(`[postprocess] P1.5: dropped ${dropped} non-drug item(s) from conclusion (covered in clinicalCourse/diagnosis)`);
+    }
+    if (droppedNarrative > 0) {
+      console.log(`[postprocess] P1.5: moved ${droppedNarrative} narrative item(s) from conclusion → finalDiagnosis (клинич. обоснование)`);
+    }
+  }
+
+  /**
+   * P1.6: удаляет из recommendations пункты, которые являются пересказом уже
+   * перечисленных в conclusion препаратов. Claude иногда складывает «хвост»
+   * сырой диктовки (список амбулаторных лекарств) в recommendations отдельной
+   * слепленной строкой с Whisper-артефактами («одну раз раз в день»). Такой
+   * пункт нечитаем и дублирует conclusion — выкидываем его целиком, если
+   * ≥2 drug-head'a уже присутствуют в conclusion.
+   */
+  private dedupRecommendationsAgainstConclusion(doc: MedicalDocument): void {
+    const reco = doc.recommendations;
+    const concl = doc.conclusion;
+    if (!reco || !concl) return;
+
+    const conclHeads: string[] = [];
+    for (const line of concl.split(/\n+/)) {
+      const body = line.replace(/^\s*\d+[\.\)]\s*/, '').trim();
+      const head = this.extractDrugHead(body);
+      if (head) conclHeads.push(head);
+    }
+    if (conclHeads.length === 0) return;
+
+    const lines = reco.split(/\n+/)
+      .map(l => l.replace(/^\s*\d+[\.\)]\s*/, '').trim())
+      .filter(Boolean);
+
+    const kept: string[] = [];
+    let dropped = 0;
+    for (const body of lines) {
+      // Собираем все drug-head кандидаты из строки (слова с заглавной ≥5 букв).
+      const candidates = (body.match(/[А-ЯЁA-Z][а-яёa-z\-]{4,}/gu) || []);
+      let matches = 0;
+      for (const cand of candidates) {
+        if (conclHeads.some(h => this.sameDrugHead(h, cand))) matches++;
+      }
+      if (matches >= 2) {
+        dropped++;
+        continue;
+      }
+      kept.push(body);
+    }
+    if (dropped === 0) return;
+    doc.recommendations = kept.map((l, i) => `${i + 1}. ${l}`).join('\n');
+    console.log(`[postprocess] P1.6: dropped ${dropped} recommendation item(s) duplicating conclusion drugs`);
+  }
+
+  /**
+   * P4: чистка избыточных токенов / Whisper-артефактов во всех текстовых полях.
+   */
+  private fixRedundantTokens(doc: MedicalDocument): void {
+    const fields: (keyof MedicalDocument)[] = [
+      'complaints', 'anamnesis', 'outpatientExams', 'clinicalCourse', 'allergyHistory',
+      'objectiveStatus', 'neurologicalStatus', 'diagnosis', 'finalDiagnosis',
+      'conclusion', 'doctorNotes', 'recommendations',
+    ];
+    let totalChanges = 0;
+    for (const f of fields) {
+      const v = (doc as any)[f];
+      if (typeof v !== 'string' || v.length === 0) continue;
+      let fixed = v;
+      // «(HbA1c) (HbA1c) (HbA1c)» → «(HbA1c)» (любое число повторов).
+      // Словарь применяет wordRule «гликированный гемоглобин» → «... (HbA1c)»
+      // и при повторных проходах может продублировать токен; здесь схлопываем.
+      fixed = fixed.replace(/(\([A-Za-zА-ЯЁа-яё0-9\-\/]+\))(?:\s+\1)+/gu, '$1');
+      // «24 мга» → «24 мг»
+      fixed = fixed.replace(/(\d+\s*)мга\b/gu, '$1мг');
+      // «мм рт.ст. Мм аррт.ст.» → «мм рт.ст.»
+      fixed = fixed.replace(/мм\s*рт\.?\s*ст\.?\s*\.?\s*мм\s*а?ррт\.?\s*ст\.?/giu, 'мм рт.ст.');
+      // «мг/мга на ...» — внутри дозы
+      fixed = fixed.replace(/\bмга\s+на\s+/giu, 'мг на ');
+      if (fixed !== v) {
+        (doc as any)[f] = fixed;
+        totalChanges++;
+      }
+    }
+    if (totalChanges > 0) {
+      console.log(`[postprocess] P4: ${totalChanges} field(s) normalized`);
+    }
+  }
+
+  /**
+   * P5: coverage-проверка. Сравнивает raw Whisper с финальным контентом доктора
+   * (нормализованная подстрока — отпечаток). Потерянные предложения логируются
+   * и маршрутизируются в best-fit поле по эвристике.
+   */
+  private recoverMissingContent(doc: MedicalDocument, rawText: string, coverageHints?: Set<string>): void {
+    if (!rawText || rawText.length < 50) return;
+
+    const normalize = (s: string) => s
+      .toLowerCase()
+      .replace(/ё/g, 'е')
+      .replace(/[^a-zа-я0-9\s]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const docTextRaw = [
+      doc.complaints, doc.anamnesis, doc.outpatientExams, doc.clinicalCourse,
+      doc.allergyHistory, doc.objectiveStatus, doc.neurologicalStatus,
+      doc.diagnosis, doc.finalDiagnosis, doc.conclusion, doc.doctorNotes,
+      doc.recommendations,
+      // Подсказки покрытия от P1/P2 — фрагменты, которые уже растащены в conclusion
+      // в виде отдельных пунктов, но исходное предложение целиком в полях не лежит.
+      ...(coverageHints ? Array.from(coverageHints) : []),
+    ].join(' ');
+    const normDoc = normalize(docTextRaw);
+
+    const sentences = rawText
+      .split(/(?<=[.!?])\s+/)
+      .map(s => s.trim())
+      .filter(s => s.length >= 20);
+
+    const missing: string[] = [];
+    for (const s of sentences) {
+      const ns = normalize(s);
+      if (ns.length < 20) continue;
+      const fp1 = ns.substring(0, 25);
+      if (normDoc.includes(fp1)) continue;
+      const midStart = Math.max(0, Math.floor(ns.length / 2) - 8);
+      const fp2 = ns.substring(midStart, midStart + 15);
+      if (fp2.length >= 12 && normDoc.includes(fp2)) continue;
+      missing.push(s);
+    }
+
+    if (missing.length === 0) return;
+
+    console.log(`[postprocess] P5: ${missing.length} sentence(s) not found in doc fields`);
+    for (const m of missing) {
+      console.log(`  [P5 MISSING] ${m.substring(0, 120)}`);
+    }
+
+    for (const m of missing) {
+      const target = this.routeMissingSentence(m);
+      if (!target) {
+        console.log(`  [P5 UNROUTED] ${m.substring(0, 80)}`);
+        continue;
+      }
+      const current = ((doc as any)[target] as string) || '';
+      if (target === 'recommendations' || target === 'doctorNotes' || target === 'conclusion') {
+        (doc as any)[target] = this.appendNumberedItem(current, m);
+      } else {
+        (doc as any)[target] = current ? `${current} ${m}` : m;
+      }
+      console.log(`  [P5 ROUTED → ${target}] ${m.substring(0, 80)}`);
+    }
+  }
+
+  /**
+   * Эвристический роутинг для P5. Возвращает имя поля или null (если непонятно).
+   */
+  private routeMissingSentence(s: string): keyof MedicalDocument | null {
+    const trimmed = s.trim();
+    if (trimmed.length < 15) return null;
+    // Заголовки разделов — не маршрутизируем
+    if (/^(?:жалобы|анамнез(?:\s+заболевани\w*|\s+жизни)?|диагноз(?:\s+предварительн\w*)?|план(?:\s+обследовани\w*|\s+лечени\w*)?|рекомендации|объективн\w*|аллерголог\w*|амбулаторн\w*|данные\s+проведенн\w*)[.:!]?\s*$/iu.test(trimmed)) {
+      return null;
+    }
+    const low = trimmed.toLowerCase();
+    // Препараты / назначения
+    if (/(?:таблетк|капсул|раствор|инъекц|ампул|\bмг\b|\bмкг\b|\bмл\b|раз\s+в\s+день|раз\s+в\s+сутки|по\s+\d+\s+(?:т\b|табл|капс))/iu.test(low)) {
+      return /продолжать|принимает\s+постоянн|амбулаторно\s+принима/iu.test(low) ? 'conclusion' : 'recommendations';
+    }
+    // Исследования / лаборатория
+    if (/(?:\bоак\b|\bоам\b|б\/х|биохим\w*|\bэкг\b|эхо[\-\s]?кг|\bмрт\b|\bкт\b|\bузи\b|холтер\w*|\bсмад\b|рентген\w*|гликирован\w*|hba1c|узд[гс])/iu.test(low)) {
+      return 'outpatientExams';
+    }
+    // Образ жизни / профилактика / наблюдение
+    if (/(?:снижени\w*\s+(?:масс\w*|вес\w*)|\bвес\b|физическ\w*|нагруз\w*|диет\w*|питани\w*|ограничен\w*|курени\w*|алкогол\w*|гимнастик\w*|самоконтрол\w*|\bконтрол\w*|памятк\w*|повторн\w*\s+осмотр|консультаци\w*|направлен\w*|динамик\w*)/iu.test(low)) {
+      return 'recommendations';
+    }
+    // Аллергия
+    if (/аллерг|непереносим/iu.test(low)) return 'allergyHistory';
+    return null;
+  }
+
+  /**
+   * Раскрывает краткое упоминание диеты ("Диета №9", "Стол 10")
+   * внутри recommendations до полного текста шаблона.
+   */
+  private expandDietTemplateInRecommendations(doc: MedicalDocument): void {
+    const reco = doc.recommendations;
+    if (!reco) return;
+
+    const lines = reco.split(/\n+/);
+    let changed = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const m = line.match(/^(\s*\d+[\.\)]\s*)?(.+)$/u);
+      if (!m) continue;
+      const prefix = m[1] || '';
+      const body = m[2].trim();
+      if (body.length > 40) continue;
+      // Грубый фильтр: пункт должен содержать слово «диета» / «стол» / «гипо…»
+      if (!/\b(?:диет\S*|стол\s*(?:№?\s*)?\d+|гипохолестерин\S*|гипонатриев\S*)\b/iu.test(body)) continue;
+
+      const template = findDietTemplate(body);
+      if (template) {
+        lines[i] = prefix + template.description;
+        changed = true;
+        console.log(`[postprocess] Expanded diet template in recommendations: "${body}" → "${template.name}"`);
+      }
+    }
+
+    if (changed) doc.recommendations = lines.join('\n');
   }
 
   /**
@@ -2256,11 +2822,6 @@ JSON:`;
         /^направлени\S*\s+на\s+обследовани\S*\s*[:.,-]?\s*/iu,      // «Направления на обследования:»
         /^прочее\s*[:.,-]?\s*/iu,                                     // «Прочее:» (старый)
         /^(?:заметк[иа]\s+врача|заметк[иа]|примечани\S*)\s*[:.,-]\s*/iu,
-      ],
-      diet: [
-        /^диет\S*\s*[:.,-]?\s*/iu,                                    // «Диета:» / «Диета 5:»
-        /^стол\s*\d+\S*\s*[:.,-]?\s*/iu,                              // «Стол 5:»
-        /^питани\S*\s*[:.,-]?\s*/iu,                                   // «Питание:»
       ],
     };
 
@@ -2507,7 +3068,6 @@ JSON:`;
       conclusion: '',
       doctorNotes: '',
       recommendations: '',
-      diet: '',
     };
   }
 
@@ -2595,11 +3155,10 @@ JSON:`;
       objectiveStatus: 'Объективный статус',
       neurologicalStatus: 'Неврологический статус',
       diagnosis: 'Предварительный диагноз',
-      finalDiagnosis: 'Заключительный диагноз',
+      finalDiagnosis: 'Заключение',
       conclusion: 'Амбулаторная терапия',
       doctorNotes: 'План обследования',
       recommendations: 'Рекомендации / План лечения',
-      diet: 'Диета',
     };
     return labels[field];
   }
@@ -2646,7 +3205,6 @@ JSON:`;
         conclusion: { type: 'string' },
         doctorNotes: { type: 'string' },
         recommendations: { type: 'string' },
-        diet: { type: 'string' },
       },
       required: [
         'patient',
@@ -2663,7 +3221,6 @@ JSON:`;
         'conclusion',
         'doctorNotes',
         'recommendations',
-        'diet',
       ],
       additionalProperties: false,
     };
