@@ -5,11 +5,14 @@ import { applyMedicalDictionary } from './medical-dictionary.js';
 import { AnthropicProvider } from './anthropic-provider.js';
 import { buildLabReferenceForPrompt } from '../data/labReference.js';
 
-const DEFAULT_RISK_ASSESSMENT: RiskAssessment = {
-  fallInLast3Months: 'нет',
-  dizzinessOrWeakness: 'нет',
-  needsEscort: 'нет',
-  painScore: '0',
+// «Не указано» по шкале Морзе. Пустые строки — клинически безопаснее, чем
+// дефолтные «нет/0»: PDF/UI рендерят их как «—», и врач сразу видит, что
+// доктор не озвучил пункт (а не что пациент «отрицает»).
+const EMPTY_RISK_ASSESSMENT: RiskAssessment = {
+  fallInLast3Months: '',
+  dizzinessOrWeakness: '',
+  needsEscort: '',
+  painScore: '',
 };
 
 interface LlamaCompletionResponse {
@@ -893,14 +896,18 @@ JSON:`;
 
   private normalizeYesNo(value: string): string {
     const v = (value || '').trim().toLowerCase();
+    if (!v) return '';
     if (/^(да|yes|true|1)$/i.test(v)) return 'да';
-    return 'нет';
+    if (/^(нет|no|false|0|отриц\w*)$/i.test(v)) return 'нет';
+    // Неизвестный ответ — оставляем пустым (значит «не указано», а не «нет»).
+    return '';
   }
 
   private normalizePainScore(value: string): string {
     const v = (value || '').trim().replace(/[бb]/gi, '');
+    if (!v) return '';
     const num = parseInt(v, 10);
-    if (isNaN(num) || num < 0) return '0';
+    if (isNaN(num) || num < 0) return '';
     if (num > 10) return '10';
     return String(num);
   }
@@ -910,7 +917,7 @@ JSON:`;
       fallInLast3Months: this.normalizeYesNo(ra?.fallInLast3Months || ''),
       dizzinessOrWeakness: this.normalizeYesNo(ra?.dizzinessOrWeakness || ''),
       needsEscort: this.normalizeYesNo(ra?.needsEscort || ''),
-      painScore: this.normalizePainScore(ra?.painScore || '0'),
+      painScore: this.normalizePainScore(ra?.painScore || ''),
     };
   }
 
@@ -1034,6 +1041,12 @@ JSON:`;
     // Пост-обработка: если objectiveStatus содержит diagnosis-данные в конце, удалить
     this.cleanObjectiveStatusTail(result);
 
+    // Пост-обработка: снимаем ярлык «(ожирение N степени)» из objectiveStatus.
+    // LLM иногда добавляет его рядом с ИМТ как псевдо-комментарий и ошибается
+    // в арифметике (ИМТ 30,5 — это I степень, а не II). Степень ожирения — в
+    // diagnosis; в объективном статусе остаётся только числовое значение ИМТ.
+    this.stripObesityCommentaryFromObjectiveStatus(result);
+
     // Пост-обработка: если finalDiagnosis совпадает с diagnosis, очистить finalDiagnosis
     if (result.finalDiagnosis && result.diagnosis &&
         result.finalDiagnosis.trim() === result.diagnosis.trim()) {
@@ -1097,6 +1110,12 @@ JSON:`;
 
       // Remove bare "Рекомендации" header
       if (/^рекомендации\.?\s*$/iu.test(trimmed)) continue;
+      // Remove short Whisper-echo heading hybrids:
+      // "Рекомендации с ... план лечения 1." — это не содержательный пункт.
+      if (/^(?:\d+[\.\)]\s*)?рекомендаци\S*(?:\s+\S+){0,10}\s+лечени\S*(?:\s+\d+[.\)]?)?\.?$/iu.test(trimmed) && trimmed.length <= 140) {
+        console.log(`[postprocess] Removed heading-echo from recommendations: "${trimmed.substring(0, 60)}..."`);
+        continue;
+      }
 
       // Keep if medical or numbered recommendation
       if (medicalKeywords.test(trimmed) || /^\d+\.\s/.test(trimmed)) {
@@ -1109,17 +1128,84 @@ JSON:`;
       }
     }
 
+    // Порядок: сначала дедуп, затем склейка continuation. Иначе полный дубль
+    // с другой капитализацией («Консультация кардиолога» + «консультация
+    // кардиолога») был бы ошибочно схлопнут как продолжение.
+    const seen = new Set<string>();
+    const deduped: string[] = [];
+    for (const item of clean) {
+      const normalized = item
+        .replace(/^\s*\d+[\.\)]\s*/, '')
+        .toLowerCase()
+        .replace(/[^\wа-яё\s]/giu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!normalized) continue;
+      if (seen.has(normalized)) {
+        console.log(`[postprocess] Removed duplicate recommendation: "${item.substring(0, 50)}..."`);
+        continue;
+      }
+      seen.add(normalized);
+      deduped.push(item);
+    }
+
+    // Слияние continuation-строк: «По 1 таблетке утром, длительно» после препарата —
+    // не самостоятельный пункт, а хвост предыдущего. Даже если LLM пронумеровала
+    // хвост отдельным пунктом — схлопываем. Единственный триггер — узкий список
+    // однозначно-дозировочных/временных слов («по», «длительно», «утром», «курс…»).
+    // «При», «на», «с», «до», «после» умышленно исключены — с них начинаются и
+    // самостоятельные пункты («При снижении АД прекратить»).
+    // Строчная буква в начале как триггер НЕ используется — иначе любой
+    // lowercase drug-пункт («бисопролол 2.5 мг» + «контроль АД») схлопнется
+    // в один. continuationHeads достаточно узкий, чтобы решать без контекста.
+    // `\b` в JS-regex работает только для ASCII, для кириллицы не срабатывает —
+    // используем negative-lookahead на букву, чтобы «по» не матчило «позвольте».
+    const continuationHeads =
+      /^(?:по|длительно|постоянно|утром|вечером|днём|ночью|натощак|каждые|каждый|каждую|курс[ыеом]?|одну|один|две|пол-?табл)(?![а-яёa-z])/iu;
+    // Drug/treatment-сигнал у предыдущего пункта — чтобы continuation-фрагмент
+    // не приклеивался к несвязанному пункту вроде «Памятка по питанию выдана
+    // на руки» (Dyusenov-кейс: P5 мог рескью «По одной таблетке…» в конец,
+    // drug-корень уже покрыт сигнатурой, а хвост остался). Если у prev нет
+    // drug-контекста — continuation-фрагмент дропаем, а не мержим.
+    // `\d+\s*мг` без `\s`-префикса и `\b`-суффикса — иначе «2.5 мг» не матчит
+    // (после «2» стоит «.», и `\d+` не переходит границу; `\b` с кириллицей в JS
+    // работает непредсказуемо). Движок сам находит «5 мг» в «2.5 мг».
+    const drugContextRe =
+      /(?:таблетк|капсул|раствор|инъекц|ампул|\d+\s*(?:мг|мкг|мл|МЕ|ЕД|IU)|раз\s+в\s+день|раз\s+в\s+сутки)/iu;
+    const unique: string[] = [];
+    for (const item of deduped) {
+      const body = item.replace(/^\s*\d+[\.\)]\s*/, '').trim();
+      const isContinuation =
+        unique.length > 0 &&
+        body.length <= 100 &&
+        continuationHeads.test(body);
+
+      if (isContinuation) {
+        const prev = unique[unique.length - 1];
+        if (drugContextRe.test(prev)) {
+          const prevClean = prev.replace(/[.,;\s]+$/, '');
+          const tail = body.charAt(0).toLowerCase() + body.slice(1);
+          unique[unique.length - 1] = `${prevClean}, ${tail}`;
+          console.log(`[postprocess] Merged continuation into previous recommendation: "${body.substring(0, 40)}..."`);
+        } else {
+          console.log(`[postprocess] Dropped orphan continuation (prev has no drug context): "${body.substring(0, 40)}..."`);
+        }
+      } else {
+        unique.push(item);
+      }
+    }
+
     // Перенумеровываем всегда — на входе строки могут уже иметь номера, либо
     // быть без них. Сначала срезаем существующие номера, затем нумеруем заново.
-    const renumbered = clean
+    const renumbered = unique
       .map(l => l.replace(/^\s*\d+[\.\)]\s*/, '').trim())
       .filter(l => l.length > 0)
       .map((l, i) => `${i + 1}. ${l}`)
       .join('\n');
     if (renumbered !== reco) {
       doc.recommendations = renumbered;
-      if (clean.length < items.length) {
-        console.log(`[postprocess] Cleaned recommendations: ${items.length} → ${clean.length} items`);
+      if (unique.length < items.length) {
+        console.log(`[postprocess] Cleaned recommendations: ${items.length} → ${unique.length} items`);
       }
     }
   }
@@ -1163,6 +1249,25 @@ JSON:`;
         console.log(`[postprocess] Removed diagnosis tail from objectiveStatus (${obj.length} → ${cleaned.length} chars)`);
         doc.objectiveStatus = cleaned;
       }
+    }
+  }
+
+  /**
+   * Снимает LLM-ярлык «(ожирение N степени)» рядом с ИМТ в objectiveStatus.
+   * LLM добавляет его как псевдо-комментарий и регулярно ошибается в арифметике
+   * (ИМТ 30,5 → «II степень», тогда как по формуле I степень). Степень ожирения
+   * принадлежит diagnosis, а не объективному статусу.
+   */
+  private stripObesityCommentaryFromObjectiveStatus(doc: MedicalDocument): void {
+    const obj = doc.objectiveStatus;
+    if (!obj) return;
+    // «(ожирение II степени)», «(ожирение 1 степени)», «(ожирение I ст.)».
+    const commentary = /\s*\(ожирение\s+(?:[IVXХIХ]+|\d+|перв\S*|втор\S*|трет\S*|четвёрт\S*)\s+(?:степени|ст\.?)\)/giu;
+    if (!commentary.test(obj)) return;
+    const cleaned = obj.replace(commentary, '').replace(/\s+/g, ' ').trim();
+    if (cleaned !== obj) {
+      console.log('[postprocess] Stripped obesity-degree commentary from objectiveStatus');
+      doc.objectiveStatus = cleaned;
     }
   }
 
@@ -1914,10 +2019,21 @@ JSON:`;
     // Keywords for life history that end up in allergyHistory
     const lifeHistoryInAllergyKeywords = /(?:туберкулез|вирусн\S+\s+гепатит|ВИЧ|болезнь\s+Боткина|гемотрансфузи|наследственност|сердечно-сосудист)/iu;
 
+    // Эхо заголовка из диктовки: «Аллергологический анамнез.» без содержимого.
+    // Такое ловит P5-rescue и роутит в allergyHistory, где оно превращается
+    // в висячий хвост («…кожной сыпи. Аллергологический анамнез.»).
+    const bareAllergyHeader = /^\s*аллерголог[а-яё]*\s+анамнез[.!?]?\s*$/iu;
+    let droppedBareHeader = false;
+
     for (const sent of sentences) {
       if (dosageGarbagePattern.test(sent)) {
         // Dosage fragment leaked from clinicalCourse — discard
         console.log(`[postprocess] Removed dosage garbage from allergyHistory: "${sent.substring(0, 50)}"`);
+        continue;
+      }
+      if (bareAllergyHeader.test(sent.trim())) {
+        console.log(`[postprocess] Removed bare allergy header echo: "${sent.trim()}"`);
+        droppedBareHeader = true;
         continue;
       }
       if (allergyKeywords.test(sent)) {
@@ -1937,8 +2053,8 @@ JSON:`;
       }
     }
 
-    // Only modify if we actually found misplaced data
-    if (objectiveParts.length === 0 && clinicalParts.length === 0) return;
+    // Only modify if мы что-то сдвинули/дропнули
+    if (objectiveParts.length === 0 && clinicalParts.length === 0 && !droppedBareHeader) return;
 
     if (objectiveParts.length > 0) {
       const moved = objectiveParts.join(' ');
@@ -2077,7 +2193,7 @@ JSON:`;
     if (hasTrigger) return;
 
     const before = JSON.stringify(doc.riskAssessment);
-    doc.riskAssessment = { ...DEFAULT_RISK_ASSESSMENT };
+    doc.riskAssessment = { ...EMPTY_RISK_ASSESSMENT };
     const after = JSON.stringify(doc.riskAssessment);
     if (before !== after) {
       console.log(`[postprocess] riskAssessment cleared (no Morse triggers in raw): ${before} → ${after}`);
@@ -2175,6 +2291,10 @@ JSON:`;
     this.dedupRecommendationsAgainstConclusion(doc);
     this.filterGarbageRecommendationItems(doc);
     this.dedupOutpatientExamsAgainstDoctorNotes(doc);
+    // После P5-routing в recommendations мог вернуться эхо-хвост («Таблетка X»,
+    // «По одной таблетке…») в виде отдельных пунктов. Повторяем merge+dedup,
+    // чтобы схлопнуть continuation и убрать нормализованные дубли.
+    this.cleanRecommendations(doc);
   }
 
   /**
@@ -2526,6 +2646,21 @@ JSON:`;
    * P2: препараты с маркером "продолжать" переносятся recommendations → conclusion.
    * Только когда в пункте НЕТ маркеров нового назначения ("назначаю", "начать", "добавить" и т.п.).
    */
+  /**
+   * Заменяет малые числа (1-10, 14) на их русскую прописную форму в винительном
+   * падеже (по умолчанию то, чем Whisper диктует дозировки: «по две таблетки»,
+   * «три раза», «четырнадцать дней»). Используется как вариант coverage-hint
+   * для P5 — без него digit-форма hint-а не совпадает со word-формой в raw.
+   */
+  private digitsToRussianWords(s: string): string {
+    const map: Record<string, string> = {
+      '1': 'одну', '2': 'две', '3': 'три', '4': 'четыре', '5': 'пять',
+      '6': 'шесть', '7': 'семь', '8': 'восемь', '9': 'девять', '10': 'десять',
+      '14': 'четырнадцать',
+    };
+    return s.replace(/(?<!\d)\d+(?!\d|[,.]\d)/g, (m) => map[m] ?? m);
+  }
+
   private extractContinuedDrugsFromRecommendations(doc: MedicalDocument, coverageHints?: Set<string>): void {
     const reco = doc.recommendations;
     if (!reco) return;
@@ -2541,12 +2676,49 @@ JSON:`;
       const hasDrugMarker = /(?:таблетк|капсул|раствор|инъекц|ампул|\s\d+\s*(?:мг|мкг|мл|МЕ|ЕД|IU)\b|раз\s+в\s+день|раз\s+в\s+сутки|по\s+\d+\s+(?:т\b|табл|капс))/iu.test(body);
       // ВНИМАНИЕ: \b в JS-regex работает только для ASCII-слов, для кириллицы
       // используем lookaround по кириллическим буквам.
-      const hasContinueMarker = /(?<![а-яёa-z])продолжать(?![а-яёa-z])|продолжает\s+прием|продолжить\s+прием|постоянный\s+прием/iu.test(body);
+      const hasContinueMarker = /(?<![а-яёa-z])продолжать(?![а-яёa-z])|продолжает\s+при(?:е|ё)м|продолжить\s+при(?:е|ё)м|продолжает\s+принимать|продолжить\s+принимать|постоянный\s+прием/iu.test(body);
       // Расширенный набор маркеров нового назначения. Если оба маркера
       // ("продолжать" + "начать/добавить") встречаются в одном пункте, значит
       // там коктейль препаратов — безопаснее не перетаскивать, пусть остаётся
       // в recommendations (врач разберёт вручную).
       const hasNewPrescription = /(?<![а-яёa-z])(?:назнача(?:ю|ть|ет)|назначить|рекомендую\s+препарат|начат\w*\s+(?:прием|терап)|начать\s+прием|начать\s+тера|добав(?:ить|ляю)\s+(?:к\s+|препарат|к\s+терап)|впервые\s+назнач|стартова|инициац|приступить|первичн\w*\s+назнач)(?![а-яёa-z])/iu.test(body);
+
+      // Для каждого drug-пункта добавляем сигнатуру «drugHead + dose» в coverageHints.
+      // Иначе P5 считает Whisper-echo «Таблетка <name> <X> на <Y> мга» потерянным
+      // и добавляет в recommendations отдельным пунктом, хотя «<name> <X>/<Y> мг»
+      // уже есть в развёрнутом пункте. Расхождение форматов (слэш vs «на», разная
+      // пунктуация) ломает fp-проверки в recoverMissingContent.
+      if (coverageHints && hasDrugMarker) {
+        const formWords = new Set([
+          'Таблетка','Таблетки','Капсула','Капсулы','Раствор','Ампула','Ампулы',
+          'Инъекция','Ингалятор','Спрей','Сироп','Мазь','Крем','Гель','Свечи',
+        ]);
+        // LLM часто слепляет несколько препаратов в один нумерованный пункт
+        // («Цефиксим 400 мг … Канефрон N по 2 табл …»), поэтому сигнатуру
+        // строим по КАЖДОМУ drug-head, иначе P5-echo на второй/третий препарат
+        // не перекрывается.
+        const drugHeads = Array.from(body.matchAll(/[А-ЯЁA-Z][а-яёa-z]+(?:-[А-ЯЁA-Zа-яёa-z]+)*/gu))
+          .map(m => m[0])
+          .filter(w => !formWords.has(w));
+        const doseTokens = body.match(/\d+[,.]?\d*/g) || [];
+        if (drugHeads.length > 0 && doseTokens.length > 0) {
+          for (const drugHead of drugHeads) {
+            for (const prefix of ['Таблетка', 'Капсула', 'Раствор', 'Ампула', 'Ингалятор']) {
+              coverageHints.add(`${prefix} ${drugHead} ${doseTokens.join(' ')}`);
+              if (doseTokens.length >= 2) {
+                // Whisper часто превращает «X/Y» в «X на Y» для дробных доз.
+                coverageHints.add(`${prefix} ${drugHead} ${doseTokens[0]} на ${doseTokens[1]}`);
+              }
+            }
+          }
+        }
+        // Whisper часто выводит количества прописью («по 2 таблетки» →
+        // «по две таблетки»), и тогда fp-сравнение P5 на первые 25 символов
+        // не находит совпадения. Добавляем вариант body с цифра→слово
+        // заменой для малых чисел (1-10, 14) — покрывает типичные дозировки.
+        coverageHints.add(body);
+        coverageHints.add(this.digitsToRussianWords(body));
+      }
 
       if (hasDrugMarker && hasContinueMarker && !hasNewPrescription) {
         moved.push(body);
@@ -2758,6 +2930,11 @@ JSON:`;
     }
 
     for (const m of missing) {
+      if (this.isCrossSectionEchoSentence(m)) {
+        console.log(`  [P5 SKIP cross-section] ${m.substring(0, 80)}`);
+        continue;
+      }
+
       const target = this.routeMissingSentence(m);
       if (!target) {
         console.log(`  [P5 UNROUTED] ${m.substring(0, 80)}`);
@@ -2774,16 +2951,50 @@ JSON:`;
   }
 
   /**
+   * Возвращает true для "склеенного" хвоста Whisper, где в ОДНОМ предложении
+   * смешаны 2+ заголовка разных разделов ("Амбулаторная терапия ... План
+   * обследования ..."). Такие фразы нельзя надёжно роутить в одно поле.
+   */
+  private isCrossSectionEchoSentence(s: string): boolean {
+    const low = s.toLowerCase();
+    const markers: RegExp[] = [
+      /(?:амбулаторн\S*\s+терапи\S*|амбулаторно\s+принима\S*)/iu,
+      /(?:план\s+обследовани\S*|направлени\S*\s+на\s+обследовани\S*)/iu,
+      /(?:рекомендаци\S*|план\s+лечени\S*)/iu,
+      /(?:предварительн\S*\s+диагноз\S*|заключительн\S*\s+диагноз\S*|диагноз\S*)/iu,
+      /(?:анамнез(?:\s+заболевани\S*|\s+жизни)?)/iu,
+      /(?:объективн\S*\s+статус\S*)/iu,
+      /(?:амбулаторн\S*\s+обследовани\S*|(?:^|[^а-яёa-z])оак(?:$|[^а-яёa-z])|(?:^|[^а-яёa-z])оам(?:$|[^а-яёa-z])|биохим\S*|эхо[\-\s]?кг|(?:^|[^а-яёa-z])смад(?:$|[^а-яёa-z])|холтер\S*|(?:^|[^а-яёa-z])узи(?:$|[^а-яёa-z]))/iu,
+    ];
+
+    let count = 0;
+    for (const re of markers) {
+      if (re.test(low)) {
+        count++;
+        if (count >= 2) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Эвристический роутинг для P5. Возвращает имя поля или null (если непонятно).
    */
   private routeMissingSentence(s: string): keyof MedicalDocument | null {
     const trimmed = s.trim();
     if (trimmed.length < 15) return null;
     // Заголовки разделов — не маршрутизируем
-    if (/^(?:жалобы|анамнез(?:\s+заболевани\w*|\s+жизни)?|диагноз(?:\s+предварительн\w*)?|план(?:\s+обследовани\w*|\s+лечени\w*)?|рекомендации|объективн\w*|аллерголог\w*|амбулаторн\w*|данные\s+проведенн\w*)[.:!]?\s*$/iu.test(trimmed)) {
+    // `\w` в JS-regex матчит только ASCII-слова даже с /u, поэтому для
+    // русских суффиксов используем явный класс [а-яёА-ЯЁ\w].
+    if (/^(?:жалобы|анамнез(?:\s+заболевани[а-яёА-ЯЁ\w]*|\s+жизни)?|диагноз(?:\s+предварительн[а-яёА-ЯЁ\w]*)?|план(?:\s+обследовани[а-яёА-ЯЁ\w]*|\s+лечени[а-яёА-ЯЁ\w]*)?|рекомендации|объективн[а-яёА-ЯЁ\w]*|аллерголог[а-яёА-ЯЁ\w]*(?:\s+анамнез)?|амбулаторн[а-яёА-ЯЁ\w]*|данные\s+проведенн[а-яёА-ЯЁ\w]*)[.:!]?\s*$/iu.test(trimmed)) {
       return null;
     }
     const low = trimmed.toLowerCase();
+    if (/план\s+обследовани\S*/iu.test(low)) return 'doctorNotes';
+    if (/(?:амбулаторн\S*\s+терапи\S*|амбулаторно\s+принима\S*|продолжает\s+принимать|продолжить\s+принимать)/iu.test(low)) {
+      return 'conclusion';
+    }
+    if (/(?:рекомендаци\S*|план\s+лечени\S*)/iu.test(low)) return 'recommendations';
     // Физическая активность / образ жизни — даже если содержит «раз в день»
     // и «длительно», это НЕ препарат (частый ложный матч: «Заниматься 30 мин
     // по 10 минут один раз в день утром длительно»).
@@ -2791,7 +3002,7 @@ JSON:`;
     // Препараты / назначения
     if (!isLifestyle && /(?:таблетк|капсул|раствор|инъекц|ампул|\bмг\b|\bмкг\b|\bмл\b|раз\s+в\s+день|раз\s+в\s+сутки|по\s+\d+\s+(?:т\b|табл|капс))/iu.test(low)) {
       // «длительно», «постоянно» — маркеры долгосрочной терапии (conclusion).
-      return /продолжать|принимает\s+постоянн|амбулаторно\s+принима|длительно|постоянн\w*\s+прием/iu.test(low) ? 'conclusion' : 'recommendations';
+      return /продолжать|продолжает\s+принимать|продолжить\s+принимать|продолжает\s+при(?:е|ё)м|продолжить\s+при(?:е|ё)м|принимает\s+постоянн|амбулаторно\s+принима|длительно|постоянн\w*\s+прием/iu.test(low) ? 'conclusion' : 'recommendations';
     }
     // Исследования / лаборатория
     if (/(?:\bоак\b|\bоам\b|б\/х|биохим\w*|\bэкг\b|эхо[\-\s]?кг|\bмрт\b|\bкт\b|\bузи\b|холтер\w*|\bсмад\b|рентген\w*|гликирован\w*|hba1c|узд[гс])/iu.test(low)) {
@@ -3100,21 +3311,16 @@ JSON:`;
     return result;
   }
 
-  private async parseDocumentWithRepair(content: string, rawText?: string): Promise<MedicalDocument> {
+  private async parseDocumentWithRepair(content: string, _rawText?: string): Promise<MedicalDocument> {
     try {
       return this.parseLlmJson<MedicalDocument>(content);
     } catch (firstError) {
       console.warn(`[llm] JSON parse failed (${firstError}), raw snippet: ${content.substring(0, 300)}`);
-      try {
-        const repaired = await this.repairJsonWithLlm(content);
-        return this.parseLlmJson<MedicalDocument>(repaired);
-      } catch (repairError) {
-        console.warn(`[llm] LLM repair failed: ${repairError}`);
-        // Graceful degradation: чем потерять 7 минут аудио, лучше отдать
-        // пустой документ с сырым текстом в complaints — врач сам разнесёт по полям.
-        console.warn('[llm] Falling back to mock document with raw transcription in complaints');
-        return this.getMockStructuredDocument(rawText ?? content);
-      }
+      const repaired = await this.repairJsonWithLlm(content);
+      return this.parseLlmJson<MedicalDocument>(repaired);
+      // Бросаем наверх. Mock-fallback решает только верхний caller (structureText),
+      // и только при ALLOW_MOCK_LLM=true. Без флага врач увидит явную ошибку и
+      // сможет повторить — а не «успешный» пустой документ с raw в complaints.
     }
   }
 
@@ -3171,7 +3377,7 @@ JSON:`;
         gender: '',
         complaintDate: '',
       },
-      riskAssessment: { ...DEFAULT_RISK_ASSESSMENT },
+      riskAssessment: { ...EMPTY_RISK_ASSESSMENT },
       complaints: rawText.trim(),
       anamnesis: '',
       outpatientExams: '',
@@ -3194,7 +3400,7 @@ JSON:`;
         ...document.patient,
       },
       riskAssessment: {
-        ...(document.riskAssessment || DEFAULT_RISK_ASSESSMENT),
+        ...(document.riskAssessment || EMPTY_RISK_ASSESSMENT),
       },
     };
 

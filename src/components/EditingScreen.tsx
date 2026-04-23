@@ -1068,6 +1068,9 @@ export function EditingScreen({
                     <div key={field}>
                       <label className="block text-sm font-medium text-text-secondary mb-2">
                         {riskAssessmentLabels[field]}
+                        {!document.riskAssessment[field] && (
+                          <span className="ml-2 text-xs text-amber-600">не указано</span>
+                        )}
                       </label>
                       <div className="flex gap-2">
                         {['нет', 'да'].map((option) => (
@@ -1091,6 +1094,9 @@ export function EditingScreen({
                   <div>
                     <label className="block text-sm font-medium text-text-secondary mb-2">
                       {riskAssessmentLabels.painScore} (0-10)
+                      {!document.riskAssessment.painScore && (
+                        <span className="ml-2 text-xs text-amber-600">не указано</span>
+                      )}
                     </label>
                     <div className="flex items-center gap-3">
                       <input
@@ -1102,7 +1108,7 @@ export function EditingScreen({
                         className="flex-1 accent-medical-600"
                       />
                       <span className="text-lg font-bold text-medical-700 min-w-[3ch] text-center">
-                        {document.riskAssessment.painScore}б
+                        {document.riskAssessment.painScore ? `${document.riskAssessment.painScore}б` : '—'}
                       </span>
                     </div>
                   </div>

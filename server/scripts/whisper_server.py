@@ -15,6 +15,9 @@
   WHISPER_BEAM_SIZE     Размер beam search              (default: 5)
   WHISPER_CHUNK_THRESHOLD  Порог в секундах для активации chunking (default: 40)
   WHISPER_CHUNK_TARGET     Целевая длина куска в секундах          (default: 30)
+  WHISPER_FALLBACK_BEAM_SIZE     Beam на ретраях подозрительных чанков (default: 5)
+  WHISPER_SUSPICIOUS_LOGPROB     Порог low-confidence для ретрая       (default: -0.95)
+  WHISPER_MAX_FALLBACK_CHUNKS    Макс. число ретраев на один запрос    (default: 2)
 
 Endpoints:
   GET  /health      → {"status":"ok","model":"...","device":"..."}
@@ -52,6 +55,12 @@ HOST         = os.environ.get("WHISPER_SERVER_HOST", "127.0.0.1")
 DEFAULT_BEAM    = int(os.environ.get("WHISPER_BEAM_SIZE", "5"))
 CHUNK_THRESHOLD = int(os.environ.get("WHISPER_CHUNK_THRESHOLD", "40"))
 CHUNK_TARGET    = int(os.environ.get("WHISPER_CHUNK_TARGET", "30"))
+# Селективный fallback: при beam=1 ретраим подозрительные чанки с бoльшим beam.
+# Побеждающий вариант выбирается по клиническому quality_score, не по log-prob
+# (чтобы «красивая речь» не обыгрывала текст с правильным X/Y АД и КОЕ/мл).
+FALLBACK_BEAM_SIZE  = int(os.environ.get("WHISPER_FALLBACK_BEAM_SIZE", "5"))
+SUSPICIOUS_LOGPROB  = float(os.environ.get("WHISPER_SUSPICIOUS_LOGPROB", "-0.95"))
+MAX_FALLBACK_CHUNKS = int(os.environ.get("WHISPER_MAX_FALLBACK_CHUNKS", "2"))
 INITIAL_PROMPT  = os.environ.get(
     "WHISPER_INITIAL_PROMPT",
     "Пациент. Жалобы. Анамнез. Диагноз. Рекомендации. Объективно. АД мм рт.ст. ЧСС уд/мин. "
@@ -296,6 +305,144 @@ def _collect_segments(segments_iter):
     return text, avg_logprob
 
 
+# ─── Селективный fallback на ретрай beam=5 ─────────────────────────────────
+# Эвристики подозрительного чанка: low-logprob, «мм рт» без X/Y, «посев мочи»
+# без названия организма, мусорные токены-кальки единиц («мга», «коэслч»,
+# «слчэль» — артефакты Whisper для «мг», «КОЕ/мл», «г/л»), phrase-loops.
+
+# «АД», «мм рт», «миллиметра ртутного», «артериальное давление» — маркеры,
+# что в чанке речь про артериальное давление. Для «АД» ограничиваем
+# ASCII-границами (cyrillic-word-boundary в re не работает), через lookaround.
+_BP_MENTIONED        = re.compile(
+    r"(?:мм\s*рт|миллиметр[а-яё]*\s+ртутн|ртутного\s+стол[ба]|"
+    r"артериальн\S*\s+давлен|(?<![А-Яа-яЁё])АД(?![А-Яа-яЁё]))",
+    re.IGNORECASE,
+)
+_BP_FORMAT           = re.compile(r"\d{2,3}\s*[/\\]\s*\d{2,3}")
+_CULTURE_WORD        = re.compile(r"посев\s+моч[иеаoy]", re.IGNORECASE)
+_ORGANISM            = re.compile(
+    r"(?:escherichia|e\.?\s*coli|эшерих\w*|клебсиелл\w*|proteus|proteuс|"
+    r"протеус|staphyloc\w*|стафилок\w*|streptoc\w*|стрептокок\w*|"
+    r"enteroc\w*|энтерокок\w*|pseudomon\w*|псевдомон\w*|enterob\w*)",
+    re.IGNORECASE,
+)
+_GARBAGE_TOKENS      = re.compile(
+    r"\b(?:мга|мгс|мгсс|коэслч|слчэль|сслч|гэслчэль|гсслч|уцлотшмин|"
+    r"слшмин|ртутного\s+стат[ья]+|эсреактивн\w*|мольслче?ль|мольслшель|"
+    r"ецлшэль|нетритоположительн\w*)\b",
+    re.IGNORECASE,
+)
+# Петли: одна и та же 3+ раза подряд с запятой/точкой/пробелом между.
+_LOOP_REPEAT         = re.compile(
+    r"(\b[А-Яа-яёЁA-Za-z]{4,}\b(?:\s+[А-Яа-яёЁA-Za-z]{3,}){0,2})[\s,.;:]+(?:\1[\s,.;:]+){2,}",
+    re.IGNORECASE,
+)
+
+
+def is_suspicious_chunk(text: str, avg_logprob: float) -> list:
+    """Возвращает список причин, по которым чанк стоит перераспознать с бoльшим
+    beam. Пустой список = всё ок, ретрай не нужен."""
+    reasons = []
+    if avg_logprob < SUSPICIOUS_LOGPROB:
+        reasons.append(f"low_logprob={avg_logprob:.2f}")
+    if _BP_MENTIONED.search(text) and not _BP_FORMAT.search(text):
+        reasons.append("bp_without_format")
+    if _CULTURE_WORD.search(text) and not _ORGANISM.search(text):
+        reasons.append("culture_without_organism")
+    if _GARBAGE_TOKENS.search(text):
+        reasons.append("garbage_unit_tokens")
+    if _LOOP_REPEAT.search(text):
+        reasons.append("phrase_loop")
+    return reasons
+
+
+# Rewards: структуры, которые хочется видеть в медицинском тексте.
+_DOSE_UNIT           = re.compile(
+    r"\d+[,.]?\d*\s*(?:мг|мкг|мл|ед|ме|iu|мэкв|мкг/кг|мг/кг)",
+    re.IGNORECASE,
+)
+_LAB_UNIT            = re.compile(
+    r"(?:ммоль/л|мкмоль/л|мг/л|г/л|нмоль/л|пг/мл|нг/мл|МЕ/л|Ед/л|ед/л|"
+    r"10[⁰¹²³⁴⁵⁶⁷⁸⁹\^]+\s*/\s*л)",
+    re.IGNORECASE,
+)
+_CFU                 = re.compile(r"КОЕ\s*/?\s*мл", re.IGNORECASE)
+
+
+def quality_score(text: str) -> float:
+    """Клинический quality-score: чем больше, тем «чище» текст.
+    Не log-prob — именно структурные попадания (АД X/Y, доза+единица,
+    лабораторный формат, КОЕ/мл, название организма в посеве)."""
+    if not text:
+        return 0.0
+    score = 0.0
+    score += 3.0 * len(_BP_FORMAT.findall(text))            # +3 за каждый АД X/Y
+    score += 1.0 * len(_DOSE_UNIT.findall(text))            # +1 за каждую дозу
+    score += 1.0 * len(_LAB_UNIT.findall(text))             # +1 за лабораторную единицу
+    score += 2.0 * len(_CFU.findall(text))                  # +2 за КОЕ/мл
+    if _CULTURE_WORD.search(text) and _ORGANISM.search(text):
+        score += 3.0                                        # +3 посев с организмом
+    score -= 2.0 * len(_GARBAGE_TOKENS.findall(text))       # -2 за мусорный токен
+    score -= 3.0 * len(_LOOP_REPEAT.findall(text))          # -3 за каждую петлю
+    return score
+
+
+def transcribe_with_fallback(
+    audio_path: str,
+    common_kwargs: dict,
+    fallback_budget: list,
+    tag: str = "",
+):
+    """Распознаёт audio_path с beam=common_kwargs['beam_size'], затем — если
+    результат подозрительный и бюджет не исчерпан — перераспознаёт с
+    FALLBACK_BEAM_SIZE и возвращает winner по quality_score.
+
+    fallback_budget — мутабельный список из одного элемента [used_count],
+    общий между чанками одного запроса, чтобы ограничить latency.
+    Возвращает (text, avg_logprob, elapsed_sec, info, meta)."""
+    base_beam = common_kwargs.get("beam_size", 1)
+    t0 = time.time()
+    segments, info = model.transcribe(audio_path, **common_kwargs)
+    text, lp = _collect_segments(segments)
+    elapsed = time.time() - t0
+
+    reasons = is_suspicious_chunk(text, lp)
+    selected_beam = base_beam
+    fallback_used = False
+
+    if (reasons
+        and fallback_budget[0] < MAX_FALLBACK_CHUNKS
+        and base_beam < FALLBACK_BEAM_SIZE):
+        logger.info(
+            f"  {tag}suspicious [{','.join(reasons)}] → retry beam={FALLBACK_BEAM_SIZE}"
+        )
+        retry_kwargs = dict(common_kwargs, beam_size=FALLBACK_BEAM_SIZE)
+        t1 = time.time()
+        seg2, info2 = model.transcribe(audio_path, **retry_kwargs)
+        text2, lp2 = _collect_segments(seg2)
+        elapsed += time.time() - t1
+        fallback_budget[0] += 1
+
+        q1 = quality_score(text)
+        q2 = quality_score(text2)
+        logger.info(
+            f"    {tag}beam{base_beam} q={q1:.1f} lp={lp:.2f}  |  "
+            f"beam{FALLBACK_BEAM_SIZE} q={q2:.1f} lp={lp2:.2f}  →  "
+            f"winner=beam{FALLBACK_BEAM_SIZE if q2 > q1 else base_beam}"
+        )
+        if q2 > q1:
+            text, lp, info = text2, lp2, info2
+            selected_beam = FALLBACK_BEAM_SIZE
+            fallback_used = True
+
+    meta = {
+        "suspicious": reasons,
+        "fallback_used": fallback_used,
+        "selected_beam": int(selected_beam),
+    }
+    return text, lp, elapsed, info, meta
+
+
 def transcribe_chunked(audio_path: str, language: str, beam_size: int,
                        initial_prompt: str, hotwords: str = "") -> tuple:
     """Transcribe long audio by splitting into chunks.
@@ -327,10 +474,21 @@ def transcribe_chunked(audio_path: str, language: str, beam_size: int,
         common_kwargs["hotwords"] = hotwords
 
     if duration <= CHUNK_THRESHOLD or not HAS_FFMPEG:
-        # Short audio or no ffmpeg — transcribe as-is
-        segments, info = model.transcribe(audio_path, **common_kwargs)
-        text, avg_lp = _collect_segments(segments)
-        return text, info, 1, [{"duration": float(duration), "chars": len(text), "avg_logprob": float(round(avg_lp, 3))}], float(avg_lp)
+        # Short audio or no ffmpeg — transcribe as-is (с селективным fallback).
+        fallback_budget = [0]
+        text, avg_lp, elapsed, info, meta = transcribe_with_fallback(
+            audio_path, common_kwargs, fallback_budget, tag="short: "
+        )
+        return text, info, 1, [{
+            "chunk": 1,
+            "duration": float(duration),
+            "chars": len(text),
+            "elapsed": round(elapsed, 2),
+            "avg_logprob": float(round(avg_lp, 3)),
+            "suspicious": meta["suspicious"],
+            "fallback_used": meta["fallback_used"],
+            "selected_beam": meta["selected_beam"],
+        }], float(avg_lp)
 
     # Длинное аудио — оставляем chunking как safety net на случай экстремально
     # длинных записей. Но т.к. включён vad_filter, чанков будет меньше.
@@ -344,24 +502,37 @@ def transcribe_chunked(audio_path: str, language: str, beam_size: int,
 
     chunk_paths = split_audio(audio_path, split_points)
     if not chunk_paths:
-        # Fallback: split failed, transcribe whole file
+        # Fallback: split failed, transcribe whole file (с селективным fallback).
         logger.warning("Chunk splitting failed — falling back to whole-file transcription")
-        segments, info = model.transcribe(audio_path, **common_kwargs)
-        text, avg_lp = _collect_segments(segments)
-        return text, info, 1, [{"duration": float(duration), "chars": len(text), "avg_logprob": float(round(avg_lp, 3))}], float(avg_lp)
+        fallback_budget = [0]
+        text, avg_lp, elapsed, info, meta = transcribe_with_fallback(
+            audio_path, common_kwargs, fallback_budget, tag="whole: "
+        )
+        return text, info, 1, [{
+            "chunk": 1,
+            "duration": float(duration),
+            "chars": len(text),
+            "elapsed": round(elapsed, 2),
+            "avg_logprob": float(round(avg_lp, 3)),
+            "suspicious": meta["suspicious"],
+            "fallback_used": meta["fallback_used"],
+            "selected_beam": meta["selected_beam"],
+        }], float(avg_lp)
 
     texts = []
     chunk_details = []
     info = None
     weighted_lp = 0.0
     total_lp_dur = 0.0
+    # Общий бюджет ретраев на весь запрос — чтобы не уронить latency ради мусора.
+    fallback_budget = [0]
     try:
         for i, chunk_path in enumerate(chunk_paths):
-            t_chunk = time.time()
-            segments, chunk_info = model.transcribe(chunk_path, **common_kwargs)
-            chunk_text, chunk_lp = _collect_segments(segments)
-            chunk_elapsed = time.time() - t_chunk
             chunk_dur = split_points[i + 1] - split_points[i]
+            chunk_text, chunk_lp, chunk_elapsed, chunk_info, meta = transcribe_with_fallback(
+                chunk_path, common_kwargs, fallback_budget,
+                tag=f"chunk {i+1}/{len(chunk_paths)}: ",
+            )
 
             texts.append(chunk_text)
             chunk_details.append({
@@ -370,13 +541,17 @@ def transcribe_chunked(audio_path: str, language: str, beam_size: int,
                 "chars": len(chunk_text),
                 "elapsed": round(chunk_elapsed, 2),
                 "avg_logprob": float(round(chunk_lp, 3)),
+                "suspicious": meta["suspicious"],
+                "fallback_used": meta["fallback_used"],
+                "selected_beam": meta["selected_beam"],
             })
             weighted_lp += chunk_lp * chunk_dur
             total_lp_dur += chunk_dur
             logger.info(
                 f"  Chunk {i+1}/{len(chunk_paths)}: "
                 f"{chunk_dur:.1f}s → {len(chunk_text)} chars in {chunk_elapsed:.2f}s "
-                f"logprob={chunk_lp:.2f}"
+                f"logprob={chunk_lp:.2f} beam={meta['selected_beam']}"
+                f"{' [fallback]' if meta['fallback_used'] else ''}"
             )
             if info is None:
                 info = chunk_info
