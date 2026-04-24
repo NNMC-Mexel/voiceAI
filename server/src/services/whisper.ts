@@ -10,7 +10,16 @@ interface WhisperServerResponse {
   language: string;
   elapsed: number;
   chunks?: number;
-  chunk_details?: Array<{ chunk: number; duration: number; chars: number; elapsed: number; avg_logprob?: number }>;
+  chunk_details?: Array<{
+    chunk: number;
+    duration: number;
+    chars: number;
+    elapsed: number;
+    avg_logprob?: number;
+    suspicious?: string[];
+    fallback_used?: boolean;
+    selected_beam?: number;
+  }>;
   avg_logprob?: number;
   low_confidence?: boolean;
 }
@@ -328,6 +337,10 @@ export class WhisperService {
         body: JSON.stringify({
           audio_base64: audioBase64,
           language: this.config.language,
+          // Передаём beam_size явно, чтобы фиксировать конфигурацию между клиентом
+          // и Python-сервером. Без этого сервер уходит в свой env-дефолт (5) —
+          // даже если у нас WHISPER_BEAM_SIZE=1, live-прогон шёл на beam=5.
+          beam_size: this.config.beamSize,
         }),
         signal: controller.signal,
       });
@@ -342,14 +355,33 @@ export class WhisperService {
         console.log(`[whisper] Chunked transcription: ${data.chunks} chunks, ${data.elapsed?.toFixed(1)}s total`);
         if (data.chunk_details) {
           for (const c of data.chunk_details) {
-            console.log(`  chunk ${c.chunk}: ${c.duration}s → ${c.chars} chars (${c.elapsed}s) logprob=${c.avg_logprob ?? 'n/a'}`);
+            const flags = c.suspicious?.length ? ` [${c.suspicious.join(',')}]` : '';
+            const fb = c.fallback_used ? ' [fallback→beam' + (c.selected_beam ?? '?') + ']' : '';
+            console.log(`  chunk ${c.chunk}: ${c.duration}s → ${c.chars} chars (${c.elapsed}s) logprob=${c.avg_logprob ?? 'n/a'}${flags}${fb}`);
           }
         }
       }
       if (typeof data.avg_logprob === 'number') {
         console.log(`[whisper] avg_logprob=${data.avg_logprob.toFixed(2)}${data.low_confidence ? ' [LOW CONFIDENCE — возможны галлюцинации]' : ''}`);
       }
-      return { text: data.text, language: data.language };
+
+      // Собираем warnings из chunk_details — только для flagged чанков
+      // (suspicious.length > 0). Клиент использует для UX-бейджей/подсветки.
+      const warnings = (data.chunk_details ?? [])
+        .filter((c) => c.suspicious && c.suspicious.length > 0)
+        .map((c) => ({
+          chunk: c.chunk,
+          reasons: c.suspicious ?? [],
+          avgLogprob: typeof c.avg_logprob === 'number' ? c.avg_logprob : 0,
+          fallbackUsed: Boolean(c.fallback_used),
+          selectedBeam: typeof c.selected_beam === 'number' ? c.selected_beam : 0,
+        }));
+
+      return {
+        text: data.text,
+        language: data.language,
+        ...(warnings.length > 0 ? { warnings } : {}),
+      };
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
         throw new Error('Whisper server request timeout');

@@ -29,10 +29,22 @@ export interface MedicalDocument {
   recommendations: string;      // План лечения (включая диету пунктом списка)
 }
 
+export interface TranscriptionWarning {
+  chunk: number;         // 1-indexed
+  reasons: string[];     // ['bp_without_format', 'garbage_unit_tokens', …]
+  avgLogprob: number;
+  fallbackUsed: boolean; // был ли применён beam-retry
+  selectedBeam: number;  // финальный beam у этого чанка
+}
+
 export interface TranscriptionResult {
   text: string;
   duration: number;
   language: string;
+  // Если хоть один чанк flagged — клиент может показать UX-warning. Пусто =
+  // всё ок. Дефолтом undefined для обратной совместимости с whisper.cpp и
+  // faster-whisper subprocess путями (они этих данных не знают).
+  warnings?: TranscriptionWarning[];
 }
 
 export interface StructureResult {
@@ -46,6 +58,9 @@ export interface WhisperConfig {
   language: string;
   device: 'cuda' | 'cpu';
   serverUrl?: string; // Если задан — используется persistent HTTP whisper-сервер
+  beamSize: number;   // Передаётся в payload; 1 = greedy, 5 = beam search.
+                      // Фиксирует конфигурацию между клиентом и сервером —
+                      // без этого Python-сервер уходит в свой env-дефолт.
 }
 
 export type LLMProviderKind = 'llama' | 'anthropic';
@@ -98,6 +113,7 @@ export const defaultConfig: ServerConfig = {
     modelPath: './models/whisper-large-v3',
     language: 'ru',
     device: 'cuda',
+    beamSize: 1,
   },
   llm: {
     provider: 'llama',

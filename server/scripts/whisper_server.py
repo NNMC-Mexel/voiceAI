@@ -17,7 +17,10 @@
   WHISPER_CHUNK_TARGET     Целевая длина куска в секундах          (default: 30)
   WHISPER_FALLBACK_BEAM_SIZE     Beam на ретраях подозрительных чанков (default: 5)
   WHISPER_SUSPICIOUS_LOGPROB     Порог low-confidence для ретрая       (default: -0.95)
-  WHISPER_MAX_FALLBACK_CHUNKS    Макс. число ретраев на один запрос    (default: 2)
+  WHISPER_MAX_FALLBACK_CHUNKS    Макс. число ретраев на один запрос    (default: 0 — off)
+  # Эмпирически beam=5 не выигрывает у beam=1 на Whisper-артефактах единиц:
+  # ошибки типа «165/100 → 165 сотых миллиметра» живут на acoustic-уровне.
+  # Оставляем детекцию (suspicious/reasons), но ретрай выключен по-умолчанию.
 
 Endpoints:
   GET  /health      → {"status":"ok","model":"...","device":"..."}
@@ -60,7 +63,7 @@ CHUNK_TARGET    = int(os.environ.get("WHISPER_CHUNK_TARGET", "30"))
 # (чтобы «красивая речь» не обыгрывала текст с правильным X/Y АД и КОЕ/мл).
 FALLBACK_BEAM_SIZE  = int(os.environ.get("WHISPER_FALLBACK_BEAM_SIZE", "5"))
 SUSPICIOUS_LOGPROB  = float(os.environ.get("WHISPER_SUSPICIOUS_LOGPROB", "-0.95"))
-MAX_FALLBACK_CHUNKS = int(os.environ.get("WHISPER_MAX_FALLBACK_CHUNKS", "2"))
+MAX_FALLBACK_CHUNKS = int(os.environ.get("WHISPER_MAX_FALLBACK_CHUNKS", "0"))
 INITIAL_PROMPT  = os.environ.get(
     "WHISPER_INITIAL_PROMPT",
     "Пациент. Жалобы. Анамнез. Диагноз. Рекомендации. Объективно. АД мм рт.ст. ЧСС уд/мин. "

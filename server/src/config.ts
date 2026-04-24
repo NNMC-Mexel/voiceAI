@@ -61,6 +61,7 @@ export function loadConfig(): ServerConfig {
       language: process.env.WHISPER_LANGUAGE || defaultConfig.whisper.language,
       device: (process.env.WHISPER_DEVICE as 'cuda' | 'cpu') || defaultConfig.whisper.device,
       serverUrl: process.env.WHISPER_SERVER_URL?.trim() || undefined,
+      beamSize: parseIntSafe(process.env.WHISPER_BEAM_SIZE, defaultConfig.whisper.beamSize),
     },
     llm: {
       provider: resolveLlmProvider(),
