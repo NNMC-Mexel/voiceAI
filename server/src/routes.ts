@@ -59,6 +59,110 @@ export function resolveUploadPath(uploadDir: string, filename: string): string {
   return candidate;
 }
 
+// Заголовки разделов, которые LLM/Whisper иногда оставляют как «контент» поля
+// (например `complaints = "Жалобы"`). Такие фрагменты должны считаться пустыми
+// при оценке полезности документа: иначе фронт получает success:true с
+// псевдо-заполненным протоколом.
+const SECTION_HEADER_RE =
+  /^(?:жалобы|анамнез(?:\s+(?:заболевани[а-яёА-ЯЁ\w]*|жизни))?|объективн[а-яёА-ЯЁ\w]*\s+статус|объективно|перенесённые\s+заболевани[а-яёА-ЯЁ\w]*|аллерголог[а-яёА-ЯЁ\w]*\s+анамнез|неврологическ[а-яёА-ЯЁ\w]*\s+статус|диагноз(?:\s+(?:предварительн[а-яёА-ЯЁ\w]*|заключительн[а-яёА-ЯЁ\w]*|основн[а-яёА-ЯЁ\w]*))?|план(?:\s+(?:обследовани[а-яёА-ЯЁ\w]*|лечени[а-яёА-ЯЁ\w]*))?|рекомендации|рекомендация|заключение|сопутствующ[а-яёА-ЯЁ\w]*\s+диагноз|амбулаторн[а-яёА-ЯЁ\w]*\s+терапи[а-яёА-ЯЁ\w]*|анамнез|данные|статус)\.?$/iu;
+
+function stripSectionHeaders(s: string): string {
+  if (!s || !s.trim()) return '';
+  return s
+    .split(/[.!?\n]+/u)
+    .map((f) => f.trim())
+    .filter((f) => f && !SECTION_HEADER_RE.test(f))
+    .join('. ')
+    .trim();
+}
+
+// Поле считается «содержательным», если после удаления одиночных заголовков
+// остаётся хотя бы 10 символов И ≥2 слов (≥3 букв каждое). Это режет случаи
+// «Диагноз: АГ» (длина после strip 4) и «Жалобы» (после strip 0).
+export function isFieldMeaningful(s: string): boolean {
+  const stripped = stripSectionHeaders(s);
+  if (stripped.length < 10) return false;
+  const words = stripped.match(/[а-яёА-ЯЁa-zA-Z]{3,}/gu) || [];
+  return words.length >= 2;
+}
+
+export type DocumentUsefulness = {
+  status: 'ok' | 'labs_only' | 'empty';
+  emptyFields: string[];
+  placeholderFields: string[];
+  meaningfulFields: string[];
+  reason?: string;
+};
+
+const NON_EXAMS_CLINICAL_FIELDS = [
+  'complaints',
+  'anamnesis',
+  'clinicalCourse',
+  'allergyHistory',
+  'objectiveStatus',
+  'neurologicalStatus',
+  'diagnosis',
+  'finalDiagnosis',
+  'conclusion',
+  'doctorNotes',
+  'recommendations',
+] as const;
+
+/**
+ * Оценивает «полезность» структурированного документа. Не учитывает patient —
+ * один заполненный fullName не должен спасать документ без клинического
+ * контента.
+ *
+ *   ok          — есть ≥1 содержательное клиническое поле (не лаборатория).
+ *   labs_only   — содержательно только outpatientExams (валидный частичный
+ *                 документ, но фронт должен показать баннер «только анализы»).
+ *   empty       — ни одного содержательного поля; placeholder-заголовки и/или
+ *                 одиночное ФИО не считаются.
+ */
+export function assessDocumentUsefulness(doc: MedicalDocument): DocumentUsefulness {
+  const empty: string[] = [];
+  const placeholder: string[] = [];
+  const meaningful: string[] = [];
+
+  for (const f of [...NON_EXAMS_CLINICAL_FIELDS, 'outpatientExams'] as const) {
+    const v = doc[f];
+    if (!v || !v.trim()) {
+      empty.push(f);
+    } else if (!isFieldMeaningful(v)) {
+      placeholder.push(f);
+    } else {
+      meaningful.push(f);
+    }
+  }
+
+  const meaningfulNonExams = meaningful.filter((f) => f !== 'outpatientExams');
+  const examsMeaningful = meaningful.includes('outpatientExams');
+
+  if (meaningfulNonExams.length === 0 && !examsMeaningful) {
+    return {
+      status: 'empty',
+      emptyFields: empty,
+      placeholderFields: placeholder,
+      meaningfulFields: [],
+      reason: 'document_appears_empty',
+    };
+  }
+  if (meaningfulNonExams.length === 0 && examsMeaningful) {
+    return {
+      status: 'labs_only',
+      emptyFields: empty,
+      placeholderFields: placeholder,
+      meaningfulFields: meaningful,
+    };
+  }
+  return {
+    status: 'ok',
+    emptyFields: empty,
+    placeholderFields: placeholder,
+    meaningfulFields: meaningful,
+  };
+}
+
 export function isValidMedicalDocument(doc: unknown): doc is MedicalDocument {
   if (!isRecord(doc)) return false;
   if (!isRecord(doc.patient)) return false;
@@ -365,9 +469,27 @@ export async function registerRoutes(
           console.warn('[structure-log] failed:', logErr);
         }
       }
+
+      // Жёсткая проверка «полезности» — не отдаём success:true на пустой документ.
+      const usefulness = assessDocumentUsefulness(result.document);
+      if (usefulness.status === 'empty') {
+        request.log.warn(
+          { emptyFields: usefulness.emptyFields, placeholderFields: usefulness.placeholderFields },
+          'structure: document_appears_empty',
+        );
+        return reply.status(422).send({
+          success: false,
+          error: 'document_appears_empty',
+          reason: usefulness.reason,
+          emptyFields: usefulness.emptyFields,
+          placeholderFields: usefulness.placeholderFields,
+        });
+      }
+
       return {
         success: true,
         ...result,
+        ...(usefulness.status === 'labs_only' ? { warnings: ['document_labs_only'] } : {}),
       };
     } catch (error) {
       console.error('Structuring error:', error);
@@ -601,6 +723,31 @@ export async function registerRoutes(
         // Ignore cleanup errors
       }
 
+      // Жёсткая проверка «полезности» — синхронно с /api/structure.
+      const usefulness = assessDocumentUsefulness(structured.document);
+      if (usefulness.status === 'empty') {
+        request.log.warn(
+          {
+            emptyFields: usefulness.emptyFields,
+            placeholderFields: usefulness.placeholderFields,
+            transcriptionChars: transcription.text.length,
+          },
+          'process: document_appears_empty',
+        );
+        return reply.status(422).send({
+          success: false,
+          error: 'document_appears_empty',
+          reason: usefulness.reason,
+          emptyFields: usefulness.emptyFields,
+          placeholderFields: usefulness.placeholderFields,
+          transcription: {
+            text: transcription.text,
+            duration: transcription.duration,
+            language: transcription.language,
+          },
+        });
+      }
+
       return {
         success: true,
         transcription: {
@@ -610,6 +757,7 @@ export async function registerRoutes(
         },
         document: structured.document,
         processingTime: transcription.duration + structured.processingTime,
+        ...(usefulness.status === 'labs_only' ? { warnings: ['document_labs_only'] } : {}),
       };
     } catch (error) {
       console.error('Processing error:', error);
