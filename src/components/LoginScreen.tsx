@@ -33,8 +33,8 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-6">
-      <div className="w-full max-w-sm">
+    <div className="min-h-screen flex items-center justify-center px-4 py-6 sm:p-6">
+      <div className="w-full max-w-sm mx-auto box-border">
         <div className="text-center mb-8 slide-up">
           <div className="inline-flex items-center justify-center w-16 h-16 bg-medical-100 rounded-full mb-4">
             <Lock className="w-8 h-8 text-medical-600" />
@@ -43,14 +43,18 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
           <p className="text-text-secondary">Введите пароль для входа</p>
         </div>
 
-        <form onSubmit={handleSubmit} className="glass-card rounded-2xl p-6 slide-up" style={{ animationDelay: '0.1s' }}>
+        <form
+          onSubmit={handleSubmit}
+          className="glass-card rounded-2xl p-5 sm:p-6 slide-up box-border w-full"
+          style={{ animationDelay: '0.1s' }}
+        >
           <input
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder="Пароль"
             autoFocus
-            className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-white text-medical-900 placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-medical-400 focus:border-transparent mb-4"
+            className="block w-full box-border px-4 py-3 rounded-xl border border-slate-200 bg-white text-medical-900 placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-medical-400 focus:border-transparent mb-4"
           />
 
           {error && (

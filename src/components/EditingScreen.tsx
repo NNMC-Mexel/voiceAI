@@ -746,10 +746,11 @@ export function EditingScreen({
   ]);
 
   return (
-    <div className="min-h-screen py-6 px-4">
+    <div className="min-h-screen py-4 px-3 sm:py-6 sm:px-4">
       <div className="max-w-[1600px] mx-auto">
-        <div className="flex items-center justify-between mb-8 slide-up">
-          <div>
+        {/* Header — стек на мобильном, side-by-side от sm */}
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between mb-6 sm:mb-8 slide-up">
+          <div className="min-w-0">
             <button
               onClick={() => {
                 if (window.confirm('Все несохранённые изменения будут потеряны. Продолжить?')) {
@@ -761,11 +762,18 @@ export function EditingScreen({
               <ArrowLeft className="w-4 h-4" />
               <span className="text-sm">Назад к записи</span>
             </button>
-            <h1 className="text-3xl font-display font-bold text-medical-900">Редактирование протокола</h1>
-            <p className="text-text-secondary mt-1">Проверьте и отредактируйте распознанные данные</p>
+            <h1 className="text-2xl sm:text-3xl font-display font-bold text-medical-900">
+              Редактирование протокола
+            </h1>
+            <p className="text-text-secondary mt-1 text-sm sm:text-base">
+              Проверьте и отредактируйте распознанные данные
+            </p>
           </div>
 
-          <button onClick={onPreview} className="btn-primary flex items-center gap-2">
+          <button
+            onClick={onPreview}
+            className="btn-primary flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap"
+          >
             <Eye className="w-5 h-5" />
             Предпросмотр PDF
           </button>
@@ -872,20 +880,23 @@ export function EditingScreen({
 
           <div className="space-y-6">
             <div className="mb-6 slide-up" style={{ animationDelay: '0.08s' }}>
-              <div className="glass-card rounded-2xl p-6">
-                <div className="flex items-center justify-between gap-4">
-                  <div>
+              <div className="glass-card rounded-2xl p-4 sm:p-6">
+                {/* Стек на мобильном: текст сверху, кнопка снизу на всю ширину */}
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+                  <div className="min-w-0">
                     <div className="inline-flex items-center gap-2 px-3 py-1 bg-medical-100 text-medical-700 rounded-full text-xs font-medium mb-2">
                       <PlusCircle className="w-4 h-4" />
                       Дополнение
                     </div>
-                    <h2 className="text-lg font-semibold text-medical-900">Если забыли важную информацию — добавьте голосом</h2>
+                    <h2 className="text-base sm:text-lg font-semibold text-medical-900">
+                      Если забыли важную информацию — добавьте голосом
+                    </h2>
                     <p className="text-text-secondary text-sm mt-1">Дополнение будет расшифровано и встроено в текущий документ.</p>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 sm:shrink-0">
                     <button
                       onClick={() => setIsAddendumOpen((v) => !v)}
-                      className="btn-secondary flex items-center gap-2"
+                      className="btn-secondary flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap"
                     >
                       <Mic className="w-4 h-4" />
                       {isAddendumOpen ? 'Скрыть' : 'Записать дополнение'}

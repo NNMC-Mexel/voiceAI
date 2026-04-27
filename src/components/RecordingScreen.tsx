@@ -159,18 +159,22 @@ export function RecordingScreen({ onRecordingComplete, error: externalError }: R
   const progress = (currentSeconds / MAX_DURATION_SECONDS) * 100;
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-6">
+    <div className="min-h-screen flex items-center justify-center px-4 py-6 sm:p-6">
       <div className="w-full max-w-2xl">
-        <div className="text-center mb-12 slide-up">
+        <div className="text-center mb-8 sm:mb-12 slide-up">
           <div className="inline-flex items-center gap-2 px-4 py-2 bg-medical-100 text-medical-700 rounded-full text-sm font-medium mb-6">
             <Mic className="w-4 h-4" />
             Голосовой ввод
           </div>
-          <h1 className="text-4xl font-display font-bold text-medical-900 mb-3">Запись медицинского протокола</h1>
-          <p className="text-text-secondary text-lg">Надиктуйте информацию о пациенте, жалобах и диагнозе</p>
+          <h1 className="text-2xl sm:text-3xl md:text-4xl font-display font-bold text-medical-900 mb-3">
+            Запись медицинского протокола
+          </h1>
+          <p className="text-text-secondary text-base sm:text-lg">
+            Надиктуйте информацию о пациенте, жалобах и диагнозе
+          </p>
         </div>
 
-        <div className="glass-card rounded-3xl p-8 slide-up" style={{ animationDelay: '0.1s' }}>
+        <div className="glass-card rounded-2xl sm:rounded-3xl p-5 sm:p-8 slide-up" style={{ animationDelay: '0.1s' }}>
           {hasPermission === false && (
             <div className="flex items-center gap-3 p-4 bg-red-50 border border-red-200 rounded-xl mb-6">
               <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
@@ -223,13 +227,14 @@ export function RecordingScreen({ onRecordingComplete, error: externalError }: R
             </div>
           </div>
 
-          <div className="flex items-center justify-center gap-4">
+          {/* Кнопки: на мобильном — wrap + flex-1 чтобы не вылезали; от sm — обычный inline-row */}
+          <div className="flex flex-wrap items-stretch justify-center gap-3 sm:gap-4">
             {!isRecording && !audioBlob && (
               <>
                 <button
                   onClick={handleStart}
                   disabled={hasPermission === false}
-                  className="btn-primary flex items-center gap-3 text-lg px-8 py-4 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="btn-primary flex items-center justify-center gap-3 text-base sm:text-lg px-5 sm:px-8 py-3 sm:py-4 flex-1 sm:flex-initial whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Mic className="w-6 h-6" />
                   Начать запись
@@ -243,7 +248,7 @@ export function RecordingScreen({ onRecordingComplete, error: externalError }: R
                 />
                 <button
                   onClick={() => fileInputRef.current?.click()}
-                  className="btn-secondary flex items-center gap-2 text-sm"
+                  className="btn-secondary flex items-center justify-center gap-2 text-sm flex-1 sm:flex-initial whitespace-nowrap"
                 >
                   <Upload className="w-4 h-4" />
                   Загрузить файл
@@ -253,7 +258,10 @@ export function RecordingScreen({ onRecordingComplete, error: externalError }: R
 
             {isRecording && (
               <>
-                <button onClick={isPaused ? resumeRecording : pauseRecording} className="btn-secondary flex items-center gap-2">
+                <button
+                  onClick={isPaused ? resumeRecording : pauseRecording}
+                  className="btn-secondary flex items-center justify-center gap-2 flex-1 sm:flex-initial whitespace-nowrap"
+                >
                   {isPaused ? (
                     <>
                       <Play className="w-5 h-5" />
@@ -269,7 +277,7 @@ export function RecordingScreen({ onRecordingComplete, error: externalError }: R
 
                 <button
                   onClick={() => stopRecording()}
-                  className="btn-primary flex items-center gap-2 bg-gradient-to-r from-red-500 to-red-600 shadow-red-500/30 hover:shadow-red-500/40 hover:from-red-600 hover:to-red-700"
+                  className="btn-primary flex items-center justify-center gap-2 flex-1 sm:flex-initial whitespace-nowrap bg-gradient-to-r from-red-500 to-red-600 shadow-red-500/30 hover:shadow-red-500/40 hover:from-red-600 hover:to-red-700"
                 >
                   <Square className="w-5 h-5" />
                   Завершить
@@ -279,12 +287,18 @@ export function RecordingScreen({ onRecordingComplete, error: externalError }: R
 
             {!isRecording && audioBlob && (
               <>
-                <button onClick={resetRecording} className="btn-secondary flex items-center gap-2">
+                <button
+                  onClick={resetRecording}
+                  className="btn-secondary flex items-center justify-center gap-2 flex-1 sm:flex-initial whitespace-nowrap"
+                >
                   <RotateCcw className="w-5 h-5" />
                   Записать заново
                 </button>
 
-                <button onClick={handleSubmit} className="btn-primary flex items-center gap-2 text-lg px-8 py-4">
+                <button
+                  onClick={handleSubmit}
+                  className="btn-primary flex items-center justify-center gap-2 text-base sm:text-lg px-5 sm:px-8 py-3 sm:py-4 flex-1 sm:flex-initial whitespace-nowrap"
+                >
                   <CheckCircle className="w-6 h-6" />
                   Продолжить
                 </button>
@@ -293,7 +307,7 @@ export function RecordingScreen({ onRecordingComplete, error: externalError }: R
           </div>
         </div>
 
-        <div className="mt-8 grid grid-cols-1 md:grid-cols-3 gap-4 slide-up" style={{ animationDelay: '0.2s' }}>
+        <div className="mt-6 sm:mt-8 grid grid-cols-1 md:grid-cols-3 gap-4 slide-up" style={{ animationDelay: '0.2s' }}>
           {[
             {
               icon: '🎙️',
