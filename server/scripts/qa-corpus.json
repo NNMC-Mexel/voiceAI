@@ -1,0 +1,157 @@
+{
+  "version": 1,
+  "audioRootEnv": "QA_AUDIO_DIR",
+  "audioRootDefault": "%USERPROFILE%\\OneDrive\\Рабочий стол\\аудио",
+  "defaults": {
+    "profile": "full_case",
+    "minMeaningfulFields": 4,
+    "minInputCoveragePct": 35,
+    "minSourceRecallPct": 55,
+    "requiredMeaningfulFields": [
+      "complaints",
+      "anamnesis",
+      "diagnosis"
+    ]
+  },
+  "cases": [
+    {
+      "id": "cardio",
+      "title": "Cardiology full case",
+      "rawTextPath": "server/temp/_real_whisper/cardio_whisper.txt",
+      "sourceTextPath": "audio/therapist_doctor_style_2026-01-19.txt",
+      "requiredMeaningfulFields": [
+        "complaints",
+        "anamnesis",
+        "objectiveStatus",
+        "diagnosis",
+        "recommendations"
+      ]
+    },
+    {
+      "id": "dyusenov",
+      "title": "Dyusenov doctor-style full case",
+      "rawTextPath": "server/temp/_real_whisper/dyusenov_whisper.txt",
+      "sourceTextPath": "audio/dictation_dyusenov_2026-04-06_doctor_style.txt",
+      "requiredMeaningfulFields": [
+        "complaints",
+        "anamnesis",
+        "diagnosis",
+        "recommendations"
+      ]
+    },
+    {
+      "id": "endo",
+      "title": "Endocrinology full case",
+      "rawTextPath": "server/temp/_real_whisper/endo_whisper.txt"
+    },
+    {
+      "id": "eszhanov",
+      "title": "Eszhanov full case",
+      "rawTextPath": "server/temp/_real_whisper/eszhanov_whisper.txt",
+      "sourceTextPath": "audio/dictation_eszhanov_2026-04-02.txt"
+    },
+    {
+      "id": "kstalasova",
+      "title": "Kstalasova full case",
+      "rawTextPath": "server/temp/_real_whisper/kstalasova_whisper.txt",
+      "sourceTextPath": "audio/dictation_kstalasova_2026-04-13_v2.txt",
+      "audioFile": "ии аудио Ксталасова 13-04-2026.mp3"
+    },
+    {
+      "id": "labs_only",
+      "title": "Laboratory-only dictation",
+      "profile": "labs_only",
+      "rawTextPath": "server/temp/_real_whisper/labs_only_whisper.txt",
+      "minMeaningfulFields": 1,
+      "requiredMeaningfulFields": [
+        "outpatientExams"
+      ],
+      "minInputCoveragePct": 20
+    },
+    {
+      "id": "cardiology_2025_10_21",
+      "title": "Cardiology source-text case",
+      "sourceTextPath": "audio/dictation_cardiology_case_2025-10-21.txt",
+      "requiredMeaningfulFields": [
+        "anamnesis",
+        "diagnosis",
+        "recommendations"
+      ]
+    },
+    {
+      "id": "aliev",
+      "title": "Aliev source-text case",
+      "sourceTextPath": "audio/dictation_aliev_2026-04-01.txt",
+      "audioFile": "ии аудио Алиев 01-04-2026.mp3"
+    },
+    {
+      "id": "kappaeva",
+      "title": "Kappaeva source-text case",
+      "sourceTextPath": "audio/dictation_kappaeva_2026-04-07.txt",
+      "audioFile": "ии аудио Каппаева 07-04-2026.mp3"
+    },
+    {
+      "id": "kstalasova_source_v1",
+      "title": "Kstalasova source-text v1",
+      "sourceTextPath": "audio/dictation_kstalasova_2026-04-13.txt",
+      "audioFile": "ии аудио Ксталасова 13-04-2026.mp3"
+    },
+    {
+      "id": "therapist_2026_03_16",
+      "title": "Therapist source-text case",
+      "sourceTextPath": "audio/therapist_dictation_2026-03-16.txt"
+    },
+    {
+      "id": "analizy_doctor_source",
+      "title": "Laboratory source-text dictation",
+      "profile": "labs_only",
+      "sourceTextPath": "audio/analizy_doctor_2026-03-11.txt",
+      "audioPath": "audio/analizy_doctor_2026-03-11.mp3",
+      "minMeaningfulFields": 1,
+      "requiredMeaningfulFields": [
+        "outpatientExams"
+      ],
+      "minInputCoveragePct": 20
+    },
+    {
+      "id": "analizy_expanded",
+      "title": "Expanded laboratory dictation",
+      "profile": "labs_only",
+      "sourceTextPath": "audio/analizy_expanded_slow_2026-03-11.txt",
+      "minMeaningfulFields": 1,
+      "requiredMeaningfulFields": [
+        "outpatientExams"
+      ],
+      "minInputCoveragePct": 20
+    },
+    {
+      "id": "analizy_no_intro",
+      "title": "Laboratory dictation without intro",
+      "profile": "labs_only",
+      "sourceTextPath": "audio/analizy_no_intro_2026-03-11.txt",
+      "minMeaningfulFields": 1,
+      "requiredMeaningfulFields": [
+        "outpatientExams"
+      ],
+      "minInputCoveragePct": 20
+    },
+    {
+      "id": "nurgalieva_audio",
+      "title": "Nurgalieva audio-only full case",
+      "audioFile": "nurgalieva_full_case_2026-04-23.mp3",
+      "enabledByDefault": false
+    },
+    {
+      "id": "webm_2026_04_09",
+      "title": "External webm audio-only case",
+      "audioFile": "Аудио_2026-04-09.webm",
+      "enabledByDefault": false
+    },
+    {
+      "id": "therapist_audio_2026_04_13",
+      "title": "Therapist external audio-only case",
+      "audioFile": "ии аудио врач терапевт 13-04-2026.mp3",
+      "enabledByDefault": false
+    }
+  ]
+}

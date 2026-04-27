@@ -8,6 +8,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
+    "qa:regression": "node scripts/qa-regression.cjs",
     "test": "tsx --test src/*.test.ts"
   },
   "keywords": [
