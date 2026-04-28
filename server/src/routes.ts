@@ -13,7 +13,8 @@ import {
   addUserCorrection,
   deleteUserCorrection,
 } from './services/medical-dictionary.js';
-import type { ServerConfig, MedicalDocument } from './types.js';
+import type { UserCorrectionScope } from './services/medical-dictionary.js';
+import type { ServerConfig, MedicalDocument, QualityWarning } from './types.js';
 
 interface RateState {
   count: number;
@@ -39,6 +40,12 @@ type RewriteableField = (typeof rewriteableFields)[number];
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null;
+}
+
+function normalizeCorrectionScope(scope: string | undefined): UserCorrectionScope {
+  return scope === 'medications' || scope === 'exams' || scope === 'neurological'
+    ? scope
+    : 'global';
 }
 
 export function toSafeUploadFilename(originalName: string): string {
@@ -107,6 +114,225 @@ const NON_EXAMS_CLINICAL_FIELDS = [
   'doctorNotes',
   'recommendations',
 ] as const;
+
+const SUSPICIOUS_UNIT_GARBAGE_RE =
+  /(?:СЛЧЭЛЬ|СЛЦАЛЬ|ЛЩЕ|ММС\s+ЛЩЕ|ГЭСЛЧЭЛЬ|ГЕСЛШЕЛЬ|КОЭСЛЧ|МОЛЬСЛЧ|МГСЛЧЭЛЬ)/iu;
+
+function documentClinicalText(doc: MedicalDocument): string {
+  return [
+    doc.patient.fullName,
+    doc.patient.age,
+    doc.patient.gender,
+    doc.patient.complaintDate,
+    doc.complaints,
+    doc.anamnesis,
+    doc.outpatientExams,
+    doc.clinicalCourse,
+    doc.allergyHistory,
+    doc.objectiveStatus,
+    doc.neurologicalStatus,
+    doc.diagnosis,
+    doc.finalDiagnosis,
+    doc.conclusion,
+    doc.doctorNotes,
+    doc.recommendations,
+    doc.manualCheck || '',
+  ].join('\n');
+}
+
+export function collectDocumentQualityWarnings(
+  rawText: string,
+  doc: MedicalDocument,
+  usefulness: DocumentUsefulness,
+): string[] {
+  return [...new Set(collectDocumentQualityWarningDetails(rawText, doc, usefulness)
+    .map((warning) => warning.code === 'important_number_missing'
+      ? `important_number_missing:${warning.evidence || 'value'}`
+      : warning.code))];
+}
+
+export function collectDocumentQualityWarningDetails(
+  rawText: string,
+  doc: MedicalDocument,
+  usefulness: DocumentUsefulness,
+): QualityWarning[] {
+  const warnings: QualityWarning[] = [];
+  const seen = new Set<string>();
+  const add = (warning: QualityWarning) => {
+    const key = `${warning.code}:${warning.field || ''}:${warning.evidence || ''}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    warnings.push(warning);
+  };
+  const docText = documentClinicalText(doc);
+
+  if (usefulness.status === 'labs_only') {
+    add({
+      code: 'document_labs_only',
+      severity: 'warning',
+      field: 'outpatientExams',
+      message: 'В документе распознаны в основном обследования, клинические разделы почти пустые.',
+    });
+  }
+
+  if (usefulness.status === 'ok') {
+    const meaningfulNonExams = usefulness.meaningfulFields.filter((f) => f !== 'outpatientExams');
+    if (meaningfulNonExams.length < 3) {
+      add({
+        code: 'suspiciously_few_clinical_fields',
+        severity: 'warning',
+        field: 'document',
+        message: 'Заполнено мало клинических разделов; проверьте, не потерялись ли жалобы, анамнез или диагноз.',
+      });
+    }
+  }
+
+  if (SUSPICIOUS_UNIT_GARBAGE_RE.test(docText)) {
+    add({
+      code: 'suspicious_unit_garbage_in_document',
+      severity: 'warning',
+      field: 'document',
+      message: 'В документе остались подозрительные единицы измерения после распознавания.',
+    });
+  }
+
+  const rawBpValues = rawText.match(/\b\d{2,3}\s*\/\s*\d{2,3}\b/gu) || [];
+  for (const value of rawBpValues) {
+    const normalized = value.replace(/\s+/g, '');
+    if (!docText.replace(/\s+/g, '').includes(normalized)) {
+      add({
+        code: 'important_number_missing',
+        severity: 'critical',
+        field: 'document',
+        message: `В raw есть значение АД ${normalized}, но оно не найдено в итоговых полях.`,
+        evidence: `bp_${normalized}`,
+      });
+    }
+  }
+
+  collectAdvancedQualityWarnings(rawText, doc, add);
+
+  return warnings;
+}
+
+function normalizeForCoverage(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[^a-zа-я0-9\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function collectAdvancedQualityWarnings(
+  rawText: string,
+  doc: MedicalDocument,
+  add: (warning: QualityWarning) => void,
+): void {
+  const rawNorm = normalizeForCoverage(rawText);
+  const docText = documentClinicalText(doc);
+
+  const rawLabish = /(?:оак|оам|биохим|анализ|гемоглобин|креатинин|глюкоз|холестерин|лпнп|лпвп|триглицерид|лейкоцит|эритроцит|тромбоцит|соэ|hba1c|гликирован)/iu.test(rawText);
+  if (rawLabish) {
+    const values = rawText.match(/\d+(?:[,.]\d+)?/gu) || [];
+    for (const value of values) {
+      const compact = value.replace(',', '.');
+      if (/^\d{1,2}$/.test(compact)) continue;
+      if (/^(?:19|20)\d{2}$/.test(compact)) continue;
+      const docHas = docText.includes(value) || docText.includes(value.replace(',', '.')) || docText.includes(value.replace('.', ','));
+      if (!docHas) {
+        add({
+          code: 'possibleLostLabValue',
+          severity: 'warning',
+          field: 'outpatientExams',
+          message: `В raw есть лабораторное число ${value}, но оно не найдено в итоговых обследованиях.`,
+          evidence: value,
+        });
+      }
+    }
+  }
+
+  const examLines = (doc.outpatientExams || '').split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  for (const line of examLines) {
+    const label = line.match(/(?:^|\s)(КТ|МРТ|МСКТ|ЭКГ|ЭхоКГ|УЗИ|УЗДГ|Холтер|СМАД)(?:\s|$)/iu)?.[1];
+    if (!label) continue;
+    const labelRe = new RegExp(`(^|[^а-яёa-z])${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^а-яёa-z])`, 'iu');
+    if (!labelRe.test(rawText)) {
+      add({
+        code: 'suspiciousExamRescue',
+        severity: 'warning',
+        field: 'outpatientExams',
+        message: `В итоговых обследованиях есть ${label}, но в raw нет такого отдельного маркера.`,
+        evidence: line.slice(0, 160),
+      });
+    }
+  }
+
+  const lifeHistoryInRecommendations = (doc.recommendations || '')
+    .split(/\n+/)
+    .find((line) => /(?:алкогол[а-яё]*\s+употреб|наследственност|туберкул|операци|травм|профессиональн[а-яё]*\s+вредност|физическ[а-яё]*\s+активность\s+низк|курит\s+\d)/iu.test(line));
+  if (lifeHistoryInRecommendations) {
+    add({
+      code: 'sectionRoutingIssue',
+      severity: 'warning',
+      field: 'recommendations',
+      message: 'В рекомендациях обнаружена фраза, похожая на анамнез жизни.',
+      evidence: lifeHistoryInRecommendations.slice(0, 160),
+    });
+  }
+
+  const conclusionLifeTail = (doc.conclusion || '')
+    .split(/\n+/)
+    .find((line) => /(?:туберкул|вирусн[а-яё]*\s+гепатит|вич|операци|травм|наследственност|алкогол|курение|профессиональн[а-яё]*\s+вредност)/iu.test(line));
+  if (conclusionLifeTail) {
+    add({
+      code: 'sectionRoutingIssue',
+      severity: 'warning',
+      field: 'conclusion',
+      message: 'В амбулаторной терапии обнаружена фраза, похожая на анамнез жизни.',
+      evidence: conclusionLifeTail.slice(0, 160),
+    });
+  }
+
+  for (const field of ['conclusion', 'recommendations'] as const) {
+    const line = (doc[field] || '')
+      .split(/\n+/)
+      .find((item) => (item.match(/\d+(?:[,.]\d+)?\s*(?:мг|мкг|г|мл)/giu) || []).length >= 2);
+    if (line) {
+      add({
+        code: 'drugListMayBeMerged',
+        severity: 'warning',
+        field,
+        message: 'Пункт содержит несколько дозировок; возможно, несколько препаратов склеились в один пункт.',
+        evidence: line.slice(0, 180),
+      });
+    }
+  }
+
+  const docSentences = docText
+    .split(/(?<=[.!?])\s+|\n+/u)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 35);
+  for (const sentence of docSentences) {
+    if (!/(?:кт|мрт|мскт|тредмил|коронар|ацетилсалицил|нитроглицерин|эмпаглифлозин|розувастатин|диагноз|стенокард|инфаркт)/iu.test(sentence)) {
+      continue;
+    }
+    const ns = normalizeForCoverage(sentence);
+    if (!ns || rawNorm.includes(ns.slice(0, Math.min(35, ns.length)))) continue;
+    const words = ns.split(/\s+/).filter((w) => w.length >= 5);
+    const overlap = words.filter((w) => rawNorm.includes(w)).length;
+    if (words.length >= 4 && overlap / words.length < 0.45) {
+      add({
+        code: 'possibleAddedFact',
+        severity: 'warning',
+        field: 'document',
+        message: 'Итоговый документ содержит медицинский факт, который плохо подтверждается raw-текстом.',
+        evidence: sentence.slice(0, 180),
+      });
+      break;
+    }
+  }
+}
 
 /**
  * Оценивает «полезность» структурированного документа. Не учитывает patient —
@@ -486,10 +712,15 @@ export async function registerRoutes(
         });
       }
 
+      const qualityWarnings = collectDocumentQualityWarningDetails(text, result.document, usefulness);
+
       return {
         success: true,
         ...result,
-        ...(usefulness.status === 'labs_only' ? { warnings: ['document_labs_only'] } : {}),
+        warnings: [...new Set(qualityWarnings.map((warning) => warning.code === 'important_number_missing'
+          ? `important_number_missing:${warning.evidence || 'value'}`
+          : warning.code))],
+        qualityWarnings,
       };
     } catch (error) {
       console.error('Structuring error:', error);
@@ -748,6 +979,8 @@ export async function registerRoutes(
         });
       }
 
+      const qualityWarnings = collectDocumentQualityWarningDetails(transcription.text, structured.document, usefulness);
+
       return {
         success: true,
         transcription: {
@@ -757,7 +990,10 @@ export async function registerRoutes(
         },
         document: structured.document,
         processingTime: transcription.duration + structured.processingTime,
-        ...(usefulness.status === 'labs_only' ? { warnings: ['document_labs_only'] } : {}),
+        warnings: [...new Set(qualityWarnings.map((warning) => warning.code === 'important_number_missing'
+          ? `important_number_missing:${warning.evidence || 'value'}`
+          : warning.code))],
+        qualityWarnings,
       };
     } catch (error) {
       console.error('Processing error:', error);
@@ -839,6 +1075,8 @@ export async function registerRoutes(
 
     const wrong = typeof body.wrong === 'string' ? body.wrong.trim() : '';
     const correct = typeof body.correct === 'string' ? body.correct.trim() : '';
+    const scope = normalizeCorrectionScope(typeof body.scope === 'string' ? body.scope : undefined);
+    const requireDose = body.requireDose === true;
 
     if (!wrong || !correct) {
       return reply.status(400).send({ error: "Поля 'wrong' и 'correct' обязательны" });
@@ -849,7 +1087,7 @@ export async function registerRoutes(
     }
 
     try {
-      const correction = await addUserCorrection(wrong, correct);
+      const correction = await addUserCorrection(wrong, correct, { scope, requireDose });
       const all = getUserCorrections();
       return { success: true, id: correction.id, totalCorrections: all.length };
     } catch (error) {

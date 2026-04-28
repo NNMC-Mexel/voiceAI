@@ -1,5 +1,7 @@
 ﻿import type { MedicalDocument } from '../types';
 
+import type { QualityWarning } from '../types';
+
 const API_BASE = import.meta.env.VITE_API_URL || '';
 const API_TIMEOUT_MS = Number.parseInt(import.meta.env.VITE_API_TIMEOUT_MS || '120000', 10);
 
@@ -21,6 +23,8 @@ interface StructureResponse {
   document: MedicalDocument;
   rawText: string;
   processingTime: number;
+  warnings?: string[];
+  qualityWarnings?: QualityWarning[];
 }
 
 interface AugmentResponse {
@@ -37,6 +41,8 @@ interface ProcessResponse {
   };
   document: MedicalDocument;
   processingTime: number;
+  warnings?: string[];
+  qualityWarnings?: QualityWarning[];
 }
 
 interface RecommendationsResponse {
@@ -49,7 +55,7 @@ interface ChatResponse {
   answer: string;
 }
 
-type RewriteableField = keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>;
+type RewriteableField = Exclude<keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>, 'manualCheck'>;
 
 interface InstructResponse {
   success: boolean;
@@ -101,10 +107,13 @@ class ApiClient {
 
   async checkAuth(): Promise<boolean> {
     const token = this.getToken();
-    if (!token) return false;
     try {
+      const headers = new Headers();
+      if (token) {
+        headers.set('Authorization', `Bearer ${token}`);
+      }
       const response = await fetch(`${this.baseUrl}/api/auth/check`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers,
       });
       return response.ok;
     } catch {
@@ -342,15 +351,19 @@ class ApiClient {
 
   // ─── Corrections API ────────────────────────────────────────────────────────
 
-  async addCorrection(wrong: string, correct: string): Promise<{ success: boolean; id: string; totalCorrections: number }> {
+  async addCorrection(
+    wrong: string,
+    correct: string,
+    options?: { scope?: string; requireDose?: boolean }
+  ): Promise<{ success: boolean; id: string; totalCorrections: number }> {
     return this.request('/api/corrections', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ wrong, correct }),
+      body: JSON.stringify({ wrong, correct, ...options }),
     });
   }
 
-  async getCorrections(): Promise<{ corrections: Array<{ id: string; wrong: string; correct: string; createdAt: string }>; total: number }> {
+  async getCorrections(): Promise<{ corrections: Array<{ id: string; wrong: string; correct: string; createdAt: string; scope?: string; requireDose?: boolean }>; total: number }> {
     return this.request('/api/corrections');
   }
 

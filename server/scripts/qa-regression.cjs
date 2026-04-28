@@ -280,11 +280,81 @@ function fieldToString(value) {
   return JSON.stringify(value);
 }
 
+function documentText(doc) {
+  const patient = doc && typeof doc.patient === 'object' ? doc.patient : {};
+  return [
+    ...['fullName', 'age', 'gender', 'complaintDate'].map((field) => fieldToString(patient[field])),
+    ...TEXT_FIELDS.map((field) => fieldToString(doc[field])),
+  ].join('\n');
+}
+
 function getPathValue(doc, dottedPath) {
+  if (!dottedPath || dottedPath === '$document') return documentText(doc);
   return dottedPath.split('.').reduce((value, key) => {
     if (value && typeof value === 'object') return value[key];
     return undefined;
   }, doc);
+}
+
+function compileCaseRegex(spec, defaultFlags = 'iu') {
+  if (!spec || !spec.pattern) return null;
+  try {
+    return new RegExp(spec.pattern, spec.flags || defaultFlags);
+  } catch (error) {
+    throw new Error(`Invalid QA regex "${spec.label || spec.pattern}": ${error.message}`);
+  }
+}
+
+function runClinicalInvariants(testCase, inputText, doc, issues, warnings) {
+  for (const spec of testCase.expectedPatterns || []) {
+    const re = compileCaseRegex(spec);
+    const value = fieldToString(getPathValue(doc, spec.path || '$document'));
+    if (!re.test(value)) {
+      issues.push(`expected_pattern_missing:${spec.label || spec.pattern}`);
+    }
+  }
+
+  const fullDocumentText = documentText(doc);
+  for (const spec of testCase.forbiddenPatterns || []) {
+    const re = compileCaseRegex(spec);
+    const value = fieldToString(spec.path ? getPathValue(doc, spec.path) : fullDocumentText);
+    if (re.test(value)) {
+      issues.push(`forbidden_pattern_present:${spec.label || spec.pattern}`);
+    }
+  }
+
+  for (const spec of testCase.maxOccurrences || []) {
+    const re = compileCaseRegex(spec, 'giu');
+    const value = fieldToString(spec.path ? getPathValue(doc, spec.path) : fullDocumentText);
+    const matches = value.match(re) || [];
+    const max = Number.isFinite(Number(spec.max)) ? Number(spec.max) : 1;
+    if (matches.length > max) {
+      issues.push(`too_many_occurrences:${spec.label || spec.pattern}:${matches.length}/${max}`);
+    }
+  }
+
+  for (const spec of testCase.preserveIfInputMatches || []) {
+    const inputRe = compileCaseRegex({ pattern: spec.inputPattern || spec.pattern, flags: spec.inputFlags || spec.flags });
+    if (!inputRe.test(inputText)) continue;
+
+    const outputRe = compileCaseRegex({ pattern: spec.outputPattern || spec.pattern, flags: spec.outputFlags || spec.flags });
+    const value = fieldToString(getPathValue(doc, spec.path || '$document'));
+    if (!outputRe.test(value)) {
+      issues.push(`preserved_input_pattern_missing:${spec.label || spec.outputPattern || spec.pattern}`);
+    }
+  }
+
+  for (const spec of testCase.warningPatterns || []) {
+    const re = compileCaseRegex(spec);
+    const value = fieldToString(spec.path ? getPathValue(doc, spec.path) : fullDocumentText);
+    if (re.test(value)) {
+      warnings.push(`warning_pattern_present:${spec.label || spec.pattern}`);
+    }
+  }
+}
+
+function looksLikeSuspiciousUnitGarbage(doc) {
+  return /(?:СЛЧЭЛЬ|СЛЦАЛЬ|ЛЩЕ|ММС\s+ЛЩЕ|ГЭСЛЧЭЛЬ|ГЕСЛШЕЛЬ|КОЭСЛЧ|МОЛЬСЛЧ|МГСЛЧЭЛЬ)/iu.test(documentText(doc));
 }
 
 function stripSectionHeaders(text) {
@@ -413,6 +483,10 @@ function analyzeDocument(testCase, inputText, doc, sourceText) {
     issues.push('input_mojibake_suspected');
   }
 
+  if (looksLikeSuspiciousUnitGarbage(doc)) {
+    issues.push('suspicious_unit_garbage_in_document');
+  }
+
   if (meaningfulFields.length === 0) {
     issues.push('document_appears_empty');
   }
@@ -459,6 +533,8 @@ function analyzeDocument(testCase, inputText, doc, sourceText) {
   if (recall && minRecall && recall.pct < minRecall) {
     warnings.push(`low_source_to_input_recall:${recall.pct}/${minRecall}`);
   }
+
+  runClinicalInvariants(testCase, inputText, doc, issues, warnings);
 
   const patient = doc.patient && typeof doc.patient === 'object' ? doc.patient : {};
   const patientFilled = ['fullName', 'age', 'gender', 'complaintDate'].filter((field) =>

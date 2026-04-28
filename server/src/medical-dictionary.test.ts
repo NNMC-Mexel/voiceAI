@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyMedicalDictionary } from './services/medical-dictionary.ts';
+import { applyMedicalDictionary, setUserCorrectionsForTest } from './services/medical-dictionary.ts';
 
 // Регрессия: Whisper-артефакты единиц, подмеченные на Нургалиевой
 // (server/temp/nurgalieva_whisper2.txt и раньше). После словаря текст должен
@@ -107,4 +107,51 @@ test('applyMedicalDictionary handles G-prefix and Whisper consonant variants', (
     applyMedicalDictionary('рост эшеричиркали 1,0 коэслчмиллилитров'),
     /1,0\s+КОЕ\/мл/i,
   );
+});
+
+test('applyMedicalDictionary normalizes Nurgalieva urology drug names', () => {
+  const out = applyMedicalDictionary('Назначить Цификсим 400 мг и Канифрон N по 2 таблетки.');
+  assert.match(out, /Цефиксим\s+400\s+мг/i);
+  assert.match(out, /Канефрон\s+N/i);
+  assert.ok(!/Цификсим|Канифрон/i.test(out));
+});
+
+test('applyMedicalDictionary normalizes dysuria and burning terms', () => {
+  const out = applyMedicalDictionary('Жалобы на сжение при мочеиспускании, дезурические явления.');
+  assert.match(out, /жжение\s+при\s+мочеиспускании/i);
+  assert.match(out, /дизурические\s+явления/i);
+  assert.ok(!/сжение|дезур/i.test(out));
+});
+
+test('applyMedicalDictionary normalizes pyelonephritis variants', () => {
+  assert.match(applyMedicalDictionary('Диагноз: пиелонефрид.'), /пиелонефрит/i);
+  assert.match(applyMedicalDictionary('Диагноз: острый пиелонифрит.'), /пиелонефрит/i);
+});
+
+test('user corrections can be scoped to medication fields and dose context', () => {
+  setUserCorrectionsForTest([
+    {
+      id: 'test-1',
+      wrong: 'Торвастатин',
+      correct: 'Аторвастатин',
+      scope: 'medications',
+      requireDose: true,
+      createdAt: new Date(0).toISOString(),
+    },
+  ]);
+
+  assert.equal(
+    applyMedicalDictionary('Торвастатин 20 мг принимать вечером.', { field: 'recommendations' }),
+    'Аторвастатин 20 мг принимать вечером.',
+  );
+  assert.equal(
+    applyMedicalDictionary('Торвастатин упомянут без дозы.', { field: 'recommendations' }),
+    'Торвастатин упомянут без дозы.',
+  );
+  assert.equal(
+    applyMedicalDictionary('Торвастатин 20 мг.', { field: 'outpatientExams' }),
+    'Торвастатин 20 мг.',
+  );
+
+  setUserCorrectionsForTest([]);
 });

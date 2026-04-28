@@ -136,6 +136,81 @@
       "minInputCoveragePct": 20
     },
     {
+      "id": "nurgalieva_golden",
+      "title": "Nurgalieva golden full case",
+      "sourceTextPath": "audio/dictation_nurgalieva_2026-04-23_golden.txt",
+      "audioFile": "nurgalieva_full_case_2026-04-23.mp3",
+      "minMeaningfulFields": 5,
+      "minInputCoveragePct": 45,
+      "minSourceRecallPct": 70,
+      "requiredMeaningfulFields": [
+        "complaints",
+        "outpatientExams",
+        "objectiveStatus",
+        "diagnosis",
+        "recommendations"
+      ],
+      "expectedPatterns": [
+        {
+          "label": "АД 165/100 preserved",
+          "path": "$document",
+          "pattern": "165\\s*/\\s*100"
+        },
+        {
+          "label": "Цефиксим preserved",
+          "path": "recommendations",
+          "pattern": "Ц[еэ]фиксим\\s+400\\s*мг"
+        },
+        {
+          "label": "Канефрон preserved",
+          "path": "recommendations",
+          "pattern": "Канефрон\\s*N"
+        },
+        {
+          "label": "КОЕ/мл preserved",
+          "path": "outpatientExams",
+          "pattern": "КОЕ\\s*/\\s*мл"
+        }
+      ],
+      "preserveIfInputMatches": [
+        {
+          "label": "АД 165/100 from raw",
+          "inputPattern": "165\\s*/\\s*100",
+          "outputPattern": "165\\s*/\\s*100"
+        }
+      ],
+      "forbiddenPatterns": [
+        {
+          "label": "lost diastolic pressure as 165 mmHg",
+          "path": "$document",
+          "pattern": "165\\s+мм\\s+рт"
+        },
+        {
+          "label": "Канифрон typo",
+          "path": "$document",
+          "pattern": "Канифрон"
+        },
+        {
+          "label": "Цификсим typo",
+          "path": "$document",
+          "pattern": "Цификсим"
+        },
+        {
+          "label": "raw Whisper unit garbage",
+          "path": "$document",
+          "pattern": "СЛЧЭЛЬ|СЛЦАЛЬ|ЛЩЕ|ГЭСЛЧЭЛЬ|КОЭСЛЧ|ММС\\s+ЛЩЕ"
+        }
+      ],
+      "maxOccurrences": [
+        {
+          "label": "Канефрон duplicate",
+          "path": "recommendations",
+          "pattern": "Канефрон",
+          "max": 1
+        }
+      ]
+    },
+    {
       "id": "nurgalieva_audio",
       "title": "Nurgalieva audio-only full case",
       "audioFile": "nurgalieva_full_case_2026-04-23.mp3",

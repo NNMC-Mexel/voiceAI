@@ -34,10 +34,26 @@ export interface UserCorrection {
   wrong: string;
   correct: string;
   createdAt: string;
+  scope?: UserCorrectionScope;
+  requireDose?: boolean;
 }
 
 interface UserCorrectionsData {
   corrections: UserCorrection[];
+}
+
+export type UserCorrectionScope = 'global' | 'medications' | 'exams' | 'neurological';
+
+interface DictionaryApplyOptions {
+  field?: string;
+  scope?: UserCorrectionScope;
+}
+
+interface CompiledUserRule extends ReplacementRule {
+  wrong: string;
+  correct: string;
+  scope: UserCorrectionScope;
+  requireDose: boolean;
 }
 
 // ─── Утилита для создания правил ─────────────────────────────────────────────
@@ -254,6 +270,12 @@ const GENERAL_MEDICAL_ABBREVIATIONS: ReplacementRule[] = [
 // Исправляем типичные ошибки транскрипции названий препаратов.
 
 const DRUG_NAME_CORRECTIONS: ReplacementRule[] = [
+  // Urology MVP regressions (Nurgalieva): stable Whisper typos in drug names.
+  wordRule('Канифрон', 'Канефрон'),
+  wordRule('канифрон', 'Канефрон'),
+  wordRule('Цификсим', 'Цефиксим'),
+  wordRule('цификсим', 'Цефиксим'),
+
   // Антикоагулянты
   wordRule('ксорелто', 'ксарелто'),
   wordRule('ксарелта', 'ксарелто'),
@@ -576,6 +598,17 @@ const WHISPER_UNIT_ARTEFACTS: ReplacementRule[] = [
 // Специфичные случаи, когда Whisper стабильно ошибается.
 
 const PHONETIC_CORRECTIONS: ReplacementRule[] = [
+  // Urology MVP regressions (Nurgalieva): preserve clinically important symptoms/diagnosis.
+  wordRule('сжение', 'жжение'),
+  wordRule('Сжение', 'Жжение'),
+  wordRule('дезурический', 'дизурический'),
+  wordRule('дезурические', 'дизурические'),
+  wordRule('дезурических', 'дизурических'),
+  wordRule('пиелонефрид', 'пиелонефрит'),
+  wordRule('Пиелонефрид', 'Пиелонефрит'),
+  wordRule('пиелонифрит', 'пиелонефрит'),
+  wordRule('Пиелонифрит', 'Пиелонефрит'),
+
   // "эн уай эйч эй" → NYHA (если проскользнуло)
   wordRule('эн уай эйч эй', 'NYHA'),
   wordRule('си эйч эй ди эс', 'CHA₂DS₂-VASc'),
@@ -1766,7 +1799,7 @@ const ALL_RULES: ReplacementRule[] = [
  * Исправляет типичные ошибки транскрипции медицинских терминов.
  * Включает базовые правила + пользовательские замены.
  */
-export function applyMedicalDictionary(text: string): string {
+export function applyMedicalDictionary(text: string, options: DictionaryApplyOptions = {}): string {
   let result = text;
   // Базовые правила
   for (const rule of ALL_RULES) {
@@ -1778,7 +1811,16 @@ export function applyMedicalDictionary(text: string): string {
   }
   // Пользовательские замены (применяются после базовых, имеют приоритет)
   for (const rule of userRules) {
-    if (typeof rule.replacement === 'string') {
+    if (!userRuleAppliesToContext(rule, options)) continue;
+
+    if (rule.requireDose) {
+      result = result.replace(rule.pattern, (...args: any[]) => {
+        const match = String(args[0]);
+        const offset = Number(args[args.length - 2]);
+        const whole = String(args[args.length - 1]);
+        return hasDoseNearMatch(whole, offset, match.length) ? rule.correct : match;
+      });
+    } else if (typeof rule.replacement === 'string') {
       result = result.replace(rule.pattern, rule.replacement);
     } else {
       result = result.replace(rule.pattern, rule.replacement as (...args: string[]) => string);
@@ -1800,10 +1842,37 @@ const USER_CORRECTIONS_PATH = path.join(DATA_DIR, 'user-corrections.json');
 /** Текущие пользовательские замены (загружаются при старте) */
 let userCorrections: UserCorrection[] = [];
 /** Скомпилированные правила из пользовательских замен */
-let userRules: ReplacementRule[] = [];
+let userRules: CompiledUserRule[] = [];
 
 function compileUserRules(): void {
-  userRules = userCorrections.map((c) => wordRule(c.wrong, c.correct));
+  userRules = userCorrections.map((c) => ({
+    ...wordRule(c.wrong, c.correct),
+    wrong: c.wrong,
+    correct: c.correct,
+    scope: c.scope || 'global',
+    requireDose: c.requireDose === true,
+  }));
+}
+
+function inferScopeFromField(field?: string): UserCorrectionScope | undefined {
+  if (!field) return undefined;
+  if (field === 'conclusion' || field === 'recommendations') return 'medications';
+  if (field === 'outpatientExams') return 'exams';
+  if (field === 'neurologicalStatus') return 'neurological';
+  return undefined;
+}
+
+function userRuleAppliesToContext(rule: CompiledUserRule, options: DictionaryApplyOptions): boolean {
+  if (rule.scope === 'global') return true;
+  const scope = options.scope || inferScopeFromField(options.field);
+  return scope === rule.scope;
+}
+
+function hasDoseNearMatch(text: string, offset: number, length: number): boolean {
+  const start = Math.max(0, offset - 45);
+  const end = Math.min(text.length, offset + length + 45);
+  const window = text.slice(start, end);
+  return /\d+(?:[,.]\d+)?\s*(?:мг|мкг|г|мл|ед|ме|%|табл|таблетк|капсул)/iu.test(window);
 }
 
 /** Загружает пользовательские замены из JSON-файла */
@@ -1837,16 +1906,26 @@ async function saveUserCorrections(): Promise<void> {
 }
 
 /** Добавляет или обновляет пользовательскую замену */
-export async function addUserCorrection(wrong: string, correct: string): Promise<UserCorrection> {
+export async function addUserCorrection(
+  wrong: string,
+  correct: string,
+  options: { scope?: UserCorrectionScope; requireDose?: boolean } = {}
+): Promise<UserCorrection> {
   const trimWrong = wrong.trim();
   const trimCorrect = correct.trim();
+  const scope = normalizeUserCorrectionScope(options.scope);
+  const requireDose = options.requireDose === true;
 
   // Обновляем существующую, если есть
   const existing = userCorrections.find(
-    (c) => c.wrong.toLowerCase() === trimWrong.toLowerCase()
+    (c) => c.wrong.toLowerCase() === trimWrong.toLowerCase() &&
+      (c.scope || 'global') === scope &&
+      (c.requireDose === true) === requireDose
   );
   if (existing) {
     existing.correct = trimCorrect;
+    existing.scope = scope;
+    existing.requireDose = requireDose;
     existing.createdAt = new Date().toISOString();
     compileUserRules();
     await saveUserCorrections();
@@ -1858,11 +1937,17 @@ export async function addUserCorrection(wrong: string, correct: string): Promise
     wrong: trimWrong,
     correct: trimCorrect,
     createdAt: new Date().toISOString(),
+    scope,
+    requireDose,
   };
   userCorrections.push(correction);
   compileUserRules();
   await saveUserCorrections();
   return correction;
+}
+
+function normalizeUserCorrectionScope(scope: UserCorrectionScope | undefined): UserCorrectionScope {
+  return scope === 'medications' || scope === 'exams' || scope === 'neurological' ? scope : 'global';
 }
 
 /** Удаляет пользовательскую замену по ID */
@@ -1880,3 +1965,8 @@ export function getUserCorrections(): UserCorrection[] {
   return [...userCorrections];
 }
 
+/** Test-only helper: does not write to disk. */
+export function setUserCorrectionsForTest(corrections: UserCorrection[]): void {
+  userCorrections = corrections.map((c) => ({ ...c }));
+  compileUserRules();
+}

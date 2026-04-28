@@ -27,6 +27,26 @@ export interface MedicalDocument {
   conclusion: string;           // Сопутствующий диагноз
   doctorNotes: string;          // План обследования
   recommendations: string;      // План лечения (включая диету пунктом списка)
+  manualCheck?: string;         // Сомнительные фрагменты, требующие ручной проверки
+}
+
+export type QualityWarningCode =
+  | 'document_labs_only'
+  | 'suspiciously_few_clinical_fields'
+  | 'suspicious_unit_garbage_in_document'
+  | 'possibleAddedFact'
+  | 'possibleLostLabValue'
+  | 'suspiciousExamRescue'
+  | 'sectionRoutingIssue'
+  | 'drugListMayBeMerged'
+  | 'important_number_missing';
+
+export interface QualityWarning {
+  code: QualityWarningCode;
+  severity: 'info' | 'warning' | 'critical';
+  message: string;
+  field?: keyof MedicalDocument | 'document';
+  evidence?: string;
 }
 
 export interface TranscriptionWarning {
@@ -63,7 +83,7 @@ export interface WhisperConfig {
                       // без этого Python-сервер уходит в свой env-дефолт.
 }
 
-export type LLMProviderKind = 'llama' | 'anthropic';
+export type LLMProviderKind = 'llama' | 'ollama' | 'anthropic';
 
 export interface LLMConfig {
   provider: LLMProviderKind;

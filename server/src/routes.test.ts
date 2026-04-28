@@ -6,6 +6,8 @@ import {
   isValidMedicalDocument,
   assessDocumentUsefulness,
   isFieldMeaningful,
+  collectDocumentQualityWarnings,
+  collectDocumentQualityWarningDetails,
 } from './routes.ts';
 import type { MedicalDocument } from './types.js';
 
@@ -115,6 +117,56 @@ test('assessDocumentUsefulness ignores patient.fullName alone', () => {
   });
   const r = assessDocumentUsefulness(doc);
   assert.equal(r.status, 'empty');
+});
+
+test('collectDocumentQualityWarnings reports missing BP value from raw text', () => {
+  const doc = mkDoc({
+    complaints: 'Повышение артериального давления до 165 мм рт.ст.',
+    diagnosis: 'Артериальная гипертензия II степени.',
+    recommendations: 'Контроль артериального давления утром и вечером.',
+  });
+  const usefulness = assessDocumentUsefulness(doc);
+  const warnings = collectDocumentQualityWarnings('АД до 165/100 мм рт.ст.', doc, usefulness);
+  assert.ok(warnings.includes('important_number_missing:bp_165/100'));
+});
+
+test('collectDocumentQualityWarnings reports suspicious unit garbage', () => {
+  const doc = mkDoc({
+    outpatientExams: 'Гемоглобин 128 СЛЧЭЛЬ, СОЭ 22 ММС ЛЩЕ.',
+  });
+  const usefulness = assessDocumentUsefulness(doc);
+  const warnings = collectDocumentQualityWarnings('Гемоглобин 128 г/л.', doc, usefulness);
+  assert.ok(warnings.includes('suspicious_unit_garbage_in_document'));
+});
+
+test('collectDocumentQualityWarningDetails reports advanced QA issues', () => {
+  const doc = mkDoc({
+    outpatientExams: '1. КТ миокарда в 58 лет, мать страдала сахарным диабетом 2 типа.',
+    recommendations: '1. Алкоголь употребляет редко.\n2. Валсартан 160 мг и Амлодипин 5 мг принимать ежедневно.',
+  });
+  const usefulness = assessDocumentUsefulness(doc);
+  const warnings = collectDocumentQualityWarningDetails(
+    'Наследственность отягощена: отец перенес инфаркт миокарда в 58 лет. Рекомендации: Валсартан 160 мг принимать ежедневно.',
+    doc,
+    usefulness,
+  );
+  const codes = warnings.map((w) => w.code);
+  assert.ok(codes.includes('suspiciousExamRescue'));
+  assert.ok(codes.includes('sectionRoutingIssue'));
+  assert.ok(codes.includes('drugListMayBeMerged'));
+});
+
+test('collectDocumentQualityWarningDetails reports possible lost lab value', () => {
+  const doc = mkDoc({
+    outpatientExams: '1. Биохимический анализ крови: креатинин 98 мкмоль/л.',
+  });
+  const usefulness = assessDocumentUsefulness(doc);
+  const warnings = collectDocumentQualityWarningDetails(
+    'Биохимический анализ крови: креатинин 98 микромоль на литр, глюкоза 8,9 миллимоль на литр.',
+    doc,
+    usefulness,
+  );
+  assert.ok(warnings.some((w) => w.code === 'possibleLostLabValue' && w.evidence === '8,9'));
 });
 
 test('isValidMedicalDocument validates minimal shape', () => {

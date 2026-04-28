@@ -27,6 +27,24 @@ export interface MedicalDocument {
   conclusion: string;           // Амбулаторная терапия
   doctorNotes: string;          // План обследования
   recommendations: string;      // Рекомендации / План лечения (включая диету пунктом списка)
+  manualCheck?: string;         // Сомнительные фрагменты для ручной проверки
+}
+
+export interface QualityWarning {
+  code:
+    | 'document_labs_only'
+    | 'suspiciously_few_clinical_fields'
+    | 'suspicious_unit_garbage_in_document'
+    | 'possibleAddedFact'
+    | 'possibleLostLabValue'
+    | 'suspiciousExamRescue'
+    | 'sectionRoutingIssue'
+    | 'drugListMayBeMerged'
+    | 'important_number_missing';
+  severity: 'info' | 'warning' | 'critical';
+  message: string;
+  field?: keyof MedicalDocument | 'document';
+  evidence?: string;
 }
 
 export type AppStep = 'recording' | 'processing' | 'editing' | 'preview';
@@ -67,7 +85,9 @@ export const emptyDocument: MedicalDocument = {
   recommendations: '',
 };
 
-export const fieldLabels: Record<keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>, string> = {
+export type MedicalDocumentTextField = Exclude<keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>, 'manualCheck'>;
+
+export const fieldLabels: Record<MedicalDocumentTextField, string> = {
   complaints: 'Жалобы',
   anamnesis: 'Анамнез заболевания',
   outpatientExams: 'Амбулаторные обследования',

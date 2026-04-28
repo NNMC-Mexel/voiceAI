@@ -18,6 +18,8 @@ function filenameForBlob(blob: Blob, baseName: string): string {
 
 const SESSION_STEP_KEY = 'voicemed_step';
 const SESSION_DOC_KEY = 'voicemed_document';
+const SESSION_RAW_TEXT_KEY = 'voicemed_raw_text';
+const SESSION_WARNINGS_KEY = 'voicemed_quality_warnings';
 
 function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
@@ -38,6 +40,22 @@ function App() {
     }
   });
   const [error, setError] = useState<string | null>(null);
+  const [rawTranscription, setRawTranscription] = useState<string>(() => {
+    try {
+      return sessionStorage.getItem(SESSION_RAW_TEXT_KEY) || '';
+    } catch {
+      return '';
+    }
+  });
+  const [qualityWarnings, setQualityWarnings] = useState<string[]>(() => {
+    try {
+      const saved = sessionStorage.getItem(SESSION_WARNINGS_KEY);
+      return saved ? (JSON.parse(saved) as string[]) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [isRestructuring, setIsRestructuring] = useState(false);
   const audioBlobRef = useRef<Blob | null>(null);
 
   useEffect(() => {
@@ -56,6 +74,22 @@ function App() {
       console.warn('[session] не удалось сохранить документ:', err);
     }
   }, [document]);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(SESSION_RAW_TEXT_KEY, rawTranscription);
+    } catch (err) {
+      console.warn('[session] не удалось сохранить raw text:', err);
+    }
+  }, [rawTranscription]);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(SESSION_WARNINGS_KEY, JSON.stringify(qualityWarnings));
+    } catch (err) {
+      console.warn('[session] не удалось сохранить warnings:', err);
+    }
+  }, [qualityWarnings]);
 
   useEffect(() => {
     apiClient.checkAuth().then(setAuthenticated);
@@ -98,6 +132,8 @@ function App() {
 
       if (structured.success && structured.document) {
         const today = new Date().toISOString().slice(0, 10);
+        setRawTranscription(transcription.text);
+        setQualityWarnings(structured.warnings || []);
         setDocument({
           ...structured.document,
           patient: {
@@ -120,6 +156,36 @@ function App() {
     setDocument(newDocument);
   }, []);
 
+  const applyStructuredDocument = useCallback((structuredDocument: MedicalDocument) => {
+    const today = new Date().toISOString().slice(0, 10);
+    setDocument({
+      ...structuredDocument,
+      patient: {
+        ...structuredDocument.patient,
+        complaintDate: structuredDocument.patient.complaintDate || today,
+      },
+    });
+  }, []);
+
+  const handleRestructure = useCallback(async () => {
+    if (!rawTranscription.trim() || isRestructuring) return;
+    setIsRestructuring(true);
+    setError(null);
+    try {
+      const structured = await apiClient.structureText(rawTranscription);
+      if (!structured.success || !structured.document) {
+        throw new Error('Повторное структурирование не вернуло документ');
+      }
+      applyStructuredDocument(structured.document);
+      setQualityWarnings(structured.warnings || []);
+    } catch (err) {
+      console.error('Restructure error:', err);
+      setError(err instanceof Error ? err.message : 'Ошибка повторного структурирования');
+    } finally {
+      setIsRestructuring(false);
+    }
+  }, [applyStructuredDocument, isRestructuring, rawTranscription]);
+
   const handlePreview = useCallback(() => {
     setStep('preview');
   }, []);
@@ -135,12 +201,16 @@ function App() {
 
   const handleNewDocument = useCallback(() => {
     setDocument(emptyDocument);
+    setRawTranscription('');
+    setQualityWarnings([]);
     audioBlobRef.current = null;
     setError(null);
     setStep('recording');
     try {
       sessionStorage.removeItem(SESSION_STEP_KEY);
       sessionStorage.removeItem(SESSION_DOC_KEY);
+      sessionStorage.removeItem(SESSION_RAW_TEXT_KEY);
+      sessionStorage.removeItem(SESSION_WARNINGS_KEY);
     } catch {
       // ignore
     }
@@ -166,6 +236,10 @@ function App() {
           onDocumentChange={handleDocumentChange}
           onPreview={handlePreview}
           onBack={handleBackToRecording}
+          rawTranscription={rawTranscription}
+          qualityWarnings={qualityWarnings}
+          onRestructure={handleRestructure}
+          isRestructuring={isRestructuring}
         />
       )}
 

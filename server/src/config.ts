@@ -26,6 +26,7 @@ function parseCorsOrigins(raw: string | undefined, fallback: string[]): string[]
 function resolveLlmProvider(): LLMProviderKind {
   const raw = process.env.LLM_PROVIDER?.trim().toLowerCase();
   if (raw === 'anthropic') return 'anthropic';
+  if (raw === 'ollama') return 'ollama';
   return 'llama';
 }
 

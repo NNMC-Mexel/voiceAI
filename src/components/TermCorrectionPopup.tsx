@@ -4,18 +4,24 @@ import { X, Check, BookmarkPlus } from 'lucide-react';
 interface TermCorrectionPopupProps {
   position: { x: number; y: number };
   selectedText: string;
-  onSave: (wrong: string, correct: string, remember: boolean) => void;
+  defaultScope?: CorrectionScope;
+  onSave: (wrong: string, correct: string, remember: boolean, options: { scope: CorrectionScope; requireDose: boolean }) => void;
   onClose: () => void;
 }
+
+type CorrectionScope = 'global' | 'medications' | 'exams' | 'neurological';
 
 export function TermCorrectionPopup({
   position,
   selectedText,
+  defaultScope = 'global',
   onSave,
   onClose,
 }: TermCorrectionPopupProps) {
   const [correctValue, setCorrectValue] = useState('');
   const [remember, setRemember] = useState(true);
+  const [scope, setScope] = useState<CorrectionScope>(defaultScope);
+  const [requireDose, setRequireDose] = useState(defaultScope === 'medications');
   const popupRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -51,7 +57,7 @@ export function TermCorrectionPopup({
   const handleSubmit = () => {
     const trimmed = correctValue.trim();
     if (!trimmed || trimmed === selectedText) return;
-    onSave(selectedText, trimmed, remember);
+    onSave(selectedText, trimmed, remember, { scope, requireDose });
   };
 
   // Позиционирование: не вылезать за экран
@@ -107,6 +113,33 @@ export function TermCorrectionPopup({
           <BookmarkPlus className="w-3.5 h-3.5 text-medical-500" />
           <span className="text-xs text-text-secondary">Запомнить для будущих диктовок</span>
         </label>
+
+        {remember && (
+          <div className="grid grid-cols-1 gap-2">
+            <label className="block text-xs font-medium text-text-secondary">
+              Где применять
+              <select
+                value={scope}
+                onChange={(e) => setScope(e.target.value as CorrectionScope)}
+                className="mt-1 w-full px-2 py-1.5 border border-slate-300 rounded-lg text-xs bg-white focus:outline-none focus:ring-2 focus:ring-medical-400"
+              >
+                <option value="global">Везде</option>
+                <option value="medications">Только лекарства</option>
+                <option value="exams">Только обследования</option>
+                <option value="neurological">Только неврология</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={requireDose}
+                onChange={(e) => setRequireDose(e.target.checked)}
+                className="w-4 h-4 rounded border-slate-300 text-medical-600 focus:ring-medical-400"
+              />
+              <span className="text-xs text-text-secondary">Только если рядом есть доза</span>
+            </label>
+          </div>
+        )}
 
         <div className="flex items-center gap-2 pt-1">
           <button
