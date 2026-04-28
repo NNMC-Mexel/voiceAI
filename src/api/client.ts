@@ -349,6 +349,28 @@ class ApiClient {
     return result.audio_base64;
   }
 
+  // ─── Streaming session API ───────────────────────────────────────────────────
+
+  async startSession(): Promise<{ sessionId: string }> {
+    return this.request('/api/session/start', { method: 'POST' }, 10_000);
+  }
+
+  async sendChunk(sessionId: string, audioBase64: string, chunkIndex: number): Promise<{ ok: boolean; chunkIndex: number }> {
+    return this.request(`/api/session/${encodeURIComponent(sessionId)}/chunk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audio_base64: audioBase64, chunk_index: chunkIndex }),
+    }, 30_000);
+  }
+
+  async finishSession(sessionId: string): Promise<ProcessResponse & { transcription: { text: string; language: string } }> {
+    return this.request(`/api/session/${encodeURIComponent(sessionId)}/finish`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }, 300_000);
+  }
+
   // ─── Corrections API ────────────────────────────────────────────────────────
 
   async addCorrection(

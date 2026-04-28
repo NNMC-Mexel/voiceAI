@@ -1,4 +1,5 @@
-﻿import { useState, useCallback, useRef, useEffect } from 'react';
+﻿import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import type { VoiceRecorderStreamOptions } from './hooks/useVoiceRecorder';
 import type { AppStep, MedicalDocument } from './types';
 import { emptyDocument } from './types';
 import { LoginScreen } from './components/LoginScreen';
@@ -57,6 +58,9 @@ function App() {
   });
   const [isRestructuring, setIsRestructuring] = useState(false);
   const audioBlobRef = useRef<Blob | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
+  const pendingChunksRef = useRef<Promise<void>[]>([]);
+  const batchCountRef = useRef(0);
 
   useEffect(() => {
     try {
@@ -101,56 +105,131 @@ function App() {
     return () => window.removeEventListener('auth:logout', onLogout);
   }, []);
 
+  const handleRecordingStart = useCallback(() => {
+    pendingChunksRef.current = [];
+    batchCountRef.current = 0;
+    apiClient.startSession().then(({ sessionId }) => {
+      sessionIdRef.current = sessionId;
+    }).catch((err) => {
+      console.warn('[session] failed to start, will use legacy flow:', err);
+      sessionIdRef.current = null;
+    });
+  }, []);
+
+  const handleBatch = useCallback((blob: Blob, _mimeType: string, batchIndex: number) => {
+    const sessionId = sessionIdRef.current;
+    if (!sessionId) return;
+    batchCountRef.current++;
+    const p = new Promise<void>((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const dataUrl = reader.result as string;
+        const base64 = dataUrl.split(',')[1];
+        apiClient.sendChunk(sessionId, base64, batchIndex)
+          .then(() => resolve())
+          .catch((err) => {
+            console.warn(`[session] chunk ${batchIndex} failed:`, err);
+            resolve();
+          });
+      };
+      reader.onerror = () => resolve();
+      reader.readAsDataURL(blob);
+    });
+    pendingChunksRef.current.push(p);
+  }, []);
+
+  const streamOptions = useMemo<VoiceRecorderStreamOptions>(() => ({
+    batchIntervalSeconds: 20,
+    onBatch: handleBatch,
+  }), [handleBatch]);
+
+  const applyProcessResult = useCallback((transcriptionText: string, doc: MedicalDocument, warnings: string[]) => {
+    const today = new Date().toISOString().slice(0, 10);
+    setRawTranscription(transcriptionText);
+    setQualityWarnings(warnings);
+    setDocument({
+      ...doc,
+      patient: {
+        ...doc.patient,
+        complaintDate: doc.patient.complaintDate || today,
+      },
+    });
+    setStep('editing');
+  }, []);
+
+  const legacyProcess = useCallback(async (blob: Blob) => {
+    const filename = filenameForBlob(blob, 'recording');
+
+    const upload = await apiClient.uploadAudio(blob, filename);
+
+    console.group('%c[WHISPER] Транскрипция', 'color: #00bcd4; font-weight: bold; font-size: 13px');
+    console.log('Файл:', upload.filename);
+    const transcription = await apiClient.transcribe(upload.filename);
+    console.log('Язык:', transcription.language);
+    console.log('Длительность:', transcription.duration, 'с');
+    console.log('%cТекст Whisper:\n' + transcription.text, 'color: #00bcd4; white-space: pre-wrap');
+    console.groupEnd();
+
+    console.group('%c[LLM] Структурирование', 'color: #ff9800; font-weight: bold; font-size: 13px');
+    const structured = await apiClient.structureText(transcription.text);
+    console.log('Время обработки:', structured.processingTime, 'мс');
+    console.log('%cДокумент от LLM:', 'color: #ff9800; font-weight: bold');
+    console.log(structured.document);
+    console.groupEnd();
+
+    if (!structured.success || !structured.document) throw new Error('Processing failed');
+    applyProcessResult(transcription.text, structured.document, structured.warnings || []);
+  }, [applyProcessResult]);
+
   const handleRecordingComplete = useCallback(async (blob: Blob) => {
     audioBlobRef.current = blob;
     setStep('processing');
     setError(null);
 
-    try {
-      const filename = filenameForBlob(blob, 'recording');
+    const sessionId = sessionIdRef.current;
+    sessionIdRef.current = null;
+    const hadBatches = batchCountRef.current > 0;
+    batchCountRef.current = 0;
 
-      // Step 1: upload audio
-      const upload = await apiClient.uploadAudio(blob, filename);
+    if (sessionId && hadBatches) {
+      try {
+        // Ждём завершения всех HTTP-запросов отправки чанков
+        await Promise.allSettled(pendingChunksRef.current);
+        pendingChunksRef.current = [];
 
-      // Step 2: Whisper transcription
-      console.group('%c[WHISPER] Транскрипция', 'color: #00bcd4; font-weight: bold; font-size: 13px');
-      console.log('Файл:', upload.filename);
-      const transcription = await apiClient.transcribe(upload.filename);
-      console.log('Язык:', transcription.language);
-      console.log('Длительность:', transcription.duration, 'с');
-      console.log('%cТекст Whisper:\n' + transcription.text, 'color: #00bcd4; white-space: pre-wrap');
-      console.groupEnd();
+        console.group('%c[SESSION] Финализация', 'color: #4caf50; font-weight: bold; font-size: 13px');
+        const result = await apiClient.finishSession(sessionId);
+        console.log('Текст транскрипции:', result.transcription.text);
+        console.log('Документ:', result.document);
+        console.groupEnd();
 
-      // Step 3: LLM structuring
-      console.group('%c[LLM] Структурирование', 'color: #ff9800; font-weight: bold; font-size: 13px');
-      console.log('Входной текст:', transcription.text);
-      const structured = await apiClient.structureText(transcription.text);
-      console.log('Время обработки:', structured.processingTime, 'мс');
-      console.log('%cДокумент от LLM:', 'color: #ff9800; font-weight: bold');
-      console.log(structured.document);
-      console.groupEnd();
-
-      if (structured.success && structured.document) {
-        const today = new Date().toISOString().slice(0, 10);
-        setRawTranscription(transcription.text);
-        setQualityWarnings(structured.warnings || []);
-        setDocument({
-          ...structured.document,
-          patient: {
-            ...structured.document.patient,
-            complaintDate: structured.document.patient.complaintDate || today,
-          },
-        });
-        setStep('editing');
-      } else {
-        throw new Error('Processing failed');
+        if (result.success && result.document) {
+          applyProcessResult(result.transcription.text, result.document, result.warnings || []);
+        } else {
+          throw new Error('Session processing failed');
+        }
+      } catch (err) {
+        console.warn('[session] failed, falling back to legacy flow:', err);
+        pendingChunksRef.current = [];
+        try {
+          await legacyProcess(blob);
+        } catch (legacyErr) {
+          console.error('Legacy fallback error:', legacyErr);
+          setError(legacyErr instanceof Error ? legacyErr.message : 'Ошибка обработки');
+          setStep('recording');
+        }
       }
-    } catch (err) {
-      console.error('Processing error:', err);
-      setError(err instanceof Error ? err.message : 'Ошибка обработки');
-      setStep('recording');
+    } else {
+      pendingChunksRef.current = [];
+      try {
+        await legacyProcess(blob);
+      } catch (err) {
+        console.error('Processing error:', err);
+        setError(err instanceof Error ? err.message : 'Ошибка обработки');
+        setStep('recording');
+      }
     }
-  }, []);
+  }, [applyProcessResult, legacyProcess]);
 
   const handleDocumentChange = useCallback((newDocument: MedicalDocument) => {
     setDocument(newDocument);
@@ -226,7 +305,14 @@ function App() {
 
   return (
     <div className="min-h-screen">
-      {step === 'recording' && <RecordingScreen onRecordingComplete={handleRecordingComplete} error={error} />}
+      {step === 'recording' && (
+        <RecordingScreen
+          onRecordingComplete={handleRecordingComplete}
+          onRecordingStart={handleRecordingStart}
+          streamOptions={streamOptions}
+          error={error}
+        />
+      )}
 
       {step === 'processing' && <ProcessingScreen />}
 

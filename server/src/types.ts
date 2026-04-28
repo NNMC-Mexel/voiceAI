@@ -39,7 +39,8 @@ export type QualityWarningCode =
   | 'suspiciousExamRescue'
   | 'sectionRoutingIssue'
   | 'drugListMayBeMerged'
-  | 'important_number_missing';
+  | 'important_number_missing'
+  | 'max_bp_value_missing';
 
 export interface QualityWarning {
   code: QualityWarningCode;

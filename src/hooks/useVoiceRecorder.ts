@@ -1,7 +1,12 @@
 ﻿import { useState, useRef, useCallback, useEffect } from 'react';
 import type { RecordingState } from '../types';
 
-export function useVoiceRecorder() {
+export interface VoiceRecorderStreamOptions {
+  batchIntervalSeconds: number;
+  onBatch: (blob: Blob, mimeType: string, batchIndex: number) => void;
+}
+
+export function useVoiceRecorder(streamOptions?: VoiceRecorderStreamOptions) {
   const [state, setState] = useState<RecordingState>({
     isRecording: false,
     isPaused: false,
@@ -14,6 +19,9 @@ export function useVoiceRecorder() {
   const timerRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const trimChunksRef = useRef(0);
+  const batchTimerRef = useRef<number | null>(null);
+  const sentChunkCountRef = useRef(0);
+  const batchIndexRef = useRef(0);
 
   const pickSupportedMimeType = useCallback((): string => {
     const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
@@ -71,6 +79,18 @@ export function useVoiceRecorder() {
         const chunks = trimCount > 0 && chunksRef.current.length > trimCount
           ? chunksRef.current.slice(0, -trimCount)
           : chunksRef.current;
+
+        // Streaming: flush оставшиеся необработанные чанки как финальный батч
+        if (streamOptions?.onBatch) {
+          const sent = sentChunkCountRef.current;
+          if (sent < chunks.length) {
+            const remaining = chunks.slice(sent);
+            const finalChunks = sent === 0 ? remaining : [chunks[0], ...remaining];
+            const finalBlob = new Blob(finalChunks, { type: recorderMimeType });
+            streamOptions.onBatch(finalBlob, recorderMimeType, batchIndexRef.current++);
+          }
+        }
+
         const audioBlob = new Blob(chunks, { type: recorderMimeType });
         setState((prev) => ({ ...prev, audioBlob }));
       };
@@ -79,6 +99,26 @@ export function useVoiceRecorder() {
       mediaRecorder.start(1000);
 
       timerRef.current = window.setInterval(updateDuration, 1000);
+
+      // Streaming: отправляем батчи чанков во время записи
+      if (streamOptions) {
+        sentChunkCountRef.current = 0;
+        batchIndexRef.current = 0;
+        const intervalMs = streamOptions.batchIntervalSeconds * 1000;
+        batchTimerRef.current = window.setInterval(() => {
+          const curr = chunksRef.current.length;
+          const sent = sentChunkCountRef.current;
+          // Ждём минимум 5 чанков (5 сек), чтобы webm-контейнер был валидным
+          if (curr - sent < 5) return;
+          const newChunks = curr === sent ? [] : chunksRef.current.slice(sent);
+          if (newChunks.length === 0) return;
+          sentChunkCountRef.current = curr;
+          // Батч 0 содержит header, остальные батчи префиксируем chunk[0] (webm header)
+          const batchChunks = sent === 0 ? newChunks : [chunksRef.current[0], ...newChunks];
+          const blob = new Blob(batchChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+          streamOptions.onBatch(blob, mediaRecorder.mimeType || 'audio/webm', batchIndexRef.current++);
+        }, intervalMs);
+      }
 
       setState({
         isRecording: true,
@@ -115,6 +155,12 @@ export function useVoiceRecorder() {
     if (mediaRecorderRef.current && state.isRecording) {
       // Each chunk is ~1 second (start(1000)), so trimSeconds ≈ chunks to drop
       trimChunksRef.current = trimSeconds;
+
+      if (batchTimerRef.current) {
+        clearInterval(batchTimerRef.current);
+        batchTimerRef.current = null;
+      }
+
       mediaRecorderRef.current.stop();
 
       if (timerRef.current) {
@@ -137,6 +183,11 @@ export function useVoiceRecorder() {
       timerRef.current = null;
     }
 
+    if (batchTimerRef.current) {
+      clearInterval(batchTimerRef.current);
+      batchTimerRef.current = null;
+    }
+
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
@@ -144,6 +195,8 @@ export function useVoiceRecorder() {
 
     mediaRecorderRef.current = null;
     chunksRef.current = [];
+    sentChunkCountRef.current = 0;
+    batchIndexRef.current = 0;
 
     setState({
       isRecording: false,
@@ -157,6 +210,9 @@ export function useVoiceRecorder() {
     return () => {
       if (timerRef.current) {
         clearInterval(timerRef.current);
+      }
+      if (batchTimerRef.current) {
+        clearInterval(batchTimerRef.current);
       }
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop());

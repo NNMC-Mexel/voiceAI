@@ -1,16 +1,19 @@
 ﻿import { useState, useEffect, useRef, useCallback } from 'react';
 import { Mic, Pause, Play, Square, AlertCircle, CheckCircle, RotateCcw, Upload } from 'lucide-react';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
+import type { VoiceRecorderStreamOptions } from '../hooks/useVoiceRecorder';
 import { useWakeWord } from '../hooks/useWakeWord';
 import { WaveformVisualizer } from './WaveformVisualizer';
 
 
 interface RecordingScreenProps {
   onRecordingComplete: (audioBlob: Blob) => void;
+  onRecordingStart?: () => void;
+  streamOptions?: VoiceRecorderStreamOptions;
   error?: string | null;
 }
 
-export function RecordingScreen({ onRecordingComplete, error: externalError }: RecordingScreenProps) {
+export function RecordingScreen({ onRecordingComplete, onRecordingStart, streamOptions, error: externalError }: RecordingScreenProps) {
   const {
     isRecording,
     isPaused,
@@ -21,7 +24,7 @@ export function RecordingScreen({ onRecordingComplete, error: externalError }: R
     resumeRecording,
     stopRecording,
     resetRecording,
-  } = useVoiceRecorder();
+  } = useVoiceRecorder(streamOptions);
 
   const [error, setError] = useState<string | null>(null);
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
@@ -33,11 +36,12 @@ export function RecordingScreen({ onRecordingComplete, error: externalError }: R
     if (isRecording || audioBlob || hasPermission === false) return;
     setError(null);
     autoSubmitRef.current = true;
+    onRecordingStart?.();
     void startRecording().catch((err) => {
       setError(err instanceof Error ? err.message : 'Ошибка записи');
       autoSubmitRef.current = false;
     });
-  }, [isRecording, audioBlob, hasPermission, startRecording]);
+  }, [isRecording, audioBlob, hasPermission, startRecording, onRecordingStart]);
 
   const handleStopWord = useCallback(() => {
     if (!isRecording) return;
@@ -141,6 +145,7 @@ export function RecordingScreen({ onRecordingComplete, error: externalError }: R
   const handleStart = async () => {
     setError(null);
     try {
+      onRecordingStart?.();
       await startRecording();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка записи');

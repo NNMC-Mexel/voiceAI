@@ -32,7 +32,11 @@ interface WhisperServerResponse {
 // НЕ включать единицы измерения (мм рт.ст., уд/мин) и аббревиатуры —
 // они «протекают» в транскрипцию как мусорные фрагменты.
 const MEDICAL_INITIAL_PROMPT =
-  'Медицинская консультация. Жалобы, анамнез, осмотр, диагноз, рекомендации.';
+  'Медицинский протокол. АД – 150/90 мм рт.ст. Максимальные цифры АД до 180/110 мм рт.ст. ' +
+  'ЧСС – 76 уд/мин. SpO₂ 96%. СОЭ 12 мм/ч. HbA1c 7,8%. ЭКГ. ЭхоКГ. Тредмил-тест. ' +
+  'Менингеальных знаков нет. Парезов нет. ' +
+  'АЛТ 31 МЕ/л, АСТ 27 МЕ/л, ЛПНП 4,2 ммоль/л, триглицериды 2,4 ммоль/л. ' +
+  'валсартан, амлодипин, метформин, розувастатин, эмпаглифлозин, ацетилсалициловая кислота.';
 
 // HOTWORDS: ОТКЛЮЧЕНЫ.
 // Тестирование показало, что любой список hotwords в faster-whisper вызывает:
@@ -310,6 +314,46 @@ export class WhisperService {
 
         throw new Error(`Whisper transcription failed for ${filename}: ${fallbackError}`);
       }
+    }
+  }
+
+  // ─── Streaming chunk transcription (base64 → text) ──────────────────────────
+
+  async transcribeBase64(audioBase64: string): Promise<string> {
+    if (!this.config.serverUrl) {
+      throw new Error('Whisper HTTP server not configured — streaming unavailable');
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 300_000);
+
+    try {
+      const response = await fetch(`${this.config.serverUrl}/transcribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audio_base64: audioBase64,
+          language: this.config.language,
+          beam_size: this.config.beamSize,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(`Whisper chunk error ${response.status}: ${err.error ?? response.statusText}`);
+      }
+
+      const data = (await response.json()) as WhisperServerResponse;
+      const cleaned = this.cleanWhisperHallucinations(data.text);
+      return applyMedicalDictionary(cleaned);
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error('Whisper chunk request timeout');
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
     }
   }
 

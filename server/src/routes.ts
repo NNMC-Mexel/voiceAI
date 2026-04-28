@@ -268,6 +268,18 @@ function collectAdvancedQualityWarnings(
     }
   }
 
+  // Whisper пропустил значение максимального АД: фраза есть, числа нет
+  const hasMaxBpPhrase = /максимальн\S+\s+цифр\S+\s*(?:артериального\s+давления\s*)?/iu.test(rawText);
+  const hasMaxBpValue = /максимальн\S+\s+цифр[^\n.!?]{0,120}\d{2,3}\/\d{2,3}/iu.test(rawText);
+  if (hasMaxBpPhrase && !hasMaxBpValue) {
+    add({
+      code: 'max_bp_value_missing',
+      severity: 'warning',
+      field: 'anamnesis',
+      message: 'Есть фраза "максимальные цифры АД" но числовое значение X/Y не найдено — возможно Whisper пропустил число.',
+    });
+  }
+
   const lifeHistoryInRecommendations = (doc.recommendations || '')
     .split(/\n+/)
     .find((line) => /(?:алкогол[а-яё]*\s+употреб|наследственност|туберкул|операци|травм|профессиональн[а-яё]*\s+вредност|физическ[а-яё]*\s+активность\s+низк|курит\s+\d)/iu.test(line));
@@ -421,6 +433,24 @@ export function isValidMedicalDocument(doc: unknown): doc is MedicalDocument {
   return true;
 }
 
+// ─── Streaming session store ──────────────────────────────────────────────────
+
+interface ChunkJob {
+  index: number;
+  textPromise: Promise<string>;
+}
+
+interface StreamSession {
+  id: string;
+  jobs: ChunkJob[];
+  createdAt: number;
+}
+
+const streamSessions = new Map<string, StreamSession>();
+const STREAM_SESSION_TTL_MS = 30 * 60 * 1000;
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export async function registerRoutes(
   fastify: FastifyInstance,
   config: ServerConfig,
@@ -461,6 +491,9 @@ export async function registerRoutes(
       if (now - st.windowStartedAt > config.security.rateLimitWindowMs * 2) {
         rateMap.delete(ip);
       }
+    }
+    for (const [sid, sess] of streamSessions) {
+      if (now - sess.createdAt > STREAM_SESSION_TTL_MS) streamSessions.delete(sid);
     }
   }, 60 * 60 * 1000);
   cleanupInterval.unref?.();
@@ -585,6 +618,119 @@ export async function registerRoutes(
     }
     return { authenticated: true };
   });
+
+  // ─── Streaming session endpoints ─────────────────────────────────────────────
+
+  fastify.post('/api/session/start', async (_request, reply) => {
+    if (!config.whisper.serverUrl) {
+      return reply.status(503).send({ error: 'Streaming unavailable: Whisper HTTP server not configured' });
+    }
+    const sessionId = randomUUID();
+    streamSessions.set(sessionId, { id: sessionId, jobs: [], createdAt: Date.now() });
+    return { sessionId };
+  });
+
+  fastify.post('/api/session/:id/chunk', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    const session = streamSessions.get(id);
+    if (!session) {
+      return reply.status(404).send({ error: 'Session not found or expired' });
+    }
+
+    const body = request.body;
+    if (!isRecord(body) || typeof body.audio_base64 !== 'string' || !body.audio_base64) {
+      return reply.status(400).send({ error: 'audio_base64 required' });
+    }
+
+    const chunkIndex = typeof body.chunk_index === 'number' ? body.chunk_index : session.jobs.length;
+    const audioBase64 = body.audio_base64 as string;
+
+    const textPromise = whisperService.transcribeBase64(audioBase64).catch((err) => {
+      fastify.log.warn({ sessionId: id, chunkIndex }, `chunk transcription failed: ${err}`);
+      return '';
+    });
+
+    session.jobs.push({ index: chunkIndex, textPromise });
+    return { ok: true, chunkIndex };
+  });
+
+  fastify.post('/api/session/:id/finish', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    const session = streamSessions.get(id);
+    if (!session) {
+      return reply.status(404).send({ error: 'Session not found or expired' });
+    }
+
+    streamSessions.delete(id);
+
+    if (session.jobs.length === 0) {
+      return reply.status(422).send({ error: 'No chunks received in session' });
+    }
+
+    try {
+      const t0 = Date.now();
+
+      const results = await Promise.all(
+        session.jobs
+          .sort((a, b) => a.index - b.index)
+          .map((job) => job.textPromise)
+      );
+
+      const fullText = results.filter((t) => t.trim()).join(' ');
+
+      if (!fullText.trim()) {
+        return reply.status(422).send({ error: 'All chunks failed transcription' });
+      }
+
+      const t1 = Date.now();
+      fastify.log.info(
+        { sessionId: id, chunks: results.length, chars: fullText.length, whisperWaitMs: t1 - t0 },
+        'session chunks merged'
+      );
+
+      const structured = await llmService.structureText(fullText);
+      const t2 = Date.now();
+
+      const usefulness = assessDocumentUsefulness(structured.document);
+      if (usefulness.status === 'empty') {
+        return reply.status(422).send({
+          success: false,
+          error: 'document_appears_empty',
+          reason: usefulness.reason,
+          emptyFields: usefulness.emptyFields,
+          placeholderFields: usefulness.placeholderFields,
+          transcription: { text: fullText, language: 'ru' },
+        });
+      }
+
+      const qualityWarnings = collectDocumentQualityWarningDetails(fullText, structured.document, usefulness);
+
+      fastify.log.info(
+        { timings_ms: { whisper_wait: t1 - t0, llm: t2 - t1, total: t2 - t0 } },
+        'session/finish timings'
+      );
+
+      return {
+        success: true,
+        transcription: { text: fullText, language: 'ru' },
+        document: structured.document,
+        processingTime: t2 - t0,
+        warnings: [...new Set(qualityWarnings.map((w) =>
+          w.code === 'important_number_missing'
+            ? `important_number_missing:${w.evidence || 'value'}`
+            : w.code
+        ))],
+        qualityWarnings,
+      };
+    } catch (error) {
+      fastify.log.error({ sessionId: id }, `session/finish error: ${error}`);
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      const isTimeout = /timeout|aborted/i.test(message);
+      return reply.status(isTimeout ? 408 : 500).send({ error: 'Session finish failed', message });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
 
   fastify.get('/api/health', async () => {
     const [llmReady, whisperReady] = await Promise.all([
