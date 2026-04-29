@@ -3,6 +3,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
+import fastifyJwt from '@fastify/jwt';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -12,6 +13,7 @@ import { WhisperService } from './services/whisper.js';
 import { LLMService } from './services/llm.js';
 import { TtsService } from './services/tts.js';
 import { loadUserCorrections } from './services/medical-dictionary.js';
+import { initDb } from './db/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -67,7 +69,7 @@ async function main() {
       if (!isProduction && isDevLocalOrigin(origin)) return cb(null, true);
       return cb(new Error('CORS blocked'), false);
     },
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   });
 
   await fastify.register(multipart, {
@@ -89,6 +91,29 @@ async function main() {
     fastify.log.info('No static files to serve (frontend not built yet)');
   }
 
+  // JWT plugin — requires JWT_SECRET in production
+  const jwtSecret = config.jwtSecret || 'dev-insecure-secret-change-in-production';
+  if (!config.jwtSecret) {
+    fastify.log.warn('JWT_SECRET is not set — using insecure default. Set JWT_SECRET in .env for production!');
+  }
+  await fastify.register(fastifyJwt, {
+    secret: jwtSecret,
+    sign: { expiresIn: '24h' },
+  });
+
+  // Декоратор для защиты маршрутов
+  fastify.decorate('authenticate', async function (request: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply) {
+    try {
+      await request.jwtVerify();
+    } catch (err) {
+      reply.status(401).send({ error: 'Unauthorized', message: 'Invalid or expired token' });
+    }
+  });
+
+  // Инициализация SQLite БД
+  const db = initDb(config.dbPath);
+  fastify.log.info(`Database: ${config.dbPath}`);
+
   // Загружаем пользовательские замены медицинского словаря
   await loadUserCorrections();
 
@@ -98,7 +123,7 @@ async function main() {
   const llmService = new LLMService(config.llm);
   const ttsService = new TtsService(config.tts);
 
-  await registerRoutes(fastify, config, whisperService, llmService, ttsService);
+  await registerRoutes(fastify, config, whisperService, llmService, ttsService, db);
 
   try {
     await fastify.listen({

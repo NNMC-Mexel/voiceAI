@@ -175,19 +175,19 @@ export function MedicalPDFDocument({ document }: MedicalPDFDocumentProps) {
             <Text style={{ ...styles.sectionTitle, marginBottom: 8 }}>Оценка риска (шкала Морзе)</Text>
             <View style={styles.patientRow}>
               <Text style={styles.patientLabel}>Падал (3 мес.):</Text>
-              <Text style={styles.patientValue}>{document.riskAssessment.fallInLast3Months || 'нет'}</Text>
+              <Text style={styles.patientValue}>{document.riskAssessment.fallInLast3Months || '—'}</Text>
             </View>
             <View style={styles.patientRow}>
               <Text style={styles.patientLabel}>Головокружение:</Text>
-              <Text style={styles.patientValue}>{document.riskAssessment.dizzinessOrWeakness || 'нет'}</Text>
+              <Text style={styles.patientValue}>{document.riskAssessment.dizzinessOrWeakness || '—'}</Text>
             </View>
             <View style={styles.patientRow}>
               <Text style={styles.patientLabel}>Сопровождение:</Text>
-              <Text style={styles.patientValue}>{document.riskAssessment.needsEscort || 'нет'}</Text>
+              <Text style={styles.patientValue}>{document.riskAssessment.needsEscort || '—'}</Text>
             </View>
             <View style={styles.patientRow}>
               <Text style={styles.patientLabel}>Оценка боли:</Text>
-              <Text style={styles.patientValue}>{document.riskAssessment.painScore || '0'}б</Text>
+              <Text style={styles.patientValue}>{document.riskAssessment.painScore ? `${document.riskAssessment.painScore}б` : '—'}</Text>
             </View>
           </View>
         )}

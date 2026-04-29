@@ -61,10 +61,11 @@ export function PreviewScreen({ document, audioBlob, onEdit, onNewDocument }: Pr
   };
 
   return (
-    <div className="min-h-screen bg-slate-100 py-8 px-4">
+    <div className="min-h-screen bg-slate-100 py-6 px-3 sm:py-8 sm:px-4">
       <div className="max-w-6xl mx-auto">
-        <div className="flex items-center justify-between mb-6 slide-up">
-          <div>
+        {/* Header — на мобильном кнопки переезжают под заголовок и оборачиваются */}
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between mb-6 slide-up">
+          <div className="min-w-0">
             <button
               onClick={onEdit}
               className="flex items-center gap-2 text-text-secondary hover:text-medical-600 transition-colors mb-2"
@@ -72,46 +73,68 @@ export function PreviewScreen({ document, audioBlob, onEdit, onNewDocument }: Pr
               <ArrowLeft className="w-4 h-4" />
               <span className="text-sm">Вернуться к редактированию</span>
             </button>
-            <h1 className="text-3xl font-display font-bold text-medical-900">Предпросмотр документа</h1>
+            <h1 className="text-2xl sm:text-3xl font-display font-bold text-medical-900">
+              Предпросмотр документа
+            </h1>
           </div>
 
-          <div className="flex items-center gap-3">
-            <button onClick={onEdit} className="btn-secondary flex items-center gap-2">
+          {/* Action row: wrap на мобильном, кнопки 50% по две в ряд */}
+          <div className="flex flex-wrap gap-2 sm:gap-3 sm:flex-nowrap">
+            <button
+              onClick={onEdit}
+              className="btn-secondary flex items-center justify-center gap-2 flex-1 sm:flex-initial min-w-[140px] px-4 sm:px-6"
+            >
               <Edit className="w-5 h-5" />
-              Редактировать
+              <span className="whitespace-nowrap">Редактировать</span>
             </button>
 
             <PDFDownloadLink document={<MedicalPDFDocument document={document} />} fileName={generateFileName()}>
               {({ loading }) => (
-                <button disabled={loading} className="btn-secondary flex items-center gap-2">
+                <button
+                  disabled={loading}
+                  className="btn-secondary flex items-center justify-center gap-2 flex-1 sm:flex-initial min-w-[140px] px-4 sm:px-6"
+                >
                   {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Download className="w-5 h-5" />}
-                  Скачать PDF
+                  <span className="whitespace-nowrap">Скачать PDF</span>
                 </button>
               )}
             </PDFDownloadLink>
 
             {audioBlob && (
-              <button onClick={handleDownloadAudio} className="btn-secondary flex items-center gap-2">
+              <button
+                onClick={handleDownloadAudio}
+                className="btn-secondary flex items-center justify-center gap-2 flex-1 sm:flex-initial min-w-[140px] px-4 sm:px-6"
+              >
                 <Mic className="w-5 h-5" />
-                Скачать аудио
+                <span className="whitespace-nowrap">Скачать аудио</span>
               </button>
             )}
 
-            <button onClick={handlePrint} disabled={isPrinting} className="btn-primary flex items-center gap-2">
+            <button
+              onClick={handlePrint}
+              disabled={isPrinting}
+              className="btn-primary flex items-center justify-center gap-2 flex-1 sm:flex-initial min-w-[120px] px-4 sm:px-6"
+            >
               {isPrinting ? <Loader2 className="w-5 h-5 animate-spin" /> : <Printer className="w-5 h-5" />}
-              Печать
+              <span className="whitespace-nowrap">Печать</span>
             </button>
           </div>
         </div>
 
         <div className="glass-card rounded-2xl overflow-hidden slide-up" style={{ animationDelay: '0.1s' }}>
-          <div className="bg-medical-700 px-6 py-4 flex items-center gap-3">
-            <FileText className="w-5 h-5 text-white" />
-            <span className="text-white font-medium">{generateFileName()}</span>
+          <div className="bg-medical-700 px-4 py-3 sm:px-6 sm:py-4 flex items-center gap-3">
+            <FileText className="w-5 h-5 text-white shrink-0" />
+            <span className="text-white font-medium truncate">{generateFileName()}</span>
           </div>
 
-          <div className="p-6 bg-slate-200">
-            <div className="mx-auto" style={{ maxWidth: '800px', height: '1000px' }}>
+          {/* PDF preview: высота адаптивна.
+              Мобильный: 70vh (короче, чтобы кнопки внизу оставались видны).
+              Desktop: фиксированные 1000px по бывшей модели — но не больше 80vh. */}
+          <div className="p-3 sm:p-6 bg-slate-200">
+            <div
+              className="mx-auto w-full"
+              style={{ maxWidth: '800px', height: 'min(80vh, 1000px)' }}
+            >
               <PDFViewer width="100%" height="100%" showToolbar={false} className="rounded-lg shadow-2xl">
                 <MedicalPDFDocument document={document} />
               </PDFViewer>
@@ -119,10 +142,13 @@ export function PreviewScreen({ document, audioBlob, onEdit, onNewDocument }: Pr
           </div>
         </div>
 
-        <div className="mt-8 flex justify-center slide-up" style={{ animationDelay: '0.2s' }}>
-          <button onClick={onNewDocument} className="btn-secondary flex items-center gap-2">
+        <div className="mt-6 sm:mt-8 flex justify-center slide-up" style={{ animationDelay: '0.2s' }}>
+          <button
+            onClick={onNewDocument}
+            className="btn-secondary flex items-center justify-center gap-2 w-full sm:w-auto"
+          >
             <FileText className="w-5 h-5" />
-            Создать новый документ
+            <span className="whitespace-nowrap">Создать новый документ</span>
           </button>
         </div>
       </div>

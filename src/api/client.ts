@@ -1,4 +1,59 @@
 ﻿import type { MedicalDocument } from '../types';
+import type { QualityWarning } from '../types';
+
+// ─── Patient / Visit types ────────────────────────────────────────────────────
+
+export interface PatientSummary {
+  id: number;
+  fullName: string;
+  birthDate: string;
+  gender: string;
+  phone: string;
+  iin: string;
+  notes?: string;
+  updatedAt: string;
+  createdAt?: string;
+}
+
+export interface PatientForm {
+  fullName: string;
+  birthDate: string;
+  gender: string;
+  phone: string;
+  iin: string;
+  notes: string;
+}
+
+export interface VisitSummary {
+  id: number;
+  visitDate: string;
+  createdAt: string;
+  diagnosisPreview: string;
+}
+
+export interface VisitDetail {
+  id: number;
+  patientId: number;
+  visitDate: string;
+  createdAt: string;
+  rawTranscription: string;
+  document: MedicalDocument | null;
+}
+
+export interface DoctorInfo {
+  id: number;
+  name: string;
+  email: string;
+  specialty: string;
+  role: 'admin' | 'doctor';
+}
+
+export interface AdminDoctorInfo extends DoctorInfo {
+  isActive: boolean;
+  createdAt: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 const API_TIMEOUT_MS = Number.parseInt(import.meta.env.VITE_API_TIMEOUT_MS || '120000', 10);
@@ -21,6 +76,8 @@ interface StructureResponse {
   document: MedicalDocument;
   rawText: string;
   processingTime: number;
+  warnings?: string[];
+  qualityWarnings?: QualityWarning[];
 }
 
 interface AugmentResponse {
@@ -37,6 +94,8 @@ interface ProcessResponse {
   };
   document: MedicalDocument;
   processingTime: number;
+  warnings?: string[];
+  qualityWarnings?: QualityWarning[];
 }
 
 interface RecommendationsResponse {
@@ -49,7 +108,7 @@ interface ChatResponse {
   answer: string;
 }
 
-type RewriteableField = keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>;
+type RewriteableField = Exclude<keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>, 'manualCheck'>;
 
 interface InstructResponse {
   success: boolean;
@@ -84,6 +143,7 @@ class ApiClient {
     localStorage.removeItem('auth_token');
   }
 
+  /** Legacy single-password login — kept for backward compat */
   async login(password: string): Promise<boolean> {
     const response = await fetch(`${this.baseUrl}/api/auth/login`, {
       method: 'POST',
@@ -99,12 +159,60 @@ class ApiClient {
     return false;
   }
 
+  async loginDoctor(email: string, password: string): Promise<{
+    success: boolean;
+    token?: string;
+    doctor?: DoctorInfo;
+  }> {
+    const response = await fetch(`${this.baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await response.json() as { success?: boolean; token?: string; doctor?: DoctorInfo; error?: string };
+    if (response.ok && data.token) {
+      this.setToken(data.token);
+    }
+    if (!response.ok) throw new Error(data.error || `Login failed: ${response.status}`);
+    return data as { success: boolean; token: string; doctor: DoctorInfo };
+  }
+
+  async registerDoctor(name: string, email: string, password: string, specialty?: string): Promise<{
+    success: boolean;
+    token?: string;
+    doctor?: DoctorInfo;
+  }> {
+    const response = await fetch(`${this.baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, email, password, specialty }),
+    });
+    const data = await response.json() as { success?: boolean; token?: string; doctor?: DoctorInfo; error?: string };
+    if (response.ok && data.token) {
+      this.setToken(data.token);
+    }
+    if (!response.ok) throw new Error(data.error || `Register failed: ${response.status}`);
+    return data as { success: boolean; token: string; doctor: DoctorInfo };
+  }
+
+  async getMe(): Promise<DoctorInfo | null> {
+    try {
+      const result = await this.request<{ doctor: DoctorInfo }>('/api/auth/me');
+      return result.doctor;
+    } catch {
+      return null;
+    }
+  }
+
   async checkAuth(): Promise<boolean> {
     const token = this.getToken();
-    if (!token) return false;
     try {
+      const headers = new Headers();
+      if (token) {
+        headers.set('Authorization', `Bearer ${token}`);
+      }
       const response = await fetch(`${this.baseUrl}/api/auth/check`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers,
       });
       return response.ok;
     } catch {
@@ -121,6 +229,55 @@ class ApiClient {
       }).catch(() => {});
     }
     this.clearToken();
+  }
+
+  async getAdminDoctors(): Promise<{ doctors: AdminDoctorInfo[] }> {
+    return this.request('/api/admin/doctors');
+  }
+
+  async createAdminDoctor(data: {
+    name: string;
+    email: string;
+    password: string;
+    specialty?: string;
+    role: 'admin' | 'doctor';
+  }): Promise<{ success: boolean; doctor: AdminDoctorInfo }> {
+    return this.request('/api/admin/doctors', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateAdminDoctor(
+    id: number,
+    data: { name?: string; specialty?: string; role?: 'admin' | 'doctor'; isActive?: boolean },
+  ): Promise<{ success: boolean; doctor: AdminDoctorInfo }> {
+    return this.request(`/api/admin/doctors/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteAdminDoctor(id: number): Promise<{ success: boolean }> {
+    return this.request(`/api/admin/doctors/${id}`, { method: 'DELETE' });
+  }
+
+  async updateProfile(data: { name?: string; specialty?: string }): Promise<{ success: boolean; doctor: DoctorInfo }> {
+    return this.request('/api/settings/profile', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  }
+
+  async changePassword(currentPassword: string, newPassword: string): Promise<{ success: boolean }> {
+    return this.request('/api/settings/password', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ currentPassword, newPassword }),
+    });
   }
 
   private async request<T>(path: string, init?: RequestInit, timeoutMs?: number): Promise<T> {
@@ -340,17 +497,130 @@ class ApiClient {
     return result.audio_base64;
   }
 
-  // ─── Corrections API ────────────────────────────────────────────────────────
+  // ─── Patients ────────────────────────────────────────────────────────────────
 
-  async addCorrection(wrong: string, correct: string): Promise<{ success: boolean; id: string; totalCorrections: number }> {
-    return this.request('/api/corrections', {
+  async getPatients(opts?: { q?: string; page?: number }): Promise<{
+    patients: PatientSummary[];
+    page: number;
+    hasMore: boolean;
+  }> {
+    const params = new URLSearchParams();
+    if (opts?.q) params.set('q', opts.q);
+    if (opts?.page) params.set('page', String(opts.page));
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return this.request(`/api/patients${qs}`);
+  }
+
+  async createPatient(data: Partial<PatientForm>): Promise<{ success: boolean; patient: PatientSummary }> {
+    return this.request('/api/patients', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ wrong, correct }),
+      body: JSON.stringify(data),
     });
   }
 
-  async getCorrections(): Promise<{ corrections: Array<{ id: string; wrong: string; correct: string; createdAt: string }>; total: number }> {
+  async getPatient(id: number): Promise<{ patient: PatientSummary; visits: VisitSummary[] }> {
+    return this.request(`/api/patients/${id}`);
+  }
+
+  async updatePatient(id: number, data: Partial<PatientForm>): Promise<{ success: boolean; patient: PatientSummary }> {
+    return this.request(`/api/patients/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  }
+
+  async saveVisit(patientId: number, document: MedicalDocument, rawTranscription?: string): Promise<{ success: boolean; visitId: number; visitDate: string }> {
+    return this.request(`/api/patients/${patientId}/visits`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ document, rawTranscription }),
+    }, 30_000);
+  }
+
+  async getVisit(visitId: number): Promise<{ visit: VisitDetail }> {
+    return this.request(`/api/visits/${visitId}`);
+  }
+
+  // ─── Mobile ↔ Desktop sync ───────────────────────────────────────────────────
+
+  async syncUpload(file: File): Promise<{ success: boolean; syncId: string }> {
+    const formData = new FormData();
+    formData.append('file', file, file.name);
+    return this.request('/api/sync/upload', { method: 'POST', body: formData }, 300_000);
+  }
+
+  async syncStatus(syncId: string): Promise<{ session: { id: string; status: string; errorMessage: string; expiresAt: string } }> {
+    return this.request(`/api/sync/${encodeURIComponent(syncId)}/status`);
+  }
+
+  async syncPending(): Promise<{ sessions: Array<{ id: string; filename: string; createdAt: string; expiresAt: string }> }> {
+    return this.request('/api/sync/pending');
+  }
+
+  async syncClaim(syncId: string): Promise<{ success: boolean; document: MedicalDocument; rawTranscription: string; filename: string }> {
+    return this.request(`/api/sync/${encodeURIComponent(syncId)}/claim`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+  }
+
+  async syncDelete(syncId: string): Promise<{ success: boolean }> {
+    return this.request(`/api/sync/${encodeURIComponent(syncId)}`, { method: 'DELETE' });
+  }
+
+  // ─── Document processing ─────────────────────────────────────────────────────
+
+  async getDocumentCapabilities(): Promise<{ pdf: boolean; word: boolean; image: boolean }> {
+    return this.request('/api/document-capabilities');
+  }
+
+  async processDocument(file: File): Promise<ProcessResponse & {
+    transcription: { text: string; language: string; extractionMethod: string; pageCount?: number; warning?: string };
+  }> {
+    const formData = new FormData();
+    formData.append('file', file, file.name);
+    return this.request('/api/process-document', {
+      method: 'POST',
+      body: formData,
+    }, 300_000);
+  }
+
+  // ─── Streaming session API ───────────────────────────────────────────────────
+
+  async startSession(): Promise<{ sessionId: string }> {
+    return this.request('/api/session/start', { method: 'POST' }, 10_000);
+  }
+
+  async sendChunk(sessionId: string, audioBase64: string, chunkIndex: number): Promise<{ ok: boolean; chunkIndex: number }> {
+    return this.request(`/api/session/${encodeURIComponent(sessionId)}/chunk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audio_base64: audioBase64, chunk_index: chunkIndex }),
+    }, 30_000);
+  }
+
+  async finishSession(sessionId: string): Promise<ProcessResponse & { transcription: { text: string; language: string } }> {
+    return this.request(`/api/session/${encodeURIComponent(sessionId)}/finish`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }, 300_000);
+  }
+
+  // ─── Corrections API ────────────────────────────────────────────────────────
+
+  async addCorrection(
+    wrong: string,
+    correct: string,
+    options?: { scope?: string; requireDose?: boolean }
+  ): Promise<{ success: boolean; id: string; totalCorrections: number }> {
+    return this.request('/api/corrections', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ wrong, correct, ...options }),
+    });
+  }
+
+  async getCorrections(): Promise<{ corrections: Array<{ id: string; wrong: string; correct: string; createdAt: string; scope?: string; requireDose?: boolean }>; total: number }> {
     return this.request('/api/corrections');
   }
 

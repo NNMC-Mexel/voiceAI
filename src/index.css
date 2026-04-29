@@ -41,9 +41,14 @@
   
   body {
     @apply text-text-primary antialiased;
-    background-image: 
+    background-image:
       radial-gradient(ellipse at top left, rgba(51, 150, 120, 0.05) 0%, transparent 50%),
       radial-gradient(ellipse at bottom right, rgba(51, 150, 120, 0.03) 0%, transparent 50%);
+    /* Safety-net на горизонтальный overflow: ловит любые широкие элементы
+       (например, фиксированные width в react-pdf preview), чтобы на мобильном
+       не появлялся горизонтальный скролл всей страницы. Локальные контейнеры
+       (PDF-preview) сами включают overflow-auto, чтобы свайп внутри работал. */
+    overflow-x: hidden;
   }
 }
 

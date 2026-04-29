@@ -26,6 +26,7 @@ function parseCorsOrigins(raw: string | undefined, fallback: string[]): string[]
 function resolveLlmProvider(): LLMProviderKind {
   const raw = process.env.LLM_PROVIDER?.trim().toLowerCase();
   if (raw === 'anthropic') return 'anthropic';
+  if (raw === 'ollama') return 'ollama';
   return 'llama';
 }
 
@@ -56,11 +57,14 @@ export function loadConfig(): ServerConfig {
     port: parseIntSafe(process.env.PORT, defaultConfig.port),
     host: process.env.HOST || defaultConfig.host,
     uploadDir: process.env.UPLOAD_DIR || defaultConfig.uploadDir,
+    dbPath: process.env.DB_PATH || defaultConfig.dbPath,
+    jwtSecret: process.env.JWT_SECRET || '',
     whisper: {
       modelPath: process.env.WHISPER_MODEL_PATH || defaultConfig.whisper.modelPath,
       language: process.env.WHISPER_LANGUAGE || defaultConfig.whisper.language,
       device: (process.env.WHISPER_DEVICE as 'cuda' | 'cpu') || defaultConfig.whisper.device,
       serverUrl: process.env.WHISPER_SERVER_URL?.trim() || undefined,
+      beamSize: parseIntSafe(process.env.WHISPER_BEAM_SIZE, defaultConfig.whisper.beamSize),
     },
     llm: {
       provider: resolveLlmProvider(),

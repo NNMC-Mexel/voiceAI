@@ -33,3 +33,4 @@ dist-ssr
 # Runtime dirs (создаются на сервере)
 uploads/
 temp/
+server/data/

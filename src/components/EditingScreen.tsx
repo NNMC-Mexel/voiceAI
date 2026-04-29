@@ -27,7 +27,8 @@
   VolumeX,
   ChevronDown,
 } from 'lucide-react';
-import type { MedicalDocument, PatientInfo, RiskAssessment } from '../types';
+import type { MedicalDocument, MedicalDocumentTextField, PatientInfo, RiskAssessment } from '../types';
+import type { PatientSummary } from '../api/client';
 import { fieldLabels, patientFieldLabels, riskAssessmentLabels } from '../types';
 import { CollapsibleSection } from './CollapsibleSection';
 import { TermCorrectionPopup } from './TermCorrectionPopup';
@@ -44,6 +45,14 @@ interface EditingScreenProps {
   onDocumentChange: (document: MedicalDocument) => void;
   onPreview: () => void;
   onBack: () => void;
+  rawTranscription?: string;
+  qualityWarnings?: string[];
+  onRestructure?: () => Promise<void>;
+  isRestructuring?: boolean;
+  activePatient?: PatientSummary | null;
+  onSaveToPatient?: (patientId: number) => Promise<void>;
+  onCreatePatientFromDocument?: () => Promise<PatientSummary>;
+  onOpenPatients?: () => void;
 }
 
 interface ChatMessage {
@@ -52,7 +61,7 @@ interface ChatMessage {
   kind?: 'recommendations' | 'chat';
 }
 
-type RewriteableField = keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>;
+type RewriteableField = MedicalDocumentTextField;
 
 function isDocumentEditInstruction(text: string): boolean {
   const normalized = text.toLowerCase();
@@ -101,7 +110,7 @@ function filenameForBlob(blob: Blob, baseName: string): string {
   return `${baseName}.webm`;
 }
 
-const sectionIcons: Record<keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>, React.ReactNode> = {
+const sectionIcons: Record<MedicalDocumentTextField, React.ReactNode> = {
   complaints: <MessageSquare className="w-4 h-4" />,
   anamnesis: <History className="w-4 h-4" />,
   outpatientExams: <FlaskConical className="w-4 h-4" />,
@@ -132,6 +141,64 @@ function applyDietTemplateToRecommendations(current: string, templateText: strin
   return appended;
 }
 
+function countMatches(text: string, pattern: RegExp): number {
+  return (text.match(pattern) || []).length;
+}
+
+function buildQualityIssues(
+  rawText: string,
+  document: MedicalDocument,
+  serverWarnings: string[]
+): string[] {
+  const issues = new Set<string>();
+  for (const warning of serverWarnings) {
+    if (warning.includes('important_number_missing')) {
+      issues.add('Возможна потеря важного числового значения.');
+    } else if (warning.includes('suspicious_unit_garbage')) {
+      issues.add('Есть подозрительные единицы измерения, проверьте анализы вручную.');
+    } else if (warning.includes('document_labs_only')) {
+      issues.add('Документ похож только на лабораторный блок, проверьте клинические разделы.');
+    } else {
+      issues.add(warning);
+    }
+  }
+
+  const rawLabSignals = countMatches(
+    rawText,
+    /(?:гемоглобин|эритроцит|лейкоцит|тромбоцит|соэ|креатинин|мочевин|глюкоз|холестерин|лпнп|лпвп|триглицерид|калий|натрий|нитрит|бактери|hba1c|гликирован)/giu
+  );
+  const finalLabSignals = countMatches(
+    document.outpatientExams,
+    /(?:гемоглобин|эритроцит|лейкоцит|тромбоцит|соэ|креатинин|мочевин|глюкоз|холестерин|лпнп|лпвп|триглицерид|калий|натрий|нитрит|бактери|hba1c|гликирован)/giu
+  );
+  if (rawLabSignals >= 8 && finalLabSignals < Math.floor(rawLabSignals * 0.65)) {
+    issues.add('Возможна потеря лабораторных значений: в транскрипции их заметно больше, чем в итоговом блоке.');
+  }
+
+  const rawBp = rawText.match(/\b\d{2,3}\s*(?:\/|на)\s*\d{2,3}\b/giu) || [];
+  const finalBpText = [
+    document.complaints,
+    document.anamnesis,
+    document.objectiveStatus,
+    document.outpatientExams,
+    document.recommendations,
+  ].join(' ');
+  for (const value of rawBp.slice(0, 8)) {
+    const normalized = value.replace(/\s+на\s+/iu, '/').replace(/\s+/g, '');
+    if (!finalBpText.replace(/\s+/g, '').includes(normalized)) {
+      issues.add(`Проверьте АД ${normalized}: значение есть в транскрипции, но может отсутствовать в итоговых полях.`);
+    }
+  }
+
+  const rawRecommendationItems = countMatches(rawText, /(?:цефиксим|канефрон|амлодипин|индапамид|аторвостатин|ограничить соль|питьевой режим|снижение массы)/giu);
+  const finalRecommendationItems = document.recommendations.split(/\n+/).filter((line) => /^\s*\d+[\.\)]\s+/.test(line)).length;
+  if (rawRecommendationItems >= 6 && finalRecommendationItems > 0 && finalRecommendationItems < 6) {
+    issues.add('Рекомендации могли склеиться: в исходном тексте больше отдельных назначений, чем пунктов в итоговом списке.');
+  }
+
+  return Array.from(issues);
+}
+
 const MIN_TEXTAREA_HEIGHT = 100;
 const MAX_TEXTAREA_HEIGHT = 420;
 
@@ -140,7 +207,18 @@ export function EditingScreen({
   onDocumentChange,
   onPreview,
   onBack,
+  rawTranscription = '',
+  qualityWarnings = [],
+  onRestructure,
+  isRestructuring = false,
+  activePatient,
+  onSaveToPatient,
+  onCreatePatientFromDocument,
+  onOpenPatients,
 }: EditingScreenProps) {
+  const [savedToPatient, setSavedToPatient] = useState(false);
+  const [savingToPatient, setSavingToPatient] = useState(false);
+  const [savePatientError, setSavePatientError] = useState('');
   const {
     isRecording: isAddendumRecording,
     isPaused: isAddendumPaused,
@@ -177,10 +255,13 @@ export function EditingScreen({
   const [isTtsSpeaking, setIsTtsSpeaking] = useState(false);
   const [isDietListOpen, setIsDietListOpen] = useState(false);
   const [isExamListOpen, setIsExamListOpen] = useState(false);
+  const [isQualityPanelOpen, setIsQualityPanelOpen] = useState(true);
+  const [isRawCompareOpen, setIsRawCompareOpen] = useState(false);
+  const [quickFixLoading, setQuickFixLoading] = useState<string | null>(null);
   const [correctionPopup, setCorrectionPopup] = useState<{
     position: { x: number; y: number };
     selectedText: string;
-    fieldKey: keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>;
+    fieldKey: MedicalDocumentTextField;
     selectionStart: number;
     selectionEnd: number;
   } | null>(null);
@@ -188,6 +269,7 @@ export function EditingScreen({
   const documentRef = useRef(document);
   useEffect(() => { documentRef.current = document; }, [document]);
   const recommendationsInFlightRef = useRef(false);
+  const qualityIssues = buildQualityIssues(rawTranscription, document, qualityWarnings);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsUrlRef = useRef<string | null>(null);
   const ttsGenRef = useRef(0);
@@ -297,7 +379,7 @@ export function EditingScreen({
   };
 
   const handleFieldChange = (
-    field: keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>,
+    field: MedicalDocumentTextField,
     value: string
   ) => {
     onDocumentChange({
@@ -333,7 +415,7 @@ export function EditingScreen({
 
   const handleTextareaContextMenu = (
     e: React.MouseEvent<HTMLTextAreaElement>,
-    fieldKey: keyof Omit<MedicalDocument, 'patient' | 'riskAssessment'>
+    fieldKey: MedicalDocumentTextField
   ) => {
     // Try current selection first, fall back to saved selection
     const textarea = e.currentTarget;
@@ -359,7 +441,12 @@ export function EditingScreen({
     savedSelectionRef.current = null;
   };
 
-  const handleCorrectionSave = async (wrong: string, correct: string, remember: boolean) => {
+  const handleCorrectionSave = async (
+    wrong: string,
+    correct: string,
+    remember: boolean,
+    options: { scope: 'global' | 'medications' | 'exams' | 'neurological'; requireDose: boolean }
+  ) => {
     if (!correctionPopup) return;
     // Заменяем текст в поле
     const { fieldKey, selectionStart, selectionEnd } = correctionPopup;
@@ -369,7 +456,7 @@ export function EditingScreen({
     // Если «Запомнить» — отправляем на сервер
     if (remember) {
       try {
-        await apiClient.addCorrection(wrong, correct);
+        await apiClient.addCorrection(wrong, correct, options);
       } catch (err) {
         console.warn('Failed to save correction:', err);
       }
@@ -527,6 +614,38 @@ export function EditingScreen({
       ]);
     } finally {
       setChatLoading(false);
+    }
+  };
+
+  const applyQuickInstruction = async (instruction: string, label: string) => {
+    if (chatLoading || isVoiceCommandProcessing || rewriteLoadingField !== null || quickFixLoading) return;
+    setQuickFixLoading(label);
+    try {
+      const result = await apiClient.instructDocument(documentRef.current, instruction);
+      onDocumentChange(result.document);
+      await refreshRecommendationsInChat();
+      setChatMessages((prev) => [
+        ...prev,
+        { role: 'user', text: instruction },
+        {
+          role: 'assistant',
+          kind: 'chat',
+          text: result.changedFields.length > 0 || result.patientChanged
+            ? 'Команда применена к документу.'
+            : 'Команду понял, но изменений не потребовалось.',
+        },
+      ]);
+    } catch (err) {
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          kind: 'chat',
+          text: err instanceof Error ? `Не удалось применить команду: ${err.message}` : 'Не удалось применить команду.',
+        },
+      ]);
+    } finally {
+      setQuickFixLoading(null);
     }
   };
 
@@ -746,10 +865,11 @@ export function EditingScreen({
   ]);
 
   return (
-    <div className="min-h-screen py-6 px-4">
+    <div className="min-h-screen py-4 px-3 sm:py-6 sm:px-4">
       <div className="max-w-[1600px] mx-auto">
-        <div className="flex items-center justify-between mb-8 slide-up">
-          <div>
+        {/* Header — стек на мобильном, side-by-side от sm */}
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between mb-6 sm:mb-8 slide-up">
+          <div className="min-w-0">
             <button
               onClick={() => {
                 if (window.confirm('Все несохранённые изменения будут потеряны. Продолжить?')) {
@@ -761,15 +881,202 @@ export function EditingScreen({
               <ArrowLeft className="w-4 h-4" />
               <span className="text-sm">Назад к записи</span>
             </button>
-            <h1 className="text-3xl font-display font-bold text-medical-900">Редактирование протокола</h1>
-            <p className="text-text-secondary mt-1">Проверьте и отредактируйте распознанные данные</p>
+            <h1 className="text-2xl sm:text-3xl font-display font-bold text-medical-900">
+              Редактирование протокола
+            </h1>
+            <p className="text-text-secondary mt-1 text-sm sm:text-base">
+              Проверьте и отредактируйте распознанные данные
+            </p>
           </div>
 
-          <button onClick={onPreview} className="btn-primary flex items-center gap-2">
-            <Eye className="w-5 h-5" />
-            Предпросмотр PDF
-          </button>
+          <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+            {onSaveToPatient && activePatient && (
+              <button
+                onClick={async () => {
+                  setSavePatientError('');
+                  try {
+                    setSavingToPatient(true);
+                    await onSaveToPatient(activePatient.id);
+                    setSavedToPatient(true);
+                  } catch (err) {
+                    setSavePatientError(err instanceof Error ? err.message : 'Не удалось сохранить осмотр');
+                  } finally {
+                    setSavingToPatient(false);
+                  }
+                }}
+                disabled={savingToPatient || savedToPatient}
+                className="btn-secondary flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap"
+              >
+                {savedToPatient ? <CheckCircle className="w-4 h-4 text-green-600" /> : <PlusCircle className="w-4 h-4" />}
+                {savedToPatient ? `Сохранено: ${activePatient.fullName}` : savingToPatient ? 'Сохранение...' : `Сохранить: ${activePatient.fullName}`}
+              </button>
+            )}
+            {onCreatePatientFromDocument && !activePatient && (
+              <button
+                onClick={async () => {
+                  setSavePatientError('');
+                  try {
+                    setSavingToPatient(true);
+                    await onCreatePatientFromDocument();
+                    setSavedToPatient(true);
+                  } catch (err) {
+                    setSavePatientError(err instanceof Error ? err.message : 'Не удалось сохранить пациента');
+                  } finally {
+                    setSavingToPatient(false);
+                  }
+                }}
+                disabled={savingToPatient || savedToPatient || !document.patient.fullName.trim()}
+                className="btn-secondary flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap"
+              >
+                {savedToPatient ? <CheckCircle className="w-4 h-4 text-green-600" /> : <PlusCircle className="w-4 h-4" />}
+                {savedToPatient ? 'Пациент сохранён' : savingToPatient ? 'Сохранение...' : 'Сохранить пациента'}
+              </button>
+            )}
+            {onOpenPatients && !activePatient && !onCreatePatientFromDocument && (
+              <button
+                onClick={onOpenPatients}
+                className="btn-secondary flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap"
+              >
+                <PlusCircle className="w-4 h-4" />
+                Выбрать карточку
+              </button>
+            )}
+            <button
+              onClick={onPreview}
+              className="btn-primary flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap"
+            >
+              <Eye className="w-5 h-5" />
+              Предпросмотр PDF
+            </button>
+          </div>
         </div>
+
+        {savePatientError && (
+          <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            {savePatientError}
+          </div>
+        )}
+
+        {(rawTranscription || qualityIssues.length > 0) && (
+          <div className="mb-6 glass-card rounded-2xl p-4 slide-up">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <button
+                type="button"
+                onClick={() => setIsQualityPanelOpen((v) => !v)}
+                className="flex min-w-0 items-start gap-3 text-left"
+              >
+                <div className={`mt-0.5 rounded-lg p-2 ${qualityIssues.length ? 'bg-amber-100 text-amber-700' : 'bg-medical-100 text-medical-700'}`}>
+                  <AlertCircle className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-base font-semibold text-medical-900">Контроль качества</h2>
+                  <p className="text-sm text-text-secondary">
+                    {qualityIssues.length
+                      ? `${qualityIssues.length} пункт(ов) для ручной проверки`
+                      : 'Критичных предупреждений по документу не найдено'}
+                  </p>
+                </div>
+                <ChevronDown className={`mt-1 h-4 w-4 shrink-0 text-text-muted transition-transform ${isQualityPanelOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void onRestructure?.()}
+                  disabled={!rawTranscription.trim() || !onRestructure || isRestructuring || quickFixLoading !== null}
+                  className="btn-secondary flex items-center gap-2 px-3 py-2 text-sm"
+                >
+                  {isRestructuring ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                  Переструктурировать
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void applyQuickInstruction('Перенеси Канефрон N в рекомендациях отдельным нумерованным пунктом, не меняя дозировку и длительность.', 'kanefron')}
+                  disabled={quickFixLoading !== null || chatLoading || isRestructuring}
+                  className="btn-secondary flex items-center gap-2 px-3 py-2 text-sm"
+                >
+                  {quickFixLoading === 'kanefron' ? <Loader2 className="h-4 w-4 animate-spin" /> : <ListTodo className="h-4 w-4" />}
+                  Канефрон отдельным пунктом
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsRawCompareOpen((v) => !v)}
+                  className="btn-secondary flex items-center gap-2 px-3 py-2 text-sm"
+                >
+                  <ClipboardList className="h-4 w-4" />
+                  Raw vs итог
+                </button>
+              </div>
+            </div>
+
+            {isQualityPanelOpen && (
+              <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,0.55fr)]">
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
+                  <div className="mb-2 text-sm font-semibold text-amber-900">Проверить вручную</div>
+                  {qualityIssues.length > 0 ? (
+                    <ul className="space-y-1 text-sm text-amber-900">
+                      {qualityIssues.map((issue) => (
+                        <li key={issue} className="flex gap-2">
+                          <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-600" />
+                          <span>{issue}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-sm text-text-secondary">Нет автоматических предупреждений. Всё равно проверьте диагноз, анализы и назначения перед печатью.</p>
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm">
+                  <div className="mb-2 font-semibold text-medical-900">Быстрая сверка</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <div className="text-xs text-text-muted">Raw символов</div>
+                      <div className="font-semibold text-text-primary">{rawTranscription.length || '—'}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-text-muted">Анализы</div>
+                      <div className="font-semibold text-text-primary">{document.outpatientExams.split(/\n+/).filter(Boolean).length || '—'}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-text-muted">Рекомендации</div>
+                      <div className="font-semibold text-text-primary">{document.recommendations.split(/\n+/).filter(Boolean).length || '—'}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-text-muted">Warnings</div>
+                      <div className="font-semibold text-text-primary">{qualityWarnings.length}</div>
+                    </div>
+                  </div>
+                </div>
+
+                {isRawCompareOpen && (
+                  <div className="xl:col-span-2 grid gap-3 lg:grid-cols-2">
+                    <div>
+                      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-text-muted">Raw transcription</div>
+                      <textarea
+                        readOnly
+                        value={rawTranscription}
+                        className="textarea-field min-h-[260px] font-mono text-xs"
+                      />
+                    </div>
+                    <div>
+                      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-text-muted">Итоговые поля для сверки</div>
+                      <textarea
+                        readOnly
+                        value={[
+                          `Амбулаторные обследования:\n${document.outpatientExams}`,
+                          `\n\nРекомендации:\n${document.recommendations}`,
+                          `\n\nАллергологический анамнез:\n${document.allergyHistory}`,
+                        ].join('')}
+                        className="textarea-field min-h-[260px] font-mono text-xs"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="grid grid-cols-1 xl:grid-cols-[minmax(420px,1fr)_minmax(0,2fr)] gap-6">
           <div className="glass-card rounded-2xl p-4 lg:sticky lg:top-4 self-start slide-up lg:max-h-[calc(100vh-180px)] flex flex-col overflow-hidden">
@@ -872,20 +1179,23 @@ export function EditingScreen({
 
           <div className="space-y-6">
             <div className="mb-6 slide-up" style={{ animationDelay: '0.08s' }}>
-              <div className="glass-card rounded-2xl p-6">
-                <div className="flex items-center justify-between gap-4">
-                  <div>
+              <div className="glass-card rounded-2xl p-4 sm:p-6">
+                {/* Стек на мобильном: текст сверху, кнопка снизу на всю ширину */}
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+                  <div className="min-w-0">
                     <div className="inline-flex items-center gap-2 px-3 py-1 bg-medical-100 text-medical-700 rounded-full text-xs font-medium mb-2">
                       <PlusCircle className="w-4 h-4" />
                       Дополнение
                     </div>
-                    <h2 className="text-lg font-semibold text-medical-900">Если забыли важную информацию — добавьте голосом</h2>
+                    <h2 className="text-base sm:text-lg font-semibold text-medical-900">
+                      Если забыли важную информацию — добавьте голосом
+                    </h2>
                     <p className="text-text-secondary text-sm mt-1">Дополнение будет расшифровано и встроено в текущий документ.</p>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 sm:shrink-0">
                     <button
                       onClick={() => setIsAddendumOpen((v) => !v)}
-                      className="btn-secondary flex items-center gap-2"
+                      className="btn-secondary flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap"
                     >
                       <Mic className="w-4 h-4" />
                       {isAddendumOpen ? 'Скрыть' : 'Записать дополнение'}
@@ -1068,6 +1378,9 @@ export function EditingScreen({
                     <div key={field}>
                       <label className="block text-sm font-medium text-text-secondary mb-2">
                         {riskAssessmentLabels[field]}
+                        {!document.riskAssessment[field] && (
+                          <span className="ml-2 text-xs text-amber-600">не указано</span>
+                        )}
                       </label>
                       <div className="flex gap-2">
                         {['нет', 'да'].map((option) => (
@@ -1091,6 +1404,9 @@ export function EditingScreen({
                   <div>
                     <label className="block text-sm font-medium text-text-secondary mb-2">
                       {riskAssessmentLabels.painScore} (0-10)
+                      {!document.riskAssessment.painScore && (
+                        <span className="ml-2 text-xs text-amber-600">не указано</span>
+                      )}
                     </label>
                     <div className="flex items-center gap-3">
                       <input
@@ -1102,7 +1418,7 @@ export function EditingScreen({
                         className="flex-1 accent-medical-600"
                       />
                       <span className="text-lg font-bold text-medical-700 min-w-[3ch] text-center">
-                        {document.riskAssessment.painScore}б
+                        {document.riskAssessment.painScore ? `${document.riskAssessment.painScore}б` : '—'}
                       </span>
                     </div>
                   </div>
@@ -1297,6 +1613,15 @@ export function EditingScreen({
         <TermCorrectionPopup
           position={correctionPopup.position}
           selectedText={correctionPopup.selectedText}
+          defaultScope={
+            correctionPopup.fieldKey === 'conclusion' || correctionPopup.fieldKey === 'recommendations'
+              ? 'medications'
+              : correctionPopup.fieldKey === 'outpatientExams'
+                ? 'exams'
+                : correctionPopup.fieldKey === 'neurologicalStatus'
+                  ? 'neurological'
+                  : 'global'
+          }
           onSave={handleCorrectionSave}
           onClose={() => setCorrectionPopup(null)}
         />

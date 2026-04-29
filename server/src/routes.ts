@@ -8,12 +8,18 @@ import { randomUUID } from 'crypto';
 import { WhisperService } from './services/whisper.js';
 import { LLMService } from './services/llm.js';
 import { TtsService } from './services/tts.js';
+import { DocumentExtractorService } from './services/document-extractor.js';
+import type { AppDb } from './db/index.js';
+import { doctors } from './db/schema.js';
+import { registerDoctorRoutes } from './routes-doctors.js';
+import { eq } from 'drizzle-orm';
 import {
   getUserCorrections,
   addUserCorrection,
   deleteUserCorrection,
 } from './services/medical-dictionary.js';
-import type { ServerConfig, MedicalDocument } from './types.js';
+import type { UserCorrectionScope } from './services/medical-dictionary.js';
+import type { ServerConfig, MedicalDocument, QualityWarning } from './types.js';
 
 interface RateState {
   count: number;
@@ -41,6 +47,12 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null;
 }
 
+function normalizeCorrectionScope(scope: string | undefined): UserCorrectionScope {
+  return scope === 'medications' || scope === 'exams' || scope === 'neurological'
+    ? scope
+    : 'global';
+}
+
 export function toSafeUploadFilename(originalName: string): string {
   const base = path.basename(originalName);
   const sanitized = base.replace(/[^A-Za-z0-9._-]/g, '_');
@@ -57,6 +69,531 @@ export function resolveUploadPath(uploadDir: string, filename: string): string {
   }
 
   return candidate;
+}
+
+function toCleanOcrLines(rawText: string): string[] {
+  return rawText
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
+function parseDmyDate(value: string): Date | null {
+  const match = value.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (!match) return null;
+
+  const [, dd, mm, yyyy] = match;
+  const date = new Date(Number(yyyy), Number(mm) - 1, Number(dd));
+  if (
+    date.getFullYear() !== Number(yyyy) ||
+    date.getMonth() !== Number(mm) - 1 ||
+    date.getDate() !== Number(dd)
+  ) {
+    return null;
+  }
+  return date;
+}
+
+function dmyToIso(value: string): string {
+  if (!parseDmyDate(value)) return '';
+  const [, dd, mm, yyyy] = value.match(/^(\d{2})\.(\d{2})\.(\d{4})$/) || [];
+  return yyyy && mm && dd ? `${yyyy}-${mm}-${dd}` : '';
+}
+
+function calculateAgeYears(birthDate: Date, atDate: Date): string {
+  let age = atDate.getFullYear() - birthDate.getFullYear();
+  const beforeBirthday =
+    atDate.getMonth() < birthDate.getMonth() ||
+    (atDate.getMonth() === birthDate.getMonth() && atDate.getDate() < birthDate.getDate());
+  if (beforeBirthday) age -= 1;
+  return age >= 0 && age < 130 ? `${age} лет` : '';
+}
+
+function extractDocumentDateIso(rawText: string): string {
+  const patterns = [
+    /Дата\s+взятия:\s*(\d{2}\.\d{2}\.\d{4})/iu,
+    /Заказ\s*№?\S*\s+от\s*(\d{2}\.\d{2}\.\d{4})/iu,
+    /Выполнено:\s*(\d{2}\.\d{2}\.\d{4})/iu,
+  ];
+
+  for (const pattern of patterns) {
+    const match = rawText.match(pattern);
+    if (match?.[1]) {
+      const iso = dmyToIso(match[1]);
+      if (iso) return iso;
+    }
+  }
+  return '';
+}
+
+function looksLikePatientNameLine(line: string): boolean {
+  const clean = line.replace(/\([^)]*\)/g, '').trim();
+  if (!/^[А-ЯЁA-Z][А-ЯЁA-Z'’` -]+$/u.test(clean)) return false;
+
+  const words = clean.split(/\s+/).filter(Boolean);
+  if (words.length < 2 || words.length > 4) return false;
+  return !/(?:МИНИСТЕРСТВО|MINISTRY|ORGANIZATION|ОРГАНИЗАЦ|НАИМЕНОВАНИЕ|ТОО|АО|HEALTH|CENTER|MEDICAL|ВРАЧ|КАЗАХСТАН|РЕСПУБЛИК)/iu.test(clean);
+}
+
+function extractPatientFromExactText(rawText: string): MedicalDocument['patient'] {
+  const lines = toCleanOcrLines(rawText);
+  const birthMatch = rawText.match(/Дата\s+рождения:\s*(\d{2}\.\d{2}\.\d{4})/iu);
+  const birthDate = birthMatch?.[1] ? parseDmyDate(birthMatch[1]) : null;
+  const documentDateIso = extractDocumentDateIso(rawText);
+  const documentDate = documentDateIso ? new Date(`${documentDateIso}T00:00:00`) : new Date();
+
+  let fullName = '';
+  let gender = '';
+
+  const birthLineIndex = lines.findIndex((line) => /Дата\s+рождения:/iu.test(line));
+  const candidates = birthLineIndex >= 0
+    ? lines.slice(Math.max(0, birthLineIndex - 6), birthLineIndex).reverse()
+    : lines;
+
+  for (const line of candidates) {
+    if (!looksLikePatientNameLine(line)) continue;
+
+    const genderMatch = line.match(/\((муж|жен|м|ж|male|female)\)/iu);
+    if (genderMatch) {
+      const value = genderMatch[1].toLowerCase();
+      gender = value.startsWith('м') || value === 'male' ? 'мужской' : 'женский';
+    }
+
+    fullName = line.replace(/\([^)]*\)/g, '').replace(/\s+/g, ' ').trim();
+    break;
+  }
+
+  const explicitGender = rawText.match(/(?:Пол|Gender):\s*(мужской|женский|муж|жен|male|female)/iu);
+  if (!gender && explicitGender?.[1]) {
+    const value = explicitGender[1].toLowerCase();
+    gender = value.startsWith('м') || value === 'male' ? 'мужской' : 'женский';
+  }
+
+  return {
+    fullName,
+    age: birthDate ? calculateAgeYears(birthDate, documentDate) : '',
+    gender,
+    complaintDate: documentDateIso || new Date().toISOString().slice(0, 10),
+    birthDate: birthMatch?.[1] ? dmyToIso(birthMatch[1]) : '',
+  };
+}
+
+function isOcrServiceLine(line: string): boolean {
+  return /\[неразборчиво\]/iu.test(line) ||
+    /(?:Интерпретацию\s+полученных|Исполнители:|Напечатано|Адрес:|Тел\.?:|laboratory@|стр\.\s*\d+|Қазақстан Республикасы|Денсаулық сақтау|Министерство здравоохранения|Ministry of Health|Уйымның атауы|Наименование организации|Organization Name|Форма\s*№|Утверждена|Приказ|Зарегистрирован|Министр|Әділет|медициналық|EFQM|Recognised for excellence|^\d+\s*star$|^Организация:$|^Врач:$|^ТОО\b|^АО\b|National Scientific Medical Center|Национальный научный медицинский центр)/iu.test(line);
+}
+
+function isExactLabLine(line: string): boolean {
+  if (isOcrServiceLine(line)) return false;
+
+  return /^(?:№\s*(?:карты|направления)|(?:ИИН|ИНН)\s*:|Заказ\s*№|Кровь\b|Дата\s+взятия:|Выполнено:|IDs?:|Показатель\b)/iu.test(line) ||
+    /(?:анализ\s+(?:крови|мочи)|Общий\s+анализ|Биохимическ|Гематолог)/iu.test(line) ||
+    /^[А-ЯЁA-Z][^:\n]{1,90}?\s+(?:↑|↓)?\s*\d+(?:[.,]\d+)?\s+(?:10E\d+\/л|10\^\d+\/л|г\/л|мм\/ч|%|фл|пг|мкмоль\/л|ммоль\/л|Ед\/л|\/100WBC|\([^)]+\))/u.test(line);
+}
+
+function cleanExactOutpatientExams(rawText: string, patient: MedicalDocument['patient']): string {
+  const lines = toCleanOcrLines(rawText);
+  const result: string[] = [];
+  const seen = new Set<string>();
+
+  const add = (line: string) => {
+    const clean = line.trim();
+    if (!clean || seen.has(clean)) return;
+    seen.add(clean);
+    result.push(clean);
+  };
+
+  if (patient.fullName) {
+    add(`Пациент: ${patient.fullName}${patient.gender ? `, ${patient.gender}` : ''}${patient.age ? `, ${patient.age}` : ''}`);
+  }
+
+  for (const line of lines) {
+    if (looksLikePatientNameLine(line) || /Дата\s+рождения:/iu.test(line)) continue;
+    if (isExactLabLine(line)) add(line);
+  }
+
+  if (result.length > (patient.fullName ? 1 : 0)) {
+    return result.join('\n');
+  }
+
+  return lines
+    .filter((line) => !isOcrServiceLine(line))
+    .filter((line) => !/\[неразборчиво\]/iu.test(line))
+    .join('\n')
+    .trim();
+}
+
+export function documentFromExactSourceText(rawText: string, base?: MedicalDocument): MedicalDocument {
+  const patient = extractPatientFromExactText(rawText);
+  const text = cleanExactOutpatientExams(rawText, patient);
+  const today = new Date().toISOString().slice(0, 10);
+
+  return {
+    patient: {
+      fullName: patient.fullName || base?.patient?.fullName || '',
+      age: patient.age || base?.patient?.age || '',
+      gender: patient.gender || base?.patient?.gender || '',
+      complaintDate: patient.complaintDate || base?.patient?.complaintDate || today,
+      birthDate: patient.birthDate || base?.patient?.birthDate || '',
+    },
+    riskAssessment: {
+      fallInLast3Months: '',
+      dizzinessOrWeakness: '',
+      needsEscort: '',
+      painScore: '',
+    },
+    complaints: '',
+    anamnesis: '',
+    outpatientExams: text,
+    clinicalCourse: '',
+    allergyHistory: '',
+    objectiveStatus: '',
+    neurologicalStatus: '',
+    diagnosis: '',
+    finalDiagnosis: '',
+    conclusion: '',
+    doctorNotes: '',
+    recommendations: '',
+    manualCheck: text
+      ? 'Документ получен из фото/OCR. Оставлены только распознанные фактические данные анализа; служебный текст бланка скрыт.'
+      : base?.manualCheck,
+  };
+}
+
+// Заголовки разделов, которые LLM/Whisper иногда оставляют как «контент» поля
+// (например `complaints = "Жалобы"`). Такие фрагменты должны считаться пустыми
+// при оценке полезности документа: иначе фронт получает success:true с
+// псевдо-заполненным протоколом.
+const SECTION_HEADER_RE =
+  /^(?:жалобы|анамнез(?:\s+(?:заболевани[а-яёА-ЯЁ\w]*|жизни))?|объективн[а-яёА-ЯЁ\w]*\s+статус|объективно|перенесённые\s+заболевани[а-яёА-ЯЁ\w]*|аллерголог[а-яёА-ЯЁ\w]*\s+анамнез|неврологическ[а-яёА-ЯЁ\w]*\s+статус|диагноз(?:\s+(?:предварительн[а-яёА-ЯЁ\w]*|заключительн[а-яёА-ЯЁ\w]*|основн[а-яёА-ЯЁ\w]*))?|план(?:\s+(?:обследовани[а-яёА-ЯЁ\w]*|лечени[а-яёА-ЯЁ\w]*))?|рекомендации|рекомендация|заключение|сопутствующ[а-яёА-ЯЁ\w]*\s+диагноз|амбулаторн[а-яёА-ЯЁ\w]*\s+терапи[а-яёА-ЯЁ\w]*|анамнез|данные|статус)\.?$/iu;
+
+function stripSectionHeaders(s: string): string {
+  if (!s || !s.trim()) return '';
+  return s
+    .split(/[.!?\n]+/u)
+    .map((f) => f.trim())
+    .filter((f) => f && !SECTION_HEADER_RE.test(f))
+    .join('. ')
+    .trim();
+}
+
+// Поле считается «содержательным», если после удаления одиночных заголовков
+// остаётся хотя бы 10 символов И ≥2 слов (≥3 букв каждое). Это режет случаи
+// «Диагноз: АГ» (длина после strip 4) и «Жалобы» (после strip 0).
+export function isFieldMeaningful(s: string): boolean {
+  const stripped = stripSectionHeaders(s);
+  if (stripped.length < 10) return false;
+  const words = stripped.match(/[а-яёА-ЯЁa-zA-Z]{3,}/gu) || [];
+  return words.length >= 2;
+}
+
+export type DocumentUsefulness = {
+  status: 'ok' | 'labs_only' | 'empty';
+  emptyFields: string[];
+  placeholderFields: string[];
+  meaningfulFields: string[];
+  reason?: string;
+};
+
+const NON_EXAMS_CLINICAL_FIELDS = [
+  'complaints',
+  'anamnesis',
+  'clinicalCourse',
+  'allergyHistory',
+  'objectiveStatus',
+  'neurologicalStatus',
+  'diagnosis',
+  'finalDiagnosis',
+  'conclusion',
+  'doctorNotes',
+  'recommendations',
+] as const;
+
+const SUSPICIOUS_UNIT_GARBAGE_RE =
+  /(?:СЛЧЭЛЬ|СЛЦАЛЬ|ЛЩЕ|ММС\s+ЛЩЕ|ГЭСЛЧЭЛЬ|ГЕСЛШЕЛЬ|КОЭСЛЧ|МОЛЬСЛЧ|МГСЛЧЭЛЬ)/iu;
+
+function documentClinicalText(doc: MedicalDocument): string {
+  return [
+    doc.patient.fullName,
+    doc.patient.age,
+    doc.patient.gender,
+    doc.patient.complaintDate,
+    doc.complaints,
+    doc.anamnesis,
+    doc.outpatientExams,
+    doc.clinicalCourse,
+    doc.allergyHistory,
+    doc.objectiveStatus,
+    doc.neurologicalStatus,
+    doc.diagnosis,
+    doc.finalDiagnosis,
+    doc.conclusion,
+    doc.doctorNotes,
+    doc.recommendations,
+    doc.manualCheck || '',
+  ].join('\n');
+}
+
+export function collectDocumentQualityWarnings(
+  rawText: string,
+  doc: MedicalDocument,
+  usefulness: DocumentUsefulness,
+): string[] {
+  return [...new Set(collectDocumentQualityWarningDetails(rawText, doc, usefulness)
+    .map((warning) => warning.code === 'important_number_missing'
+      ? `important_number_missing:${warning.evidence || 'value'}`
+      : warning.code))];
+}
+
+export function collectDocumentQualityWarningDetails(
+  rawText: string,
+  doc: MedicalDocument,
+  usefulness: DocumentUsefulness,
+): QualityWarning[] {
+  const warnings: QualityWarning[] = [];
+  const seen = new Set<string>();
+  const add = (warning: QualityWarning) => {
+    const key = `${warning.code}:${warning.field || ''}:${warning.evidence || ''}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    warnings.push(warning);
+  };
+  const docText = documentClinicalText(doc);
+
+  if (usefulness.status === 'labs_only') {
+    add({
+      code: 'document_labs_only',
+      severity: 'warning',
+      field: 'outpatientExams',
+      message: 'В документе распознаны в основном обследования, клинические разделы почти пустые.',
+    });
+  }
+
+  if (usefulness.status === 'ok') {
+    const meaningfulNonExams = usefulness.meaningfulFields.filter((f) => f !== 'outpatientExams');
+    if (meaningfulNonExams.length < 3) {
+      add({
+        code: 'suspiciously_few_clinical_fields',
+        severity: 'warning',
+        field: 'document',
+        message: 'Заполнено мало клинических разделов; проверьте, не потерялись ли жалобы, анамнез или диагноз.',
+      });
+    }
+  }
+
+  if (SUSPICIOUS_UNIT_GARBAGE_RE.test(docText)) {
+    add({
+      code: 'suspicious_unit_garbage_in_document',
+      severity: 'warning',
+      field: 'document',
+      message: 'В документе остались подозрительные единицы измерения после распознавания.',
+    });
+  }
+
+  const rawBpValues = rawText.match(/\b\d{2,3}\s*\/\s*\d{2,3}\b/gu) || [];
+  for (const value of rawBpValues) {
+    const normalized = value.replace(/\s+/g, '');
+    if (!docText.replace(/\s+/g, '').includes(normalized)) {
+      add({
+        code: 'important_number_missing',
+        severity: 'critical',
+        field: 'document',
+        message: `В raw есть значение АД ${normalized}, но оно не найдено в итоговых полях.`,
+        evidence: `bp_${normalized}`,
+      });
+    }
+  }
+
+  collectAdvancedQualityWarnings(rawText, doc, add);
+
+  return warnings;
+}
+
+function normalizeForCoverage(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[^a-zа-я0-9\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function collectAdvancedQualityWarnings(
+  rawText: string,
+  doc: MedicalDocument,
+  add: (warning: QualityWarning) => void,
+): void {
+  const rawNorm = normalizeForCoverage(rawText);
+  const docText = documentClinicalText(doc);
+
+  const rawLabish = /(?:оак|оам|биохим|анализ|гемоглобин|креатинин|глюкоз|холестерин|лпнп|лпвп|триглицерид|лейкоцит|эритроцит|тромбоцит|соэ|hba1c|гликирован)/iu.test(rawText);
+  if (rawLabish) {
+    const values = rawText.match(/\d+(?:[,.]\d+)?/gu) || [];
+    for (const value of values) {
+      const compact = value.replace(',', '.');
+      if (/^\d{1,2}$/.test(compact)) continue;
+      if (/^(?:19|20)\d{2}$/.test(compact)) continue;
+      const docHas = docText.includes(value) || docText.includes(value.replace(',', '.')) || docText.includes(value.replace('.', ','));
+      if (!docHas) {
+        add({
+          code: 'possibleLostLabValue',
+          severity: 'warning',
+          field: 'outpatientExams',
+          message: `В raw есть лабораторное число ${value}, но оно не найдено в итоговых обследованиях.`,
+          evidence: value,
+        });
+      }
+    }
+  }
+
+  const examLines = (doc.outpatientExams || '').split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  for (const line of examLines) {
+    const label = line.match(/(?:^|\s)(КТ|МРТ|МСКТ|ЭКГ|ЭхоКГ|УЗИ|УЗДГ|Холтер|СМАД)(?:\s|$)/iu)?.[1];
+    if (!label) continue;
+    const labelRe = new RegExp(`(^|[^а-яёa-z])${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^а-яёa-z])`, 'iu');
+    if (!labelRe.test(rawText)) {
+      add({
+        code: 'suspiciousExamRescue',
+        severity: 'warning',
+        field: 'outpatientExams',
+        message: `В итоговых обследованиях есть ${label}, но в raw нет такого отдельного маркера.`,
+        evidence: line.slice(0, 160),
+      });
+    }
+  }
+
+  // Whisper пропустил значение максимального АД: фраза есть, числа нет
+  const hasMaxBpPhrase = /максимальн\S+\s+цифр\S+\s*(?:артериального\s+давления\s*)?/iu.test(rawText);
+  const hasMaxBpValue = /максимальн\S+\s+цифр[^\n.!?]{0,120}\d{2,3}\/\d{2,3}/iu.test(rawText);
+  if (hasMaxBpPhrase && !hasMaxBpValue) {
+    add({
+      code: 'max_bp_value_missing',
+      severity: 'warning',
+      field: 'anamnesis',
+      message: 'Есть фраза "максимальные цифры АД" но числовое значение X/Y не найдено — возможно Whisper пропустил число.',
+    });
+  }
+
+  const lifeHistoryInRecommendations = (doc.recommendations || '')
+    .split(/\n+/)
+    .find((line) => /(?:алкогол[а-яё]*\s+употреб|наследственност|туберкул|операци|травм|профессиональн[а-яё]*\s+вредност|физическ[а-яё]*\s+активность\s+низк|курит\s+\d)/iu.test(line));
+  if (lifeHistoryInRecommendations) {
+    add({
+      code: 'sectionRoutingIssue',
+      severity: 'warning',
+      field: 'recommendations',
+      message: 'В рекомендациях обнаружена фраза, похожая на анамнез жизни.',
+      evidence: lifeHistoryInRecommendations.slice(0, 160),
+    });
+  }
+
+  const conclusionLifeTail = (doc.conclusion || '')
+    .split(/\n+/)
+    .find((line) => /(?:туберкул|вирусн[а-яё]*\s+гепатит|вич|операци|травм|наследственност|алкогол|курение|профессиональн[а-яё]*\s+вредност)/iu.test(line));
+  if (conclusionLifeTail) {
+    add({
+      code: 'sectionRoutingIssue',
+      severity: 'warning',
+      field: 'conclusion',
+      message: 'В амбулаторной терапии обнаружена фраза, похожая на анамнез жизни.',
+      evidence: conclusionLifeTail.slice(0, 160),
+    });
+  }
+
+  for (const field of ['conclusion', 'recommendations'] as const) {
+    const line = (doc[field] || '')
+      .split(/\n+/)
+      .find((item) => (item.match(/\d+(?:[,.]\d+)?\s*(?:мг|мкг|г|мл)/giu) || []).length >= 2);
+    if (line) {
+      add({
+        code: 'drugListMayBeMerged',
+        severity: 'warning',
+        field,
+        message: 'Пункт содержит несколько дозировок; возможно, несколько препаратов склеились в один пункт.',
+        evidence: line.slice(0, 180),
+      });
+    }
+  }
+
+  const docSentences = docText
+    .split(/(?<=[.!?])\s+|\n+/u)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 35);
+  for (const sentence of docSentences) {
+    if (!/(?:кт|мрт|мскт|тредмил|коронар|ацетилсалицил|нитроглицерин|эмпаглифлозин|розувастатин|диагноз|стенокард|инфаркт)/iu.test(sentence)) {
+      continue;
+    }
+    const ns = normalizeForCoverage(sentence);
+    if (!ns || rawNorm.includes(ns.slice(0, Math.min(35, ns.length)))) continue;
+    const words = ns.split(/\s+/).filter((w) => w.length >= 5);
+    const overlap = words.filter((w) => rawNorm.includes(w)).length;
+    if (words.length >= 4 && overlap / words.length < 0.45) {
+      add({
+        code: 'possibleAddedFact',
+        severity: 'warning',
+        field: 'document',
+        message: 'Итоговый документ содержит медицинский факт, который плохо подтверждается raw-текстом.',
+        evidence: sentence.slice(0, 180),
+      });
+      break;
+    }
+  }
+}
+
+/**
+ * Оценивает «полезность» структурированного документа. Не учитывает patient —
+ * один заполненный fullName не должен спасать документ без клинического
+ * контента.
+ *
+ *   ok          — есть ≥1 содержательное клиническое поле (не лаборатория).
+ *   labs_only   — содержательно только outpatientExams (валидный частичный
+ *                 документ, но фронт должен показать баннер «только анализы»).
+ *   empty       — ни одного содержательного поля; placeholder-заголовки и/или
+ *                 одиночное ФИО не считаются.
+ */
+export function assessDocumentUsefulness(doc: MedicalDocument): DocumentUsefulness {
+  const empty: string[] = [];
+  const placeholder: string[] = [];
+  const meaningful: string[] = [];
+
+  for (const f of [...NON_EXAMS_CLINICAL_FIELDS, 'outpatientExams'] as const) {
+    const v = doc[f];
+    if (!v || !v.trim()) {
+      empty.push(f);
+    } else if (!isFieldMeaningful(v)) {
+      placeholder.push(f);
+    } else {
+      meaningful.push(f);
+    }
+  }
+
+  const meaningfulNonExams = meaningful.filter((f) => f !== 'outpatientExams');
+  const examsMeaningful = meaningful.includes('outpatientExams');
+
+  if (meaningfulNonExams.length === 0 && !examsMeaningful) {
+    return {
+      status: 'empty',
+      emptyFields: empty,
+      placeholderFields: placeholder,
+      meaningfulFields: [],
+      reason: 'document_appears_empty',
+    };
+  }
+  if (meaningfulNonExams.length === 0 && examsMeaningful) {
+    return {
+      status: 'labs_only',
+      emptyFields: empty,
+      placeholderFields: placeholder,
+      meaningfulFields: meaningful,
+    };
+  }
+  return {
+    status: 'ok',
+    emptyFields: empty,
+    placeholderFields: placeholder,
+    meaningfulFields: meaningful,
+  };
 }
 
 export function isValidMedicalDocument(doc: unknown): doc is MedicalDocument {
@@ -91,15 +628,52 @@ export function isValidMedicalDocument(doc: unknown): doc is MedicalDocument {
   return true;
 }
 
+// ─── Streaming session store ──────────────────────────────────────────────────
+
+interface ChunkJob {
+  index: number;
+  textPromise: Promise<string>;
+}
+
+interface StreamSession {
+  id: string;
+  jobs: ChunkJob[];
+  createdAt: number;
+}
+
+const streamSessions = new Map<string, StreamSession>();
+const STREAM_SESSION_TTL_MS = 30 * 60 * 1000;
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export async function registerRoutes(
   fastify: FastifyInstance,
   config: ServerConfig,
   whisperService: WhisperService,
   llmService: LLMService,
-  ttsService: TtsService
+  ttsService: TtsService,
+  db?: AppDb,
 ): Promise<void> {
   if (!existsSync(config.uploadDir)) {
     await mkdir(config.uploadDir, { recursive: true });
+  }
+
+  const visionProvider = process.env.DOCUMENT_VISION_PROVIDER?.trim().toLowerCase() === 'anthropic'
+    ? 'anthropic'
+    : 'ollama';
+  const documentExtractor = new DocumentExtractorService({
+    visionProvider,
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY?.trim() || config.llm.anthropic?.apiKey,
+    ollama: {
+      serverUrl: process.env.DOCUMENT_VISION_SERVER_URL?.trim() || config.llm.serverUrl,
+      model: process.env.DOCUMENT_VISION_MODEL?.trim() || config.llm.model,
+      timeoutMs: Number.parseInt(process.env.DOCUMENT_VISION_TIMEOUT_MS || '90000', 10),
+    },
+  });
+
+  // Регистрируем маршруты врачей/пациентов/синхронизации если БД доступна
+  if (db) {
+    await registerDoctorRoutes(fastify, db, documentExtractor, llmService);
   }
 
   const rateMap = new Map<string, RateState>();
@@ -132,6 +706,9 @@ export async function registerRoutes(
         rateMap.delete(ip);
       }
     }
+    for (const [sid, sess] of streamSessions) {
+      if (now - sess.createdAt > STREAM_SESSION_TTL_MS) streamSessions.delete(sid);
+    }
   }, 60 * 60 * 1000);
   cleanupInterval.unref?.();
 
@@ -148,26 +725,42 @@ export async function registerRoutes(
     if (url.startsWith('/api/health')) return;
     if (url.startsWith('/api/auth/')) return;
 
-    // Auth by password (session token)
-    if (config.security.authPassword) {
-      const auth = request.headers.authorization;
-      const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-
-      if (!token || !isTokenValid(token)) {
+    if (db) {
+      try {
+        await request.jwtVerify();
+      } catch {
         return reply.status(401).send({ error: 'Unauthorized' });
       }
-    }
 
-    // Legacy API key auth
-    if (config.security.apiKey) {
-      const rawApiKey = request.headers['x-api-key'];
-      const headerApiKey = typeof rawApiKey === 'string' ? rawApiKey : '';
-      const auth = request.headers.authorization;
-      const bearerApiKey = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-      const provided = headerApiKey || bearerApiKey;
+      const doctor = db.select({ isActive: doctors.isActive })
+        .from(doctors)
+        .where(eq(doctors.id, request.user.doctorId))
+        .get();
+      if (!doctor?.isActive) {
+        return reply.status(403).send({ error: 'Аккаунт деактивирован' });
+      }
+    } else {
+      // Auth by password (session token)
+      if (config.security.authPassword) {
+        const auth = request.headers.authorization;
+        const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
 
-      if (!provided || provided !== config.security.apiKey) {
-        return reply.status(401).send({ error: 'Unauthorized' });
+        if (!token || !isTokenValid(token)) {
+          return reply.status(401).send({ error: 'Unauthorized' });
+        }
+      }
+
+      // Legacy API key auth
+      if (config.security.apiKey) {
+        const rawApiKey = request.headers['x-api-key'];
+        const headerApiKey = typeof rawApiKey === 'string' ? rawApiKey : '';
+        const auth = request.headers.authorization;
+        const bearerApiKey = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+        const provided = headerApiKey || bearerApiKey;
+
+        if (!provided || provided !== config.security.apiKey) {
+          return reply.status(401).send({ error: 'Unauthorized' });
+        }
       }
     }
 
@@ -186,75 +779,190 @@ export async function registerRoutes(
     }
   });
 
-  // --- Auth endpoint ---
-  fastify.post('/api/auth/login', async (request, reply) => {
-    if (!config.security.authPassword) {
-      return { success: true, token: 'no-auth' };
-    }
+  if (!db) {
+    // --- Legacy auth endpoint ---
+    fastify.post('/api/auth/login', async (request, reply) => {
+      if (!config.security.authPassword) {
+        return { success: true, token: 'no-auth' };
+      }
 
-    const ip = request.ip || 'unknown';
-    const now = Date.now();
-    const attempt = loginAttempts.get(ip);
+      const ip = request.ip || 'unknown';
+      const now = Date.now();
+      const attempt = loginAttempts.get(ip);
 
-    // Lockout по IP
-    if (attempt && attempt.lockedUntil > now) {
-      const minutesLeft = Math.ceil((attempt.lockedUntil - now) / 60000);
-      return reply.status(429).send({
-        error: `Слишком много попыток. Попробуйте через ${minutesLeft} мин.`,
-      });
-    }
-
-    const body = request.body as Record<string, unknown> | null;
-    const password = typeof body?.password === 'string' ? body.password : '';
-
-    if (password !== config.security.authPassword) {
-      // Задержка ответа — замедляем перебор
-      await new Promise((resolve) => setTimeout(resolve, LOGIN_FAIL_DELAY_MS));
-
-      const next = attempt && attempt.lockedUntil <= now
-        ? { count: attempt.count + 1, lockedUntil: 0 }
-        : { count: (attempt?.count ?? 0) + 1, lockedUntil: 0 };
-
-      if (next.count >= LOGIN_MAX_ATTEMPTS) {
-        next.lockedUntil = now + LOGIN_LOCKOUT_MS;
-        next.count = 0;
-        loginAttempts.set(ip, next);
-        request.log.warn({ ip }, 'Login lockout triggered');
+      // Lockout по IP
+      if (attempt && attempt.lockedUntil > now) {
+        const minutesLeft = Math.ceil((attempt.lockedUntil - now) / 60000);
         return reply.status(429).send({
-          error: 'Слишком много неверных попыток. Заблокировано на 15 минут.',
+          error: `Слишком много попыток. Попробуйте через ${minutesLeft} мин.`,
         });
       }
 
-      loginAttempts.set(ip, next);
-      return reply.status(401).send({ error: 'Неверный пароль' });
-    }
+      const body = request.body as Record<string, unknown> | null;
+      const password = typeof body?.password === 'string' ? body.password : '';
 
-    // Успешный логин — сбрасываем счётчик
-    loginAttempts.delete(ip);
+      if (password !== config.security.authPassword) {
+        // Задержка ответа — замедляем перебор
+        await new Promise((resolve) => setTimeout(resolve, LOGIN_FAIL_DELAY_MS));
 
-    const token = randomUUID();
-    authTokens.set(token, now + AUTH_TOKEN_TTL_MS);
-    return { success: true, token };
-  });
+        const next = attempt && attempt.lockedUntil <= now
+          ? { count: attempt.count + 1, lockedUntil: 0 }
+          : { count: (attempt?.count ?? 0) + 1, lockedUntil: 0 };
 
-  fastify.post('/api/auth/logout', async (request) => {
-    const auth = request.headers.authorization;
-    const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-    if (token) authTokens.delete(token);
-    return { success: true };
-  });
+        if (next.count >= LOGIN_MAX_ATTEMPTS) {
+          next.lockedUntil = now + LOGIN_LOCKOUT_MS;
+          next.count = 0;
+          loginAttempts.set(ip, next);
+          request.log.warn({ ip }, 'Login lockout triggered');
+          return reply.status(429).send({
+            error: 'Слишком много неверных попыток. Заблокировано на 15 минут.',
+          });
+        }
 
-  fastify.get('/api/auth/check', async (request, reply) => {
-    if (!config.security.authPassword) {
+        loginAttempts.set(ip, next);
+        return reply.status(401).send({ error: 'Неверный пароль' });
+      }
+
+      // Успешный логин — сбрасываем счётчик
+      loginAttempts.delete(ip);
+
+      const token = randomUUID();
+      authTokens.set(token, now + AUTH_TOKEN_TTL_MS);
+      return { success: true, token };
+    });
+
+    fastify.post('/api/auth/logout', async (request) => {
+      const auth = request.headers.authorization;
+      const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+      if (token) authTokens.delete(token);
+      return { success: true };
+    });
+
+    fastify.get('/api/auth/check', async (request, reply) => {
+      if (!config.security.authPassword) {
+        return { authenticated: true };
+      }
+      const auth = request.headers.authorization;
+      const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+      if (!token || !isTokenValid(token)) {
+        return reply.status(401).send({ authenticated: false });
+      }
       return { authenticated: true };
+    });
+  }
+
+  // ─── Streaming session endpoints ─────────────────────────────────────────────
+
+  fastify.post('/api/session/start', async (_request, reply) => {
+    if (!config.whisper.serverUrl) {
+      return reply.status(503).send({ error: 'Streaming unavailable: Whisper HTTP server not configured' });
     }
-    const auth = request.headers.authorization;
-    const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-    if (!token || !isTokenValid(token)) {
-      return reply.status(401).send({ authenticated: false });
-    }
-    return { authenticated: true };
+    const sessionId = randomUUID();
+    streamSessions.set(sessionId, { id: sessionId, jobs: [], createdAt: Date.now() });
+    return { sessionId };
   });
+
+  fastify.post('/api/session/:id/chunk', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    const session = streamSessions.get(id);
+    if (!session) {
+      return reply.status(404).send({ error: 'Session not found or expired' });
+    }
+
+    const body = request.body;
+    if (!isRecord(body) || typeof body.audio_base64 !== 'string' || !body.audio_base64) {
+      return reply.status(400).send({ error: 'audio_base64 required' });
+    }
+
+    const chunkIndex = typeof body.chunk_index === 'number' ? body.chunk_index : session.jobs.length;
+    const audioBase64 = body.audio_base64 as string;
+
+    const textPromise = whisperService.transcribeBase64(audioBase64).catch((err) => {
+      fastify.log.warn({ sessionId: id, chunkIndex }, `chunk transcription failed: ${err}`);
+      return '';
+    });
+
+    session.jobs.push({ index: chunkIndex, textPromise });
+    return { ok: true, chunkIndex };
+  });
+
+  fastify.post('/api/session/:id/finish', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    const session = streamSessions.get(id);
+    if (!session) {
+      return reply.status(404).send({ error: 'Session not found or expired' });
+    }
+
+    streamSessions.delete(id);
+
+    if (session.jobs.length === 0) {
+      return reply.status(422).send({ error: 'No chunks received in session' });
+    }
+
+    try {
+      const t0 = Date.now();
+
+      const results = await Promise.all(
+        session.jobs
+          .sort((a, b) => a.index - b.index)
+          .map((job) => job.textPromise)
+      );
+
+      const fullText = results.filter((t) => t.trim()).join(' ');
+
+      if (!fullText.trim()) {
+        return reply.status(422).send({ error: 'All chunks failed transcription' });
+      }
+
+      const t1 = Date.now();
+      fastify.log.info(
+        { sessionId: id, chunks: results.length, chars: fullText.length, whisperWaitMs: t1 - t0 },
+        'session chunks merged'
+      );
+
+      const structured = await llmService.structureText(fullText);
+      const t2 = Date.now();
+
+      const usefulness = assessDocumentUsefulness(structured.document);
+      if (usefulness.status === 'empty') {
+        return reply.status(422).send({
+          success: false,
+          error: 'document_appears_empty',
+          reason: usefulness.reason,
+          emptyFields: usefulness.emptyFields,
+          placeholderFields: usefulness.placeholderFields,
+          transcription: { text: fullText, language: 'ru' },
+        });
+      }
+
+      const qualityWarnings = collectDocumentQualityWarningDetails(fullText, structured.document, usefulness);
+
+      fastify.log.info(
+        { timings_ms: { whisper_wait: t1 - t0, llm: t2 - t1, total: t2 - t0 } },
+        'session/finish timings'
+      );
+
+      return {
+        success: true,
+        transcription: { text: fullText, language: 'ru' },
+        document: structured.document,
+        processingTime: t2 - t0,
+        warnings: [...new Set(qualityWarnings.map((w) =>
+          w.code === 'important_number_missing'
+            ? `important_number_missing:${w.evidence || 'value'}`
+            : w.code
+        ))],
+        qualityWarnings,
+      };
+    } catch (error) {
+      fastify.log.error({ sessionId: id }, `session/finish error: ${error}`);
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      const isTimeout = /timeout|aborted/i.test(message);
+      return reply.status(isTimeout ? 408 : 500).send({ error: 'Session finish failed', message });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
 
   fastify.get('/api/health', async () => {
     const [llmReady, whisperReady] = await Promise.all([
@@ -342,28 +1050,55 @@ export async function registerRoutes(
 
     try {
       const result = await llmService.structureText(text);
-      try {
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        const logDir = path.join(config.uploadDir, '..', 'temp', 'structure-logs');
-        await mkdir(logDir, { recursive: true });
-        const logPath = path.join(logDir, `${ts}.log`);
-        const dump = [
-          `=== ${ts} ===`,
-          `--- RAW WHISPER TEXT (${text.length} chars) ---`,
-          text,
-          '',
-          `--- LLM STRUCTURED RESULT ---`,
-          JSON.stringify(result, null, 2),
-          '',
-        ].join('\n');
-        await appendFile(logPath, dump, 'utf-8');
-        console.log(`[structure-log] wrote ${logPath}`);
-      } catch (logErr) {
-        console.warn('[structure-log] failed:', logErr);
+      // PHI-дамп (raw + JSON документа) пишется только при STRUCTURE_LOG_DUMP=true.
+      // По умолчанию выключен: содержимое жалоб/анамнеза/диагноза — медданные.
+      if (process.env.STRUCTURE_LOG_DUMP === 'true') {
+        try {
+          const ts = new Date().toISOString().replace(/[:.]/g, '-');
+          const logDir = path.join(config.uploadDir, '..', 'temp', 'structure-logs');
+          await mkdir(logDir, { recursive: true });
+          const logPath = path.join(logDir, `${ts}.log`);
+          const dump = [
+            `=== ${ts} ===`,
+            `--- RAW WHISPER TEXT (${text.length} chars) ---`,
+            text,
+            '',
+            `--- LLM STRUCTURED RESULT ---`,
+            JSON.stringify(result, null, 2),
+            '',
+          ].join('\n');
+          await appendFile(logPath, dump, 'utf-8');
+          console.log(`[structure-log] wrote ${logPath}`);
+        } catch (logErr) {
+          console.warn('[structure-log] failed:', logErr);
+        }
       }
+
+      // Жёсткая проверка «полезности» — не отдаём success:true на пустой документ.
+      const usefulness = assessDocumentUsefulness(result.document);
+      if (usefulness.status === 'empty') {
+        request.log.warn(
+          { emptyFields: usefulness.emptyFields, placeholderFields: usefulness.placeholderFields },
+          'structure: document_appears_empty',
+        );
+        return reply.status(422).send({
+          success: false,
+          error: 'document_appears_empty',
+          reason: usefulness.reason,
+          emptyFields: usefulness.emptyFields,
+          placeholderFields: usefulness.placeholderFields,
+        });
+      }
+
+      const qualityWarnings = collectDocumentQualityWarningDetails(text, result.document, usefulness);
+
       return {
         success: true,
         ...result,
+        warnings: [...new Set(qualityWarnings.map((warning) => warning.code === 'important_number_missing'
+          ? `important_number_missing:${warning.evidence || 'value'}`
+          : warning.code))],
+        qualityWarnings,
       };
     } catch (error) {
       console.error('Structuring error:', error);
@@ -557,24 +1292,26 @@ export async function registerRoutes(
       const structured = await llmService.structureText(transcription.text);
       const t3 = Date.now();
 
-      try {
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        const logDir = path.join(config.uploadDir, '..', 'temp', 'structure-logs');
-        await mkdir(logDir, { recursive: true });
-        const logPath = path.join(logDir, `${ts}_${sourceName}.log`);
-        const dump = [
-          `=== ${ts} | source=${sourceName} ===`,
-          `--- RAW WHISPER TEXT (${transcription.text.length} chars) ---`,
-          transcription.text,
-          '',
-          `--- LLM STRUCTURED RESULT ---`,
-          JSON.stringify(structured.document, null, 2),
-          '',
-        ].join('\n');
-        await appendFile(logPath, dump, 'utf-8');
-        console.log(`[structure-log] wrote ${logPath}`);
-      } catch (logErr) {
-        console.warn('[structure-log] failed:', logErr);
+      if (process.env.STRUCTURE_LOG_DUMP === 'true') {
+        try {
+          const ts = new Date().toISOString().replace(/[:.]/g, '-');
+          const logDir = path.join(config.uploadDir, '..', 'temp', 'structure-logs');
+          await mkdir(logDir, { recursive: true });
+          const logPath = path.join(logDir, `${ts}_${sourceName}.log`);
+          const dump = [
+            `=== ${ts} | source=${sourceName} ===`,
+            `--- RAW WHISPER TEXT (${transcription.text.length} chars) ---`,
+            transcription.text,
+            '',
+            `--- LLM STRUCTURED RESULT ---`,
+            JSON.stringify(structured.document, null, 2),
+            '',
+          ].join('\n');
+          await appendFile(logPath, dump, 'utf-8');
+          console.log(`[structure-log] wrote ${logPath}`);
+        } catch (logErr) {
+          console.warn('[structure-log] failed:', logErr);
+        }
       }
 
       fastify.log.info(
@@ -595,6 +1332,33 @@ export async function registerRoutes(
         // Ignore cleanup errors
       }
 
+      // Жёсткая проверка «полезности» — синхронно с /api/structure.
+      const usefulness = assessDocumentUsefulness(structured.document);
+      if (usefulness.status === 'empty') {
+        request.log.warn(
+          {
+            emptyFields: usefulness.emptyFields,
+            placeholderFields: usefulness.placeholderFields,
+            transcriptionChars: transcription.text.length,
+          },
+          'process: document_appears_empty',
+        );
+        return reply.status(422).send({
+          success: false,
+          error: 'document_appears_empty',
+          reason: usefulness.reason,
+          emptyFields: usefulness.emptyFields,
+          placeholderFields: usefulness.placeholderFields,
+          transcription: {
+            text: transcription.text,
+            duration: transcription.duration,
+            language: transcription.language,
+          },
+        });
+      }
+
+      const qualityWarnings = collectDocumentQualityWarningDetails(transcription.text, structured.document, usefulness);
+
       return {
         success: true,
         transcription: {
@@ -604,6 +1368,10 @@ export async function registerRoutes(
         },
         document: structured.document,
         processingTime: transcription.duration + structured.processingTime,
+        warnings: [...new Set(qualityWarnings.map((warning) => warning.code === 'important_number_missing'
+          ? `important_number_missing:${warning.evidence || 'value'}`
+          : warning.code))],
+        qualityWarnings,
       };
     } catch (error) {
       console.error('Processing error:', error);
@@ -621,6 +1389,113 @@ export async function registerRoutes(
     }
   });
 
+  // ─── Document upload: PDF / Word / Image → LLM ───────────────────────────────
+
+  fastify.post('/api/process-document', async (request: FastifyRequest, reply: FastifyReply) => {
+    const data = await request.file();
+
+    if (!data) {
+      return reply.status(400).send({ error: 'Файл не загружен' });
+    }
+
+    const MAX_SIZE = 20 * 1024 * 1024; // 20 MB
+    const chunks: Buffer[] = [];
+    let totalSize = 0;
+
+    for await (const chunk of data.file) {
+      totalSize += chunk.length;
+      if (totalSize > MAX_SIZE) {
+        return reply.status(413).send({ error: 'Файл слишком большой. Максимум 20 МБ.' });
+      }
+      chunks.push(chunk);
+    }
+
+    const buffer = Buffer.concat(chunks);
+
+    if (buffer.length === 0) {
+      return reply.status(400).send({ error: 'Загружен пустой файл' });
+    }
+
+    const safeFilename = toSafeUploadFilename(data.filename || 'document');
+
+    try {
+      const t0 = Date.now();
+
+      const extraction = await documentExtractor.extract(buffer, data.mimetype, safeFilename);
+
+      const t1 = Date.now();
+      fastify.log.info(
+        { method: extraction.extractionMethod, chars: extraction.text.length, ms: t1 - t0 },
+        'document extracted',
+      );
+
+      const document = extraction.extractionMethod === 'vision'
+        ? documentFromExactSourceText(extraction.text)
+        : (await llmService.structureText(extraction.text)).document;
+      const t2 = Date.now();
+
+      const usefulness = assessDocumentUsefulness(document);
+      if (usefulness.status === 'empty') {
+        request.log.warn(
+          { emptyFields: usefulness.emptyFields, method: extraction.extractionMethod },
+          'process-document: document_appears_empty',
+        );
+        return reply.status(422).send({
+          success: false,
+          error: 'document_appears_empty',
+          reason: usefulness.reason,
+          emptyFields: usefulness.emptyFields,
+          placeholderFields: usefulness.placeholderFields,
+          source: { text: extraction.text, extractionMethod: extraction.extractionMethod },
+        });
+      }
+
+      const qualityWarnings = collectDocumentQualityWarningDetails(
+        extraction.text,
+        document,
+        usefulness,
+      );
+
+      fastify.log.info(
+        { timings_ms: { extract: t1 - t0, llm: t2 - t1, total: t2 - t0 } },
+        'process-document timings',
+      );
+
+      return {
+        success: true,
+        transcription: {
+          text: extraction.text,
+          language: 'ru',
+          extractionMethod: extraction.extractionMethod,
+          pageCount: extraction.pageCount,
+          warning: extraction.warning,
+        },
+        document,
+        processingTime: t2 - t0,
+        warnings: [
+          ...new Set(
+            qualityWarnings.map((w) =>
+              w.code === 'important_number_missing'
+                ? `important_number_missing:${w.evidence || 'value'}`
+                : w.code,
+            ),
+          ),
+        ],
+        qualityWarnings,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      fastify.log.error({ filename: safeFilename }, `process-document error: ${message}`);
+      const isUserError = /формат|слишком|содержит|отсканирован|требует|Anthropic|баланс|средств|Vision|распознаван|ключ|ограничил/i.test(message);
+      return reply.status(isUserError ? 422 : 500).send({
+        error: isUserError ? message : 'Ошибка обработки документа',
+        message,
+      });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+
   fastify.post('/api/documents', async (request: FastifyRequest, reply: FastifyReply) => {
     const document = request.body;
 
@@ -633,6 +1508,14 @@ export async function registerRoutes(
       document,
       id: `doc_${Date.now()}`,
       savedAt: new Date().toISOString(),
+    };
+  });
+
+  fastify.get('/api/document-capabilities', async () => {
+    return {
+      pdf: true,
+      word: true,
+      image: documentExtractor.canProcessImages,
     };
   });
 
@@ -685,6 +1568,8 @@ export async function registerRoutes(
 
     const wrong = typeof body.wrong === 'string' ? body.wrong.trim() : '';
     const correct = typeof body.correct === 'string' ? body.correct.trim() : '';
+    const scope = normalizeCorrectionScope(typeof body.scope === 'string' ? body.scope : undefined);
+    const requireDose = body.requireDose === true;
 
     if (!wrong || !correct) {
       return reply.status(400).send({ error: "Поля 'wrong' и 'correct' обязательны" });
@@ -695,7 +1580,7 @@ export async function registerRoutes(
     }
 
     try {
-      const correction = await addUserCorrection(wrong, correct);
+      const correction = await addUserCorrection(wrong, correct, { scope, requireDose });
       const all = getUserCorrections();
       return { success: true, id: correction.id, totalCorrections: all.length };
     } catch (error) {

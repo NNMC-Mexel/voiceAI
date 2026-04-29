@@ -34,10 +34,26 @@ export interface UserCorrection {
   wrong: string;
   correct: string;
   createdAt: string;
+  scope?: UserCorrectionScope;
+  requireDose?: boolean;
 }
 
 interface UserCorrectionsData {
   corrections: UserCorrection[];
+}
+
+export type UserCorrectionScope = 'global' | 'medications' | 'exams' | 'neurological';
+
+interface DictionaryApplyOptions {
+  field?: string;
+  scope?: UserCorrectionScope;
+}
+
+interface CompiledUserRule extends ReplacementRule {
+  wrong: string;
+  correct: string;
+  scope: UserCorrectionScope;
+  requireDose: boolean;
 }
 
 // ─── Утилита для создания правил ─────────────────────────────────────────────
@@ -78,6 +94,8 @@ const LATIN_CARDIOLOGY_ABBREVIATIONS: ReplacementRule[] = [
   wordRule('НАЙХА', 'NYHA'),
   wordRule('ноха', 'NYHA'),
   wordRule('НОХА', 'NYHA'),
+  wordRule('ноэча', 'NYHA'),
+  wordRule('НОЭЧА', 'NYHA'),
   wordRule('энвайэйч', 'NYHA'),
   wordRule('цэцэс', 'CCS'),
   wordRule('ЦЦС', 'CCS'),
@@ -109,6 +127,11 @@ const LATIN_CARDIOLOGY_ABBREVIATIONS: ReplacementRule[] = [
 const GENERAL_MEDICAL_ABBREVIATIONS: ReplacementRule[] = [
   // Кардиология — диагностика
   wordRule('экг', 'ЭКГ'),
+  // "ЭКО от дата" / "мониторирование ЭКО" → ЭКГ (Whisper путает ЭКГ→ЭКО)
+  regexRule(/(?<![а-яё])ЭКО\s+(от\s+\d|\d{2}[.\-]\d{2})/giu, 'ЭКГ $1'),
+  regexRule(/мониторирование\s+ЭКО/giu, 'мониторирование ЭКГ'),
+  // "ЭХОКАГЕ" → "ЭхоКГ"
+  regexRule(/(?<![а-яё])ЭХОКАГЕ(?![а-яё])/giu, 'ЭхоКГ'),
   wordRule('эхокг', 'ЭхоКГ'),
   wordRule('эхо кг', 'ЭхоКГ'),
   wordRule('узи сердца', 'ЭхоКГ'),
@@ -236,6 +259,8 @@ const GENERAL_MEDICAL_ABBREVIATIONS: ReplacementRule[] = [
   wordRule('фгдс', 'ФГДС'),
   wordRule('ээг', 'ЭЭГ'),
   wordRule('соэ', 'СОЭ'),
+  // "Союз X мм" → "СОЭ X мм" (Whisper слышит "СОЭ" как "Союз")
+  regexRule(/(?<![а-яё])Союз\s+(\d+\s*мм)/giu, 'СОЭ $1'),
   wordRule('лпнп', 'ЛПНП'),
   wordRule('лпвп', 'ЛПВП'),
   wordRule('гпод', 'ГПОД'),
@@ -252,6 +277,12 @@ const GENERAL_MEDICAL_ABBREVIATIONS: ReplacementRule[] = [
 // Исправляем типичные ошибки транскрипции названий препаратов.
 
 const DRUG_NAME_CORRECTIONS: ReplacementRule[] = [
+  // Urology MVP regressions (Nurgalieva): stable Whisper typos in drug names.
+  wordRule('Канифрон', 'Канефрон'),
+  wordRule('канифрон', 'Канефрон'),
+  wordRule('Цификсим', 'Цефиксим'),
+  wordRule('цификсим', 'Цефиксим'),
+
   // Антикоагулянты
   wordRule('ксорелто', 'ксарелто'),
   wordRule('ксарелта', 'ксарелто'),
@@ -349,7 +380,7 @@ const DRUG_NAME_CORRECTIONS: ReplacementRule[] = [
   wordRule('нолипрел', 'нолипрел'),
   wordRule('валодип', 'валодип'),
   wordRule('кантаб', 'кантаб'),
-  wordRule('илпио', 'илпио'),
+  wordRule('илпио', 'Илпио'),
   wordRule('престилол', 'Престилол'),
   wordRule('пристилол', 'Престилол'),
   wordRule('перендаприл', 'периндоприл'),
@@ -466,6 +497,37 @@ const DRUG_NAME_CORRECTIONS: ReplacementRule[] = [
   // Флеботоники
   wordRule('дитралекс', 'Детралекс'),
   wordRule('детралекс', 'Детралекс'),
+
+  // ── Стабильные ошибки QA 2026-04 ──
+
+  // Сартаны
+  wordRule('валсертон', 'валсартан'),
+  wordRule('Валсертон', 'Валсартан'),
+
+  // БКК
+  wordRule('младипин', 'амлодипин'),
+  wordRule('Младипин', 'Амлодипин'),
+  wordRule('амладипен', 'амлодипин'),
+  wordRule('Амладипен', 'Амлодипин'),
+
+  // Бигуаниды
+  wordRule('митформин', 'метформин'),
+  wordRule('Митформин', 'Метформин'),
+
+  // Статины
+  wordRule('торвостатин', 'аторвастатин'),
+  wordRule('Торвостатин', 'Аторвастатин'),
+
+  // SGLT2
+  wordRule('эмпоглифлозин', 'эмпаглифлозин'),
+  wordRule('Эмпоглифлозин', 'Эмпаглифлозин'),
+
+  // Антиагреганты
+  wordRule('ацетилсалицеловая', 'ацетилсалициловая'),
+  wordRule('Ацетилсалицеловая', 'Ацетилсалициловая'),
+  wordRule('ацетилсолициловая', 'ацетилсалициловая'),
+  wordRule('Ацетилсолициловая', 'Ацетилсалициловая'),
+  wordRule('ацетилсолициловой', 'ацетилсалициловой'),
 ];
 
 // ─── 4. Единицы измерения ────────────────────────────────────────────────────
@@ -501,13 +563,97 @@ const UNITS_CORRECTIONS: ReplacementRule[] = [
   regexRule(/килограмм(?:ов)?\s*(?:на|\/)\s*м(?:етр)?\s*(?:квадратн|²|2)/giu, 'кг/м²'),
 ];
 
+// ─── 4a. Whisper-артефакты единиц («г/л» → «гэслчэль» и т.п.) ────────────────
+// Whisper стабильно ошибается в произношении дробных единиц (г/л, КОЕ/мл,
+// ммоль/л, Ед/л): слог «слэш эль» склеивается в «слчэль» / «слшель» / «слцаль»,
+// «КОЕ/мл» → «коэслч», «г/л» → «гэслчэль»/«геслшель»/«G СЛЧЭЛЬ». Эти токены
+// не несут информации и ломают P5/quality_score. Нормализуем до канонического
+// формата ДО других правил. Порядок: длинные паттерны первыми.
+//
+// Ядро middle-pattern: «с[еляо]{0,2}[чшц][эеа]?л[ьи]» — покрывает
+// «слчэль/слшель/слцаль/селчэль/слче» и пр. варианты после Whisper.
+const WHISPER_UNIT_ARTEFACTS: ReplacementRule[] = [
+  // «МгМолСЛЧЭль» / «мкмольсл...» — артефакт «мкмоль/л». Префикс «мг мол»
+  // или «мк мол» — это Whisper-декодирование «мкмоль». Исключает «мг моль» без -ль-хвоста.
+  regexRule(
+    /(?<![а-яёa-z])м[гк]\s*мол[ьсc]?\s*с[еляо]{0,2}[чшц][эеа]?л[ьи]?(?![а-яёa-z])/giu,
+    'мкмоль/л',
+  ),
+  // «МОЛЬСЛЧЭЛЬ» / «мольселчэль» / «моль слцаль» / «МолСЛЧЭль» — артефакт «моль/л»
+  regexRule(
+    /(?<![а-яёa-z])мол[ьсc]?\s*с[еляо]{0,2}[чшц][эеа]?л[ьи]?(?![а-яёa-z])/giu,
+    'моль/л',
+  ),
+  // «мгслчэль» / «мг слчэль» — артефакт «мг/л»
+  regexRule(/(?<![а-яёa-z])мг\s*с[еляо]{0,2}[чшц][эеа]?л[ьи]?(?![а-яёa-z])/giu, 'мг/л'),
+  // «гэслчэль» / «геслшель» / «гсслч» / «G СЛЧЭЛЬ» / «40-геслшель» — «г/л»
+  regexRule(
+    /(?<![а-яёa-zA-Z])[ггG][эеы]?\s*с[еляо]{0,2}[чшц][эеа]?л[ьи]?(?![а-яёa-z])/giu,
+    'г/л',
+  ),
+  regexRule(/(?<![а-яёa-z])гсслч(?![а-яёa-z])/giu, 'г/л'),
+  // «ЕЦЛШЭЛЬ» / «ЕСЛШЭЛЬ» — артефакт «Ед/л»
+  regexRule(/(?<![а-яёa-z])е[цс]л[шчц][эе]?л[ьи]?(?![а-яёa-z])/giu, 'Ед/л'),
+  // «коэслч» / «коэслш» / «коэсслч» / «коэслчмиллилитров» — «КОЕ/мл»
+  // Хвост «миллилитр...» склеен Whisper-ом, его надо съесть вместе.
+  regexRule(
+    /(?<![а-яёa-z])коэс{1,2}л[чшц](?:\s*миллилитр[а-яё]*)?(?![а-яёa-z])/giu,
+    'КОЕ/мл',
+  ),
+  // «слчэль» / «слшэль» / «слшель» / «слчель» — «/л» хвост ПОСЛЕ лаб-ед.
+  // Применяем только если стоит сразу за числом или единицей — не «слезы».
+  regexRule(
+    /(?<=\d|мг|мкг|моль|ммоль|мкмоль|г|ед|ме|степени|стадии)\s*с[еляо]{0,2}[чшц][эеа]?л[ьи]?(?![а-яёa-z])/giu,
+    '/л',
+  ),
+  // «уцлотшмин» / «уцлотш мин» — артефакт «уд/мин»
+  regexRule(/(?<![а-яёa-z])уцлотш?\s*мин[а-яё]*(?![а-яёa-z])/giu, 'уд/мин'),
+  // «ртутного стат[ья]» / «ртутного статья» / «ртутного статии» — артефакт
+  // «ртутного столба». Дальше правило из UNITS_CORRECTIONS развернёт в «мм рт.ст.»
+  regexRule(/ртутного\s+стат[ьяи]+/giu, 'ртутного столба'),
+  // «сотых миллиметра ртутного» — Whisper превращает «165/100 мм рт.ст.»
+  // в «165 сотых миллиметра ртутного статья». Режем хвост → «165/100 мм рт.ст.».
+  // Применяем только когда перед этим стоит число без слеша (т.е. нет «165/100»).
+  regexRule(
+    /(\b\d{2,3})\s+сотых\s+миллиметр[аы]?\s+ртутного(?:\s+стат[ьяи]+|\s+столба)?/giu,
+    '$1/100 мм рт.ст.',
+  ),
+  // «эсреактивный» / «эсреактивного» → «С-реактивный»
+  regexRule(/(?<![а-яёa-z])эс-?реактивн/giu, 'С-реактивн'),
+  // «нетритоположительн[ые]» — артефакт «нитриты положительно» (ОАМ)
+  regexRule(
+    /(?<![а-яёa-z])нетрит[оа]?положительн[а-яё]*(?![а-яёa-z])/giu,
+    'нитриты положительно',
+  ),
+  // «мга» в конце дозы («80 на 12,5 мга») — артефакт «мг». Trigger только
+  // если перед ним число (не трогаем внерусские аббревиатуры).
+  regexRule(/(\d)\s*мга(?![а-яёa-z])/giu, '$1 мг'),
+  // «ПХ» как отдельный токен перед числом — pH (в контексте ОАМ).
+  regexRule(/(?<![А-ЯЁ])ПХ(?=\s*\d)/gu, 'pH'),
+];
+
 // ─── 5. Фонетические замены (Whisper слышит не то) ───────────────────────────
 // Специфичные случаи, когда Whisper стабильно ошибается.
 
 const PHONETIC_CORRECTIONS: ReplacementRule[] = [
+  // Urology MVP regressions (Nurgalieva): preserve clinically important symptoms/diagnosis.
+  wordRule('сжение', 'жжение'),
+  wordRule('Сжение', 'Жжение'),
+  wordRule('дезурический', 'дизурический'),
+  wordRule('дезурические', 'дизурические'),
+  wordRule('дезурических', 'дизурических'),
+  wordRule('пиелонефрид', 'пиелонефрит'),
+  wordRule('Пиелонефрид', 'Пиелонефрит'),
+  wordRule('пиелонифрит', 'пиелонефрит'),
+  wordRule('Пиелонифрит', 'Пиелонефрит'),
+
   // "эн уай эйч эй" → NYHA (если проскользнуло)
   wordRule('эн уай эйч эй', 'NYHA'),
   wordRule('си эйч эй ди эс', 'CHA₂DS₂-VASc'),
+
+  // "напатливость" → "потливость" (Whisper слышит н- в начале слова из ничего)
+  wordRule('напатливость', 'потливость'),
+  wordRule('напатливости', 'потливости'),
 
   // Классы ХСН
   regexRule(/функциональный\s+класс\s+(\d)/giu, 'ФК $1'),
@@ -1365,6 +1511,19 @@ const PHONETIC_CORRECTIONS: ReplacementRule[] = [
   // "повышена" в контексте лаб. значений — лишнее слово, убираем
   // "СОЭ повышена 36" → "СОЭ 36"
   regexRule(/(СОЭ|СРБ|С-реактивный\s+белок|фибриноген|Д-димер|гликозилированный\s+гемоглобин)\s+повышен\S*/giu, '$1'),
+
+  // ── Правила QA 2026-04 ──
+
+  // "менингиальных/менингиальные" → "менингеальных" (и→е)
+  regexRule(/менингиальн/giu, 'менингеальн'),
+
+  // "тридмил" → "тредмил" (и→е)
+  regexRule(/тридмил/giu, 'тредмил'),
+
+  // "года-года" / "г.-года" → "года" (артефакт на границе чанков Whisper)
+  regexRule(/(\d{2}\.\d{2}\.\d{4}г?\.)\s+[Гг]ода?(?=[^а-яёА-ЯЁ]|$)/giu, '$1'),
+  regexRule(/(\d{4})г\.\s*[-–—]\s*год[аы]?(?=[^а-яёА-ЯЁ]|$)/giu, '$1г.'),
+  regexRule(/(\d{4})\s+год[аы]?\s*[-–—]\s*год[аы]?(?=[^а-яёА-ЯЁ]|$)/giu, '$1 года'),
 ];
 
 // ─── 5a. Форматирование жизненных показателей ────────────────────────────────
@@ -1674,6 +1833,9 @@ const ALL_RULES: ReplacementRule[] = [
   ...LATIN_CARDIOLOGY_ABBREVIATIONS,
   ...GENERAL_MEDICAL_ABBREVIATIONS,
   ...DRUG_NAME_CORRECTIONS,
+  // WHISPER_UNIT_ARTEFACTS перед UNITS_CORRECTIONS: сначала «гэслчэль» → «г/л»,
+  // потом общие правила нормализации единиц.
+  ...WHISPER_UNIT_ARTEFACTS,
   ...UNITS_CORRECTIONS,
   ...PHONETIC_CORRECTIONS,
   ...VITALS_FORMATTING,
@@ -1688,7 +1850,7 @@ const ALL_RULES: ReplacementRule[] = [
  * Исправляет типичные ошибки транскрипции медицинских терминов.
  * Включает базовые правила + пользовательские замены.
  */
-export function applyMedicalDictionary(text: string): string {
+export function applyMedicalDictionary(text: string, options: DictionaryApplyOptions = {}): string {
   let result = text;
   // Базовые правила
   for (const rule of ALL_RULES) {
@@ -1700,7 +1862,16 @@ export function applyMedicalDictionary(text: string): string {
   }
   // Пользовательские замены (применяются после базовых, имеют приоритет)
   for (const rule of userRules) {
-    if (typeof rule.replacement === 'string') {
+    if (!userRuleAppliesToContext(rule, options)) continue;
+
+    if (rule.requireDose) {
+      result = result.replace(rule.pattern, (...args: any[]) => {
+        const match = String(args[0]);
+        const offset = Number(args[args.length - 2]);
+        const whole = String(args[args.length - 1]);
+        return hasDoseNearMatch(whole, offset, match.length) ? rule.correct : match;
+      });
+    } else if (typeof rule.replacement === 'string') {
       result = result.replace(rule.pattern, rule.replacement);
     } else {
       result = result.replace(rule.pattern, rule.replacement as (...args: string[]) => string);
@@ -1722,10 +1893,37 @@ const USER_CORRECTIONS_PATH = path.join(DATA_DIR, 'user-corrections.json');
 /** Текущие пользовательские замены (загружаются при старте) */
 let userCorrections: UserCorrection[] = [];
 /** Скомпилированные правила из пользовательских замен */
-let userRules: ReplacementRule[] = [];
+let userRules: CompiledUserRule[] = [];
 
 function compileUserRules(): void {
-  userRules = userCorrections.map((c) => wordRule(c.wrong, c.correct));
+  userRules = userCorrections.map((c) => ({
+    ...wordRule(c.wrong, c.correct),
+    wrong: c.wrong,
+    correct: c.correct,
+    scope: c.scope || 'global',
+    requireDose: c.requireDose === true,
+  }));
+}
+
+function inferScopeFromField(field?: string): UserCorrectionScope | undefined {
+  if (!field) return undefined;
+  if (field === 'conclusion' || field === 'recommendations') return 'medications';
+  if (field === 'outpatientExams') return 'exams';
+  if (field === 'neurologicalStatus') return 'neurological';
+  return undefined;
+}
+
+function userRuleAppliesToContext(rule: CompiledUserRule, options: DictionaryApplyOptions): boolean {
+  if (rule.scope === 'global') return true;
+  const scope = options.scope || inferScopeFromField(options.field);
+  return scope === rule.scope;
+}
+
+function hasDoseNearMatch(text: string, offset: number, length: number): boolean {
+  const start = Math.max(0, offset - 45);
+  const end = Math.min(text.length, offset + length + 45);
+  const window = text.slice(start, end);
+  return /\d+(?:[,.]\d+)?\s*(?:мг|мкг|г|мл|ед|ме|%|табл|таблетк|капсул)/iu.test(window);
 }
 
 /** Загружает пользовательские замены из JSON-файла */
@@ -1759,16 +1957,26 @@ async function saveUserCorrections(): Promise<void> {
 }
 
 /** Добавляет или обновляет пользовательскую замену */
-export async function addUserCorrection(wrong: string, correct: string): Promise<UserCorrection> {
+export async function addUserCorrection(
+  wrong: string,
+  correct: string,
+  options: { scope?: UserCorrectionScope; requireDose?: boolean } = {}
+): Promise<UserCorrection> {
   const trimWrong = wrong.trim();
   const trimCorrect = correct.trim();
+  const scope = normalizeUserCorrectionScope(options.scope);
+  const requireDose = options.requireDose === true;
 
   // Обновляем существующую, если есть
   const existing = userCorrections.find(
-    (c) => c.wrong.toLowerCase() === trimWrong.toLowerCase()
+    (c) => c.wrong.toLowerCase() === trimWrong.toLowerCase() &&
+      (c.scope || 'global') === scope &&
+      (c.requireDose === true) === requireDose
   );
   if (existing) {
     existing.correct = trimCorrect;
+    existing.scope = scope;
+    existing.requireDose = requireDose;
     existing.createdAt = new Date().toISOString();
     compileUserRules();
     await saveUserCorrections();
@@ -1780,11 +1988,17 @@ export async function addUserCorrection(wrong: string, correct: string): Promise
     wrong: trimWrong,
     correct: trimCorrect,
     createdAt: new Date().toISOString(),
+    scope,
+    requireDose,
   };
   userCorrections.push(correction);
   compileUserRules();
   await saveUserCorrections();
   return correction;
+}
+
+function normalizeUserCorrectionScope(scope: UserCorrectionScope | undefined): UserCorrectionScope {
+  return scope === 'medications' || scope === 'exams' || scope === 'neurological' ? scope : 'global';
 }
 
 /** Удаляет пользовательскую замену по ID */
@@ -1802,3 +2016,8 @@ export function getUserCorrections(): UserCorrection[] {
   return [...userCorrections];
 }
 
+/** Test-only helper: does not write to disk. */
+export function setUserCorrectionsForTest(corrections: UserCorrection[]): void {
+  userCorrections = corrections.map((c) => ({ ...c }));
+  compileUserRules();
+}

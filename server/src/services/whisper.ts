@@ -10,7 +10,16 @@ interface WhisperServerResponse {
   language: string;
   elapsed: number;
   chunks?: number;
-  chunk_details?: Array<{ chunk: number; duration: number; chars: number; elapsed: number; avg_logprob?: number }>;
+  chunk_details?: Array<{
+    chunk: number;
+    duration: number;
+    chars: number;
+    elapsed: number;
+    avg_logprob?: number;
+    suspicious?: string[];
+    fallback_used?: boolean;
+    selected_beam?: number;
+  }>;
   avg_logprob?: number;
   low_confidence?: boolean;
 }
@@ -23,7 +32,11 @@ interface WhisperServerResponse {
 // НЕ включать единицы измерения (мм рт.ст., уд/мин) и аббревиатуры —
 // они «протекают» в транскрипцию как мусорные фрагменты.
 const MEDICAL_INITIAL_PROMPT =
-  'Медицинская консультация. Жалобы, анамнез, осмотр, диагноз, рекомендации.';
+  'Медицинский протокол. АД – 150/90 мм рт.ст. Максимальные цифры АД до 180/110 мм рт.ст. ' +
+  'ЧСС – 76 уд/мин. SpO₂ 96%. СОЭ 12 мм/ч. HbA1c 7,8%. ЭКГ. ЭхоКГ. Тредмил-тест. ' +
+  'Менингеальных знаков нет. Парезов нет. ' +
+  'АЛТ 31 МЕ/л, АСТ 27 МЕ/л, ЛПНП 4,2 ммоль/л, триглицериды 2,4 ммоль/л. ' +
+  'валсартан, амлодипин, метформин, розувастатин, эмпаглифлозин, ацетилсалициловая кислота.';
 
 // HOTWORDS: ОТКЛЮЧЕНЫ.
 // Тестирование показало, что любой список hotwords в faster-whisper вызывает:
@@ -304,6 +317,46 @@ export class WhisperService {
     }
   }
 
+  // ─── Streaming chunk transcription (base64 → text) ──────────────────────────
+
+  async transcribeBase64(audioBase64: string): Promise<string> {
+    if (!this.config.serverUrl) {
+      throw new Error('Whisper HTTP server not configured — streaming unavailable');
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 300_000);
+
+    try {
+      const response = await fetch(`${this.config.serverUrl}/transcribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audio_base64: audioBase64,
+          language: this.config.language,
+          beam_size: this.config.beamSize,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(`Whisper chunk error ${response.status}: ${err.error ?? response.statusText}`);
+      }
+
+      const data = (await response.json()) as WhisperServerResponse;
+      const cleaned = this.cleanWhisperHallucinations(data.text);
+      return applyMedicalDictionary(cleaned);
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error('Whisper chunk request timeout');
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   // ─── Persistent HTTP whisper-сервер ─────────────────────────────────────────
 
   private async transcribeWithServer(audioPath: string): Promise<Omit<TranscriptionResult, 'duration'>> {
@@ -328,6 +381,10 @@ export class WhisperService {
         body: JSON.stringify({
           audio_base64: audioBase64,
           language: this.config.language,
+          // Передаём beam_size явно, чтобы фиксировать конфигурацию между клиентом
+          // и Python-сервером. Без этого сервер уходит в свой env-дефолт (5) —
+          // даже если у нас WHISPER_BEAM_SIZE=1, live-прогон шёл на beam=5.
+          beam_size: this.config.beamSize,
         }),
         signal: controller.signal,
       });
@@ -342,14 +399,33 @@ export class WhisperService {
         console.log(`[whisper] Chunked transcription: ${data.chunks} chunks, ${data.elapsed?.toFixed(1)}s total`);
         if (data.chunk_details) {
           for (const c of data.chunk_details) {
-            console.log(`  chunk ${c.chunk}: ${c.duration}s → ${c.chars} chars (${c.elapsed}s) logprob=${c.avg_logprob ?? 'n/a'}`);
+            const flags = c.suspicious?.length ? ` [${c.suspicious.join(',')}]` : '';
+            const fb = c.fallback_used ? ' [fallback→beam' + (c.selected_beam ?? '?') + ']' : '';
+            console.log(`  chunk ${c.chunk}: ${c.duration}s → ${c.chars} chars (${c.elapsed}s) logprob=${c.avg_logprob ?? 'n/a'}${flags}${fb}`);
           }
         }
       }
       if (typeof data.avg_logprob === 'number') {
         console.log(`[whisper] avg_logprob=${data.avg_logprob.toFixed(2)}${data.low_confidence ? ' [LOW CONFIDENCE — возможны галлюцинации]' : ''}`);
       }
-      return { text: data.text, language: data.language };
+
+      // Собираем warnings из chunk_details — только для flagged чанков
+      // (suspicious.length > 0). Клиент использует для UX-бейджей/подсветки.
+      const warnings = (data.chunk_details ?? [])
+        .filter((c) => c.suspicious && c.suspicious.length > 0)
+        .map((c) => ({
+          chunk: c.chunk,
+          reasons: c.suspicious ?? [],
+          avgLogprob: typeof c.avg_logprob === 'number' ? c.avg_logprob : 0,
+          fallbackUsed: Boolean(c.fallback_used),
+          selectedBeam: typeof c.selected_beam === 'number' ? c.selected_beam : 0,
+        }));
+
+      return {
+        text: data.text,
+        language: data.language,
+        ...(warnings.length > 0 ? { warnings } : {}),
+      };
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
         throw new Error('Whisper server request timeout');

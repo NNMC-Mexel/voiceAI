@@ -23,6 +23,9 @@ FROM node:22-slim AS backend-builder
 
 WORKDIR /backend
 
+# better-sqlite3 requires native compilation tools
+RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
+
 COPY server/package*.json ./
 # NODE_ENV=development чтобы npm ci установил devDependencies (typescript/tsc и т.д.)
 RUN NODE_ENV=development npm ci
