@@ -3,6 +3,7 @@
   age: string;
   gender: string;
   complaintDate: string;
+  birthDate?: string;
 }
 
 export interface RiskAssessment {
@@ -28,6 +29,21 @@ export interface MedicalDocument {
   doctorNotes: string;          // План обследования
   recommendations: string;      // План лечения (включая диету пунктом списка)
   manualCheck?: string;         // Сомнительные фрагменты, требующие ручной проверки
+}
+
+// JWT payload shape — used by @fastify/jwt type augmentation
+export interface JwtPayload {
+  doctorId: number;
+  email: string;
+  name: string;
+  role: 'admin' | 'doctor';
+}
+
+declare module '@fastify/jwt' {
+  interface FastifyJWT {
+    payload: JwtPayload;
+    user: JwtPayload;
+  }
 }
 
 export type QualityWarningCode =
@@ -120,6 +136,8 @@ export interface ServerConfig {
   port: number;
   host: string;
   uploadDir: string;
+  dbPath: string;
+  jwtSecret: string;
   whisper: WhisperConfig;
   llm: LLMConfig;
   tts: TtsConfig;
@@ -130,6 +148,8 @@ export const defaultConfig: ServerConfig = {
   port: 3001,
   host: '0.0.0.0',
   uploadDir: './uploads',
+  dbPath: './data/meddok.db',
+  jwtSecret: '',
   whisper: {
     modelPath: './models/whisper-large-v3',
     language: 'ru',

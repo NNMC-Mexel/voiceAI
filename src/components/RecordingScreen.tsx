@@ -1,19 +1,39 @@
 ﻿import { useState, useEffect, useRef, useCallback } from 'react';
-import { Mic, Pause, Play, Square, AlertCircle, CheckCircle, RotateCcw, Upload } from 'lucide-react';
+import { Mic, Pause, Play, Square, AlertCircle, CheckCircle, RotateCcw, Upload, FileText, Camera, Users, Smartphone, Bell, Settings, X as XIcon } from 'lucide-react';
+import type { PatientSummary } from '../api/client';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import type { VoiceRecorderStreamOptions } from '../hooks/useVoiceRecorder';
 import { useWakeWord } from '../hooks/useWakeWord';
 import { WaveformVisualizer } from './WaveformVisualizer';
 
 
+interface PendingSync {
+  id: string;
+  filename: string;
+  createdAt: string;
+}
+
 interface RecordingScreenProps {
   onRecordingComplete: (audioBlob: Blob) => void;
   onRecordingStart?: () => void;
   streamOptions?: VoiceRecorderStreamOptions;
+  onDocumentUpload?: (file: File) => void;
+  activePatient?: PatientSummary | null;
+  onOpenPatients?: () => void;
+  onOpenSettings?: () => void;
+  onSyncUpload?: () => void;
+  pendingSyncs?: PendingSync[];
+  onClaimSync?: (syncId: string) => void;
+  onDismissSync?: (syncId: string) => void;
   error?: string | null;
 }
 
-export function RecordingScreen({ onRecordingComplete, onRecordingStart, streamOptions, error: externalError }: RecordingScreenProps) {
+export function RecordingScreen({
+  onRecordingComplete, onRecordingStart, streamOptions, onDocumentUpload,
+  activePatient, onOpenPatients, onOpenSettings, onSyncUpload,
+  pendingSyncs = [], onClaimSync, onDismissSync,
+  error: externalError,
+}: RecordingScreenProps) {
   const {
     isRecording,
     isPaused,
@@ -30,6 +50,8 @@ export function RecordingScreen({ onRecordingComplete, onRecordingStart, streamO
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const autoSubmitRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const docInputRef = useRef<HTMLInputElement>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
 
   // Wake word: "Джарвис" starts recording, "стоп" stops and auto-submits
   const handleWakeWord = useCallback(() => {
@@ -74,6 +96,20 @@ export function RecordingScreen({ onRecordingComplete, onRecordingStart, streamO
     }
     onRecordingComplete(file);
     if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleDocumentFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const MAX_SIZE = 20 * 1024 * 1024; // 20 МБ
+    if (file.size > MAX_SIZE) {
+      setError('Документ слишком большой. Максимум 20 МБ.');
+      if (e.target) e.target.value = '';
+      return;
+    }
+    setError(null);
+    onDocumentUpload?.(file);
+    if (e.target) e.target.value = '';
   };
 
   useEffect(() => {
@@ -164,7 +200,76 @@ export function RecordingScreen({ onRecordingComplete, onRecordingStart, streamO
   const progress = (currentSeconds / MAX_DURATION_SECONDS) * 100;
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4 py-6 sm:p-6">
+    <div className="min-h-screen flex flex-col">
+      {/* Top bar */}
+      {(activePatient || onOpenPatients || onOpenSettings || onSyncUpload || pendingSyncs.length > 0) && (
+        <div className="bg-white border-b border-slate-200 px-4 py-2.5 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 min-w-0">
+            {activePatient && (
+              <span className="text-sm font-medium text-medical-900 truncate">
+                {activePatient.fullName}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {/* Pending syncs badge */}
+            {pendingSyncs.length > 0 && (
+              <div className="relative">
+                <button
+                  className="flex items-center gap-1.5 text-sm text-amber-600 hover:text-amber-700 bg-amber-50 px-3 py-1.5 rounded-lg border border-amber-200"
+                  title="Документы с телефона готовы"
+                >
+                  <Bell className="w-4 h-4" />
+                  <span className="font-medium">{pendingSyncs.length}</span>
+                </button>
+              </div>
+            )}
+            {onSyncUpload && (
+              <button onClick={onSyncUpload} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap">
+                <Smartphone className="w-4 h-4" /> На ПК
+              </button>
+            )}
+            {onOpenPatients && (
+              <button onClick={onOpenPatients} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap">
+                <Users className="w-4 h-4" /> Пациенты
+              </button>
+            )}
+            {onOpenSettings && (
+              <button onClick={onOpenSettings} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap">
+                <Settings className="w-4 h-4" /> Настройки
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Pending syncs dropdown */}
+      {pendingSyncs.length > 0 && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-3">
+          <p className="text-xs font-semibold text-amber-800 mb-2 flex items-center gap-1.5">
+            <Bell className="w-3.5 h-3.5" /> Документы с телефона готовы к открытию:
+          </p>
+          <div className="space-y-1.5">
+            {pendingSyncs.map(s => (
+              <div key={s.id} className="flex items-center gap-2 bg-white rounded-lg px-3 py-2 border border-amber-200">
+                <FileText className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                <span className="text-sm text-medical-900 truncate flex-1">{s.filename || 'Документ'}</span>
+                <button
+                  onClick={() => onClaimSync?.(s.id)}
+                  className="text-xs bg-medical-600 hover:bg-medical-700 text-white px-2 py-1 rounded-md whitespace-nowrap"
+                >
+                  Открыть
+                </button>
+                <button onClick={() => onDismissSync?.(s.id)} className="p-0.5 hover:bg-amber-100 rounded">
+                  <XIcon className="w-3.5 h-3.5 text-amber-500" />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+    <div className="flex-1 flex items-center justify-center px-4 py-6 sm:p-6">
       <div className="w-full max-w-2xl">
         <div className="text-center mb-8 sm:mb-12 slide-up">
           <div className="inline-flex items-center gap-2 px-4 py-2 bg-medical-100 text-medical-700 rounded-full text-sm font-medium mb-6">
@@ -244,19 +349,53 @@ export function RecordingScreen({ onRecordingComplete, onRecordingStart, streamO
                   <Mic className="w-6 h-6" />
                   Начать запись
                 </button>
+
+                {/* Скрытые file inputs */}
+                <input ref={fileInputRef} type="file" accept="audio/*" onChange={handleFileUpload} className="hidden" />
                 <input
-                  ref={fileInputRef}
+                  ref={docInputRef}
                   type="file"
-                  accept="audio/*"
-                  onChange={handleFileUpload}
+                  accept=".pdf,.docx,.doc,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                  onChange={handleDocumentFileChange}
                   className="hidden"
                 />
+                <input
+                  ref={photoInputRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={handleDocumentFileChange}
+                  className="hidden"
+                />
+
+                {onDocumentUpload && (
+                  <button
+                    onClick={() => docInputRef.current?.click()}
+                    className="btn-secondary flex items-center justify-center gap-2 text-sm flex-1 sm:flex-initial whitespace-nowrap"
+                    title="Загрузить PDF или Word документ"
+                  >
+                    <FileText className="w-4 h-4" />
+                    PDF / Word
+                  </button>
+                )}
+
+                {onDocumentUpload && (
+                  <button
+                    onClick={() => photoInputRef.current?.click()}
+                    className="btn-secondary flex items-center justify-center gap-2 text-sm flex-1 sm:flex-initial whitespace-nowrap"
+                    title="Сфотографировать документ (анализы, выписка)"
+                  >
+                    <Camera className="w-4 h-4" />
+                    Фото
+                  </button>
+                )}
+
                 <button
                   onClick={() => fileInputRef.current?.click()}
                   className="btn-secondary flex items-center justify-center gap-2 text-sm flex-1 sm:flex-initial whitespace-nowrap"
                 >
                   <Upload className="w-4 h-4" />
-                  Загрузить файл
+                  Аудио
                 </button>
               </>
             )}
@@ -338,6 +477,7 @@ export function RecordingScreen({ onRecordingComplete, onRecordingStart, streamO
           ))}
         </div>
       </div>
+    </div>
     </div>
   );
 }

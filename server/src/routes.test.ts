@@ -4,6 +4,7 @@ import {
   resolveUploadPath,
   toSafeUploadFilename,
   isValidMedicalDocument,
+  documentFromExactSourceText,
   assessDocumentUsefulness,
   isFieldMeaningful,
   collectDocumentQualityWarnings,
@@ -45,6 +46,45 @@ test('resolveUploadPath allows valid file path', () => {
 });
 
 // ─── assessDocumentUsefulness — критерий «полезности» документа ──────────────
+
+test('documentFromExactSourceText keeps patient and lab facts, drops OCR boilerplate', () => {
+  const doc = documentFromExactSourceText(`
+около 10 к Анамнез: заболевание проходил в 2020 году, с тех пор [неразборчиво]
+Министерство здравоохранения
+Форма №097/у
+EFQM
+Recognised for excellence
+5 star
+
+№ карты: 441480
+ИНН: 000908551579
+УАЛИЕВ РУСТАМ РАШАТОВИЧ (Муж)
+Дата рождения: 08.09.2000
+№ направления: 81007296
+Заказ №26033103703633 от 31.03.2026
+Кровь ЭДТА
+Дата взятия: 31.03.2026 11:14
+Выполнено: 31.03.2026 11:35
+Показатель Результат Ед.изм. Реф.интервал
+Общий анализ крови
+Лейкоциты (WBC) 5.93 10E9/л (4.00 - 10.50)
+Гемоглобин (HGB) 159.00 г/л (136.00 - 169.00)
+СОЭ 4.00 мм/ч (0.00 - 15.00)
+Интерпретацию полученных результатов проводит Врач
+Адрес: г. Астана, пр. Абылай хан, 42
+`);
+
+  assert.equal(doc.patient.fullName, 'УАЛИЕВ РУСТАМ РАШАТОВИЧ');
+  assert.equal(doc.patient.age, '25 лет');
+  assert.equal(doc.patient.gender, 'мужской');
+  assert.equal(doc.patient.complaintDate, '2026-03-31');
+  assert.equal(doc.patient.birthDate, '2000-09-08');
+  assert.match(doc.outpatientExams, /Лейкоциты \(WBC\) 5\.93 10E9\/л/u);
+  assert.match(doc.outpatientExams, /Гемоглобин \(HGB\) 159\.00 г\/л/u);
+  assert.doesNotMatch(doc.outpatientExams, /Анамнез|Министерство|EFQM|Адрес|неразборчиво/iu);
+  assert.equal(doc.complaints, '');
+  assert.equal(doc.anamnesis, '');
+});
 
 test('isFieldMeaningful rejects bare section headers', () => {
   assert.equal(isFieldMeaningful('Жалобы'), false);

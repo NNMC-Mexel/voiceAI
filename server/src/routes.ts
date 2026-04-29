@@ -8,6 +8,11 @@ import { randomUUID } from 'crypto';
 import { WhisperService } from './services/whisper.js';
 import { LLMService } from './services/llm.js';
 import { TtsService } from './services/tts.js';
+import { DocumentExtractorService } from './services/document-extractor.js';
+import type { AppDb } from './db/index.js';
+import { doctors } from './db/schema.js';
+import { registerDoctorRoutes } from './routes-doctors.js';
+import { eq } from 'drizzle-orm';
 import {
   getUserCorrections,
   addUserCorrection,
@@ -64,6 +69,196 @@ export function resolveUploadPath(uploadDir: string, filename: string): string {
   }
 
   return candidate;
+}
+
+function toCleanOcrLines(rawText: string): string[] {
+  return rawText
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
+function parseDmyDate(value: string): Date | null {
+  const match = value.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (!match) return null;
+
+  const [, dd, mm, yyyy] = match;
+  const date = new Date(Number(yyyy), Number(mm) - 1, Number(dd));
+  if (
+    date.getFullYear() !== Number(yyyy) ||
+    date.getMonth() !== Number(mm) - 1 ||
+    date.getDate() !== Number(dd)
+  ) {
+    return null;
+  }
+  return date;
+}
+
+function dmyToIso(value: string): string {
+  if (!parseDmyDate(value)) return '';
+  const [, dd, mm, yyyy] = value.match(/^(\d{2})\.(\d{2})\.(\d{4})$/) || [];
+  return yyyy && mm && dd ? `${yyyy}-${mm}-${dd}` : '';
+}
+
+function calculateAgeYears(birthDate: Date, atDate: Date): string {
+  let age = atDate.getFullYear() - birthDate.getFullYear();
+  const beforeBirthday =
+    atDate.getMonth() < birthDate.getMonth() ||
+    (atDate.getMonth() === birthDate.getMonth() && atDate.getDate() < birthDate.getDate());
+  if (beforeBirthday) age -= 1;
+  return age >= 0 && age < 130 ? `${age} лет` : '';
+}
+
+function extractDocumentDateIso(rawText: string): string {
+  const patterns = [
+    /Дата\s+взятия:\s*(\d{2}\.\d{2}\.\d{4})/iu,
+    /Заказ\s*№?\S*\s+от\s*(\d{2}\.\d{2}\.\d{4})/iu,
+    /Выполнено:\s*(\d{2}\.\d{2}\.\d{4})/iu,
+  ];
+
+  for (const pattern of patterns) {
+    const match = rawText.match(pattern);
+    if (match?.[1]) {
+      const iso = dmyToIso(match[1]);
+      if (iso) return iso;
+    }
+  }
+  return '';
+}
+
+function looksLikePatientNameLine(line: string): boolean {
+  const clean = line.replace(/\([^)]*\)/g, '').trim();
+  if (!/^[А-ЯЁA-Z][А-ЯЁA-Z'’` -]+$/u.test(clean)) return false;
+
+  const words = clean.split(/\s+/).filter(Boolean);
+  if (words.length < 2 || words.length > 4) return false;
+  return !/(?:МИНИСТЕРСТВО|MINISTRY|ORGANIZATION|ОРГАНИЗАЦ|НАИМЕНОВАНИЕ|ТОО|АО|HEALTH|CENTER|MEDICAL|ВРАЧ|КАЗАХСТАН|РЕСПУБЛИК)/iu.test(clean);
+}
+
+function extractPatientFromExactText(rawText: string): MedicalDocument['patient'] {
+  const lines = toCleanOcrLines(rawText);
+  const birthMatch = rawText.match(/Дата\s+рождения:\s*(\d{2}\.\d{2}\.\d{4})/iu);
+  const birthDate = birthMatch?.[1] ? parseDmyDate(birthMatch[1]) : null;
+  const documentDateIso = extractDocumentDateIso(rawText);
+  const documentDate = documentDateIso ? new Date(`${documentDateIso}T00:00:00`) : new Date();
+
+  let fullName = '';
+  let gender = '';
+
+  const birthLineIndex = lines.findIndex((line) => /Дата\s+рождения:/iu.test(line));
+  const candidates = birthLineIndex >= 0
+    ? lines.slice(Math.max(0, birthLineIndex - 6), birthLineIndex).reverse()
+    : lines;
+
+  for (const line of candidates) {
+    if (!looksLikePatientNameLine(line)) continue;
+
+    const genderMatch = line.match(/\((муж|жен|м|ж|male|female)\)/iu);
+    if (genderMatch) {
+      const value = genderMatch[1].toLowerCase();
+      gender = value.startsWith('м') || value === 'male' ? 'мужской' : 'женский';
+    }
+
+    fullName = line.replace(/\([^)]*\)/g, '').replace(/\s+/g, ' ').trim();
+    break;
+  }
+
+  const explicitGender = rawText.match(/(?:Пол|Gender):\s*(мужской|женский|муж|жен|male|female)/iu);
+  if (!gender && explicitGender?.[1]) {
+    const value = explicitGender[1].toLowerCase();
+    gender = value.startsWith('м') || value === 'male' ? 'мужской' : 'женский';
+  }
+
+  return {
+    fullName,
+    age: birthDate ? calculateAgeYears(birthDate, documentDate) : '',
+    gender,
+    complaintDate: documentDateIso || new Date().toISOString().slice(0, 10),
+    birthDate: birthMatch?.[1] ? dmyToIso(birthMatch[1]) : '',
+  };
+}
+
+function isOcrServiceLine(line: string): boolean {
+  return /\[неразборчиво\]/iu.test(line) ||
+    /(?:Интерпретацию\s+полученных|Исполнители:|Напечатано|Адрес:|Тел\.?:|laboratory@|стр\.\s*\d+|Қазақстан Республикасы|Денсаулық сақтау|Министерство здравоохранения|Ministry of Health|Уйымның атауы|Наименование организации|Organization Name|Форма\s*№|Утверждена|Приказ|Зарегистрирован|Министр|Әділет|медициналық|EFQM|Recognised for excellence|^\d+\s*star$|^Организация:$|^Врач:$|^ТОО\b|^АО\b|National Scientific Medical Center|Национальный научный медицинский центр)/iu.test(line);
+}
+
+function isExactLabLine(line: string): boolean {
+  if (isOcrServiceLine(line)) return false;
+
+  return /^(?:№\s*(?:карты|направления)|(?:ИИН|ИНН)\s*:|Заказ\s*№|Кровь\b|Дата\s+взятия:|Выполнено:|IDs?:|Показатель\b)/iu.test(line) ||
+    /(?:анализ\s+(?:крови|мочи)|Общий\s+анализ|Биохимическ|Гематолог)/iu.test(line) ||
+    /^[А-ЯЁA-Z][^:\n]{1,90}?\s+(?:↑|↓)?\s*\d+(?:[.,]\d+)?\s+(?:10E\d+\/л|10\^\d+\/л|г\/л|мм\/ч|%|фл|пг|мкмоль\/л|ммоль\/л|Ед\/л|\/100WBC|\([^)]+\))/u.test(line);
+}
+
+function cleanExactOutpatientExams(rawText: string, patient: MedicalDocument['patient']): string {
+  const lines = toCleanOcrLines(rawText);
+  const result: string[] = [];
+  const seen = new Set<string>();
+
+  const add = (line: string) => {
+    const clean = line.trim();
+    if (!clean || seen.has(clean)) return;
+    seen.add(clean);
+    result.push(clean);
+  };
+
+  if (patient.fullName) {
+    add(`Пациент: ${patient.fullName}${patient.gender ? `, ${patient.gender}` : ''}${patient.age ? `, ${patient.age}` : ''}`);
+  }
+
+  for (const line of lines) {
+    if (looksLikePatientNameLine(line) || /Дата\s+рождения:/iu.test(line)) continue;
+    if (isExactLabLine(line)) add(line);
+  }
+
+  if (result.length > (patient.fullName ? 1 : 0)) {
+    return result.join('\n');
+  }
+
+  return lines
+    .filter((line) => !isOcrServiceLine(line))
+    .filter((line) => !/\[неразборчиво\]/iu.test(line))
+    .join('\n')
+    .trim();
+}
+
+export function documentFromExactSourceText(rawText: string, base?: MedicalDocument): MedicalDocument {
+  const patient = extractPatientFromExactText(rawText);
+  const text = cleanExactOutpatientExams(rawText, patient);
+  const today = new Date().toISOString().slice(0, 10);
+
+  return {
+    patient: {
+      fullName: patient.fullName || base?.patient?.fullName || '',
+      age: patient.age || base?.patient?.age || '',
+      gender: patient.gender || base?.patient?.gender || '',
+      complaintDate: patient.complaintDate || base?.patient?.complaintDate || today,
+      birthDate: patient.birthDate || base?.patient?.birthDate || '',
+    },
+    riskAssessment: {
+      fallInLast3Months: '',
+      dizzinessOrWeakness: '',
+      needsEscort: '',
+      painScore: '',
+    },
+    complaints: '',
+    anamnesis: '',
+    outpatientExams: text,
+    clinicalCourse: '',
+    allergyHistory: '',
+    objectiveStatus: '',
+    neurologicalStatus: '',
+    diagnosis: '',
+    finalDiagnosis: '',
+    conclusion: '',
+    doctorNotes: '',
+    recommendations: '',
+    manualCheck: text
+      ? 'Документ получен из фото/OCR. Оставлены только распознанные фактические данные анализа; служебный текст бланка скрыт.'
+      : base?.manualCheck,
+  };
 }
 
 // Заголовки разделов, которые LLM/Whisper иногда оставляют как «контент» поля
@@ -456,10 +651,29 @@ export async function registerRoutes(
   config: ServerConfig,
   whisperService: WhisperService,
   llmService: LLMService,
-  ttsService: TtsService
+  ttsService: TtsService,
+  db?: AppDb,
 ): Promise<void> {
   if (!existsSync(config.uploadDir)) {
     await mkdir(config.uploadDir, { recursive: true });
+  }
+
+  const visionProvider = process.env.DOCUMENT_VISION_PROVIDER?.trim().toLowerCase() === 'anthropic'
+    ? 'anthropic'
+    : 'ollama';
+  const documentExtractor = new DocumentExtractorService({
+    visionProvider,
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY?.trim() || config.llm.anthropic?.apiKey,
+    ollama: {
+      serverUrl: process.env.DOCUMENT_VISION_SERVER_URL?.trim() || config.llm.serverUrl,
+      model: process.env.DOCUMENT_VISION_MODEL?.trim() || config.llm.model,
+      timeoutMs: Number.parseInt(process.env.DOCUMENT_VISION_TIMEOUT_MS || '90000', 10),
+    },
+  });
+
+  // Регистрируем маршруты врачей/пациентов/синхронизации если БД доступна
+  if (db) {
+    await registerDoctorRoutes(fastify, db, documentExtractor, llmService);
   }
 
   const rateMap = new Map<string, RateState>();
@@ -511,26 +725,42 @@ export async function registerRoutes(
     if (url.startsWith('/api/health')) return;
     if (url.startsWith('/api/auth/')) return;
 
-    // Auth by password (session token)
-    if (config.security.authPassword) {
-      const auth = request.headers.authorization;
-      const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-
-      if (!token || !isTokenValid(token)) {
+    if (db) {
+      try {
+        await request.jwtVerify();
+      } catch {
         return reply.status(401).send({ error: 'Unauthorized' });
       }
-    }
 
-    // Legacy API key auth
-    if (config.security.apiKey) {
-      const rawApiKey = request.headers['x-api-key'];
-      const headerApiKey = typeof rawApiKey === 'string' ? rawApiKey : '';
-      const auth = request.headers.authorization;
-      const bearerApiKey = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-      const provided = headerApiKey || bearerApiKey;
+      const doctor = db.select({ isActive: doctors.isActive })
+        .from(doctors)
+        .where(eq(doctors.id, request.user.doctorId))
+        .get();
+      if (!doctor?.isActive) {
+        return reply.status(403).send({ error: 'Аккаунт деактивирован' });
+      }
+    } else {
+      // Auth by password (session token)
+      if (config.security.authPassword) {
+        const auth = request.headers.authorization;
+        const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
 
-      if (!provided || provided !== config.security.apiKey) {
-        return reply.status(401).send({ error: 'Unauthorized' });
+        if (!token || !isTokenValid(token)) {
+          return reply.status(401).send({ error: 'Unauthorized' });
+        }
+      }
+
+      // Legacy API key auth
+      if (config.security.apiKey) {
+        const rawApiKey = request.headers['x-api-key'];
+        const headerApiKey = typeof rawApiKey === 'string' ? rawApiKey : '';
+        const auth = request.headers.authorization;
+        const bearerApiKey = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+        const provided = headerApiKey || bearerApiKey;
+
+        if (!provided || provided !== config.security.apiKey) {
+          return reply.status(401).send({ error: 'Unauthorized' });
+        }
       }
     }
 
@@ -549,75 +779,77 @@ export async function registerRoutes(
     }
   });
 
-  // --- Auth endpoint ---
-  fastify.post('/api/auth/login', async (request, reply) => {
-    if (!config.security.authPassword) {
-      return { success: true, token: 'no-auth' };
-    }
+  if (!db) {
+    // --- Legacy auth endpoint ---
+    fastify.post('/api/auth/login', async (request, reply) => {
+      if (!config.security.authPassword) {
+        return { success: true, token: 'no-auth' };
+      }
 
-    const ip = request.ip || 'unknown';
-    const now = Date.now();
-    const attempt = loginAttempts.get(ip);
+      const ip = request.ip || 'unknown';
+      const now = Date.now();
+      const attempt = loginAttempts.get(ip);
 
-    // Lockout по IP
-    if (attempt && attempt.lockedUntil > now) {
-      const minutesLeft = Math.ceil((attempt.lockedUntil - now) / 60000);
-      return reply.status(429).send({
-        error: `Слишком много попыток. Попробуйте через ${minutesLeft} мин.`,
-      });
-    }
-
-    const body = request.body as Record<string, unknown> | null;
-    const password = typeof body?.password === 'string' ? body.password : '';
-
-    if (password !== config.security.authPassword) {
-      // Задержка ответа — замедляем перебор
-      await new Promise((resolve) => setTimeout(resolve, LOGIN_FAIL_DELAY_MS));
-
-      const next = attempt && attempt.lockedUntil <= now
-        ? { count: attempt.count + 1, lockedUntil: 0 }
-        : { count: (attempt?.count ?? 0) + 1, lockedUntil: 0 };
-
-      if (next.count >= LOGIN_MAX_ATTEMPTS) {
-        next.lockedUntil = now + LOGIN_LOCKOUT_MS;
-        next.count = 0;
-        loginAttempts.set(ip, next);
-        request.log.warn({ ip }, 'Login lockout triggered');
+      // Lockout по IP
+      if (attempt && attempt.lockedUntil > now) {
+        const minutesLeft = Math.ceil((attempt.lockedUntil - now) / 60000);
         return reply.status(429).send({
-          error: 'Слишком много неверных попыток. Заблокировано на 15 минут.',
+          error: `Слишком много попыток. Попробуйте через ${minutesLeft} мин.`,
         });
       }
 
-      loginAttempts.set(ip, next);
-      return reply.status(401).send({ error: 'Неверный пароль' });
-    }
+      const body = request.body as Record<string, unknown> | null;
+      const password = typeof body?.password === 'string' ? body.password : '';
 
-    // Успешный логин — сбрасываем счётчик
-    loginAttempts.delete(ip);
+      if (password !== config.security.authPassword) {
+        // Задержка ответа — замедляем перебор
+        await new Promise((resolve) => setTimeout(resolve, LOGIN_FAIL_DELAY_MS));
 
-    const token = randomUUID();
-    authTokens.set(token, now + AUTH_TOKEN_TTL_MS);
-    return { success: true, token };
-  });
+        const next = attempt && attempt.lockedUntil <= now
+          ? { count: attempt.count + 1, lockedUntil: 0 }
+          : { count: (attempt?.count ?? 0) + 1, lockedUntil: 0 };
 
-  fastify.post('/api/auth/logout', async (request) => {
-    const auth = request.headers.authorization;
-    const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-    if (token) authTokens.delete(token);
-    return { success: true };
-  });
+        if (next.count >= LOGIN_MAX_ATTEMPTS) {
+          next.lockedUntil = now + LOGIN_LOCKOUT_MS;
+          next.count = 0;
+          loginAttempts.set(ip, next);
+          request.log.warn({ ip }, 'Login lockout triggered');
+          return reply.status(429).send({
+            error: 'Слишком много неверных попыток. Заблокировано на 15 минут.',
+          });
+        }
 
-  fastify.get('/api/auth/check', async (request, reply) => {
-    if (!config.security.authPassword) {
+        loginAttempts.set(ip, next);
+        return reply.status(401).send({ error: 'Неверный пароль' });
+      }
+
+      // Успешный логин — сбрасываем счётчик
+      loginAttempts.delete(ip);
+
+      const token = randomUUID();
+      authTokens.set(token, now + AUTH_TOKEN_TTL_MS);
+      return { success: true, token };
+    });
+
+    fastify.post('/api/auth/logout', async (request) => {
+      const auth = request.headers.authorization;
+      const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+      if (token) authTokens.delete(token);
+      return { success: true };
+    });
+
+    fastify.get('/api/auth/check', async (request, reply) => {
+      if (!config.security.authPassword) {
+        return { authenticated: true };
+      }
+      const auth = request.headers.authorization;
+      const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+      if (!token || !isTokenValid(token)) {
+        return reply.status(401).send({ authenticated: false });
+      }
       return { authenticated: true };
-    }
-    const auth = request.headers.authorization;
-    const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-    if (!token || !isTokenValid(token)) {
-      return reply.status(401).send({ authenticated: false });
-    }
-    return { authenticated: true };
-  });
+    });
+  }
 
   // ─── Streaming session endpoints ─────────────────────────────────────────────
 
@@ -1157,6 +1389,113 @@ export async function registerRoutes(
     }
   });
 
+  // ─── Document upload: PDF / Word / Image → LLM ───────────────────────────────
+
+  fastify.post('/api/process-document', async (request: FastifyRequest, reply: FastifyReply) => {
+    const data = await request.file();
+
+    if (!data) {
+      return reply.status(400).send({ error: 'Файл не загружен' });
+    }
+
+    const MAX_SIZE = 20 * 1024 * 1024; // 20 MB
+    const chunks: Buffer[] = [];
+    let totalSize = 0;
+
+    for await (const chunk of data.file) {
+      totalSize += chunk.length;
+      if (totalSize > MAX_SIZE) {
+        return reply.status(413).send({ error: 'Файл слишком большой. Максимум 20 МБ.' });
+      }
+      chunks.push(chunk);
+    }
+
+    const buffer = Buffer.concat(chunks);
+
+    if (buffer.length === 0) {
+      return reply.status(400).send({ error: 'Загружен пустой файл' });
+    }
+
+    const safeFilename = toSafeUploadFilename(data.filename || 'document');
+
+    try {
+      const t0 = Date.now();
+
+      const extraction = await documentExtractor.extract(buffer, data.mimetype, safeFilename);
+
+      const t1 = Date.now();
+      fastify.log.info(
+        { method: extraction.extractionMethod, chars: extraction.text.length, ms: t1 - t0 },
+        'document extracted',
+      );
+
+      const document = extraction.extractionMethod === 'vision'
+        ? documentFromExactSourceText(extraction.text)
+        : (await llmService.structureText(extraction.text)).document;
+      const t2 = Date.now();
+
+      const usefulness = assessDocumentUsefulness(document);
+      if (usefulness.status === 'empty') {
+        request.log.warn(
+          { emptyFields: usefulness.emptyFields, method: extraction.extractionMethod },
+          'process-document: document_appears_empty',
+        );
+        return reply.status(422).send({
+          success: false,
+          error: 'document_appears_empty',
+          reason: usefulness.reason,
+          emptyFields: usefulness.emptyFields,
+          placeholderFields: usefulness.placeholderFields,
+          source: { text: extraction.text, extractionMethod: extraction.extractionMethod },
+        });
+      }
+
+      const qualityWarnings = collectDocumentQualityWarningDetails(
+        extraction.text,
+        document,
+        usefulness,
+      );
+
+      fastify.log.info(
+        { timings_ms: { extract: t1 - t0, llm: t2 - t1, total: t2 - t0 } },
+        'process-document timings',
+      );
+
+      return {
+        success: true,
+        transcription: {
+          text: extraction.text,
+          language: 'ru',
+          extractionMethod: extraction.extractionMethod,
+          pageCount: extraction.pageCount,
+          warning: extraction.warning,
+        },
+        document,
+        processingTime: t2 - t0,
+        warnings: [
+          ...new Set(
+            qualityWarnings.map((w) =>
+              w.code === 'important_number_missing'
+                ? `important_number_missing:${w.evidence || 'value'}`
+                : w.code,
+            ),
+          ),
+        ],
+        qualityWarnings,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      fastify.log.error({ filename: safeFilename }, `process-document error: ${message}`);
+      const isUserError = /формат|слишком|содержит|отсканирован|требует|Anthropic|баланс|средств|Vision|распознаван|ключ|ограничил/i.test(message);
+      return reply.status(isUserError ? 422 : 500).send({
+        error: isUserError ? message : 'Ошибка обработки документа',
+        message,
+      });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+
   fastify.post('/api/documents', async (request: FastifyRequest, reply: FastifyReply) => {
     const document = request.body;
 
@@ -1169,6 +1508,14 @@ export async function registerRoutes(
       document,
       id: `doc_${Date.now()}`,
       savedAt: new Date().toISOString(),
+    };
+  });
+
+  fastify.get('/api/document-capabilities', async () => {
+    return {
+      pdf: true,
+      word: true,
+      image: documentExtractor.canProcessImages,
     };
   });
 

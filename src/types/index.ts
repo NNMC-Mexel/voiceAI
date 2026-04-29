@@ -3,6 +3,7 @@ export interface PatientInfo {
   age: string;
   gender: string;
   complaintDate: string;
+  birthDate?: string;
 }
 
 export interface RiskAssessment {
@@ -47,7 +48,7 @@ export interface QualityWarning {
   evidence?: string;
 }
 
-export type AppStep = 'recording' | 'processing' | 'editing' | 'preview';
+export type AppStep = 'recording' | 'processing' | 'editing' | 'preview' | 'patients' | 'patient' | 'sync-upload' | 'settings';
 
 export interface RecordingState {
   isRecording: boolean;
@@ -102,7 +103,7 @@ export const fieldLabels: Record<MedicalDocumentTextField, string> = {
   conclusion: 'Амбулаторная терапия',
 };
 
-export const patientFieldLabels: Record<keyof PatientInfo, string> = {
+export const patientFieldLabels: Record<Exclude<keyof PatientInfo, 'birthDate'>, string> = {
   fullName: 'ФИО пациента',
   age: 'Возраст',
   gender: 'Пол',

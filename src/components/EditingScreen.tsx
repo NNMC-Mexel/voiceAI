@@ -28,6 +28,7 @@
   ChevronDown,
 } from 'lucide-react';
 import type { MedicalDocument, MedicalDocumentTextField, PatientInfo, RiskAssessment } from '../types';
+import type { PatientSummary } from '../api/client';
 import { fieldLabels, patientFieldLabels, riskAssessmentLabels } from '../types';
 import { CollapsibleSection } from './CollapsibleSection';
 import { TermCorrectionPopup } from './TermCorrectionPopup';
@@ -48,6 +49,10 @@ interface EditingScreenProps {
   qualityWarnings?: string[];
   onRestructure?: () => Promise<void>;
   isRestructuring?: boolean;
+  activePatient?: PatientSummary | null;
+  onSaveToPatient?: (patientId: number) => Promise<void>;
+  onCreatePatientFromDocument?: () => Promise<PatientSummary>;
+  onOpenPatients?: () => void;
 }
 
 interface ChatMessage {
@@ -206,7 +211,14 @@ export function EditingScreen({
   qualityWarnings = [],
   onRestructure,
   isRestructuring = false,
+  activePatient,
+  onSaveToPatient,
+  onCreatePatientFromDocument,
+  onOpenPatients,
 }: EditingScreenProps) {
+  const [savedToPatient, setSavedToPatient] = useState(false);
+  const [savingToPatient, setSavingToPatient] = useState(false);
+  const [savePatientError, setSavePatientError] = useState('');
   const {
     isRecording: isAddendumRecording,
     isPaused: isAddendumPaused,
@@ -877,14 +889,73 @@ export function EditingScreen({
             </p>
           </div>
 
-          <button
-            onClick={onPreview}
-            className="btn-primary flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap"
-          >
-            <Eye className="w-5 h-5" />
-            Предпросмотр PDF
-          </button>
+          <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+            {onSaveToPatient && activePatient && (
+              <button
+                onClick={async () => {
+                  setSavePatientError('');
+                  try {
+                    setSavingToPatient(true);
+                    await onSaveToPatient(activePatient.id);
+                    setSavedToPatient(true);
+                  } catch (err) {
+                    setSavePatientError(err instanceof Error ? err.message : 'Не удалось сохранить осмотр');
+                  } finally {
+                    setSavingToPatient(false);
+                  }
+                }}
+                disabled={savingToPatient || savedToPatient}
+                className="btn-secondary flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap"
+              >
+                {savedToPatient ? <CheckCircle className="w-4 h-4 text-green-600" /> : <PlusCircle className="w-4 h-4" />}
+                {savedToPatient ? `Сохранено: ${activePatient.fullName}` : savingToPatient ? 'Сохранение...' : `Сохранить: ${activePatient.fullName}`}
+              </button>
+            )}
+            {onCreatePatientFromDocument && !activePatient && (
+              <button
+                onClick={async () => {
+                  setSavePatientError('');
+                  try {
+                    setSavingToPatient(true);
+                    await onCreatePatientFromDocument();
+                    setSavedToPatient(true);
+                  } catch (err) {
+                    setSavePatientError(err instanceof Error ? err.message : 'Не удалось сохранить пациента');
+                  } finally {
+                    setSavingToPatient(false);
+                  }
+                }}
+                disabled={savingToPatient || savedToPatient || !document.patient.fullName.trim()}
+                className="btn-secondary flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap"
+              >
+                {savedToPatient ? <CheckCircle className="w-4 h-4 text-green-600" /> : <PlusCircle className="w-4 h-4" />}
+                {savedToPatient ? 'Пациент сохранён' : savingToPatient ? 'Сохранение...' : 'Сохранить пациента'}
+              </button>
+            )}
+            {onOpenPatients && !activePatient && !onCreatePatientFromDocument && (
+              <button
+                onClick={onOpenPatients}
+                className="btn-secondary flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap"
+              >
+                <PlusCircle className="w-4 h-4" />
+                Выбрать карточку
+              </button>
+            )}
+            <button
+              onClick={onPreview}
+              className="btn-primary flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap"
+            >
+              <Eye className="w-5 h-5" />
+              Предпросмотр PDF
+            </button>
+          </div>
         </div>
+
+        {savePatientError && (
+          <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            {savePatientError}
+          </div>
+        )}
 
         {(rawTranscription || qualityIssues.length > 0) && (
           <div className="mb-6 glass-card rounded-2xl p-4 slide-up">

@@ -57,6 +57,8 @@ export function loadConfig(): ServerConfig {
     port: parseIntSafe(process.env.PORT, defaultConfig.port),
     host: process.env.HOST || defaultConfig.host,
     uploadDir: process.env.UPLOAD_DIR || defaultConfig.uploadDir,
+    dbPath: process.env.DB_PATH || defaultConfig.dbPath,
+    jwtSecret: process.env.JWT_SECRET || '',
     whisper: {
       modelPath: process.env.WHISPER_MODEL_PATH || defaultConfig.whisper.modelPath,
       language: process.env.WHISPER_LANGUAGE || defaultConfig.whisper.language,

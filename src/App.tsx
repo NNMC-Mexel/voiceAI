@@ -7,7 +7,12 @@ import { RecordingScreen } from './components/RecordingScreen';
 import { ProcessingScreen } from './components/ProcessingScreen';
 import { EditingScreen } from './components/EditingScreen';
 import { PreviewScreen } from './components/PreviewScreen';
+import { PatientListScreen } from './components/PatientListScreen';
+import { PatientScreen } from './components/PatientScreen';
+import { SyncUploadScreen } from './components/SyncUploadScreen';
+import { SettingsScreen } from './components/SettingsScreen';
 import { apiClient } from './api/client';
+import type { DoctorInfo, PatientSummary } from './api/client';
 
 function filenameForBlob(blob: Blob, baseName: string): string {
   const type = blob.type.toLowerCase();
@@ -22,8 +27,32 @@ const SESSION_DOC_KEY = 'voicemed_document';
 const SESSION_RAW_TEXT_KEY = 'voicemed_raw_text';
 const SESSION_WARNINGS_KEY = 'voicemed_quality_warnings';
 
+function normalizePatientName(name: string): string {
+  return name.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function normalizePatientGender(gender: string): string {
+  const value = gender.trim().toLowerCase();
+  if (value.startsWith('м')) return 'male';
+  if (value.startsWith('ж')) return 'female';
+  return gender.trim();
+}
+
+function inferBirthDateFromAge(age: string, referenceDate: string): string {
+  const years = Number.parseInt(age, 10);
+  if (!Number.isFinite(years) || years <= 0 || years > 130) return '';
+
+  const ref = referenceDate ? new Date(`${referenceDate}T00:00:00`) : new Date();
+  if (Number.isNaN(ref.getTime())) return '';
+  return `${ref.getFullYear() - years}-01-01`;
+}
+
 function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [doctor, setDoctor] = useState<DoctorInfo | null>(null);
+  const [activePatient, setActivePatient] = useState<PatientSummary | null>(null);
+  const [selectedPatientId, setSelectedPatientId] = useState<number | null>(null);
+  const [pendingSyncs, setPendingSyncs] = useState<Array<{ id: string; filename: string; createdAt: string }>>([]);
   const [step, setStep] = useState<AppStep>(() => {
     try {
       const saved = sessionStorage.getItem(SESSION_STEP_KEY) as AppStep | null;
@@ -32,6 +61,11 @@ function App() {
       return 'recording';
     }
   });
+
+  const handleLoginDoctor = useCallback((d: DoctorInfo) => {
+    setDoctor(d);
+    setAuthenticated(true);
+  }, []);
   const [document, setDocument] = useState<MedicalDocument>(() => {
     try {
       const saved = sessionStorage.getItem(SESSION_DOC_KEY);
@@ -96,14 +130,38 @@ function App() {
   }, [qualityWarnings]);
 
   useEffect(() => {
-    apiClient.checkAuth().then(setAuthenticated);
-  }, []);
+    apiClient.checkAuth().then(async (ok) => {
+      setAuthenticated(ok);
+      if (ok && !doctor) {
+        const me = await apiClient.getMe();
+        if (me) setDoctor(me);
+      }
+    });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    const onLogout = () => setAuthenticated(false);
+    const onLogout = () => {
+      setDoctor(null);
+      setAuthenticated(false);
+      setStep('recording');
+    };
     window.addEventListener('auth:logout', onLogout);
     return () => window.removeEventListener('auth:logout', onLogout);
   }, []);
+
+  // Polling pending syncs (каждые 10 сек когда авторизован)
+  useEffect(() => {
+    if (!authenticated) return;
+    const poll = async () => {
+      try {
+        const res = await apiClient.syncPending();
+        setPendingSyncs(res.sessions);
+      } catch { /* ignore */ }
+    };
+    void poll();
+    const timer = setInterval(poll, 10_000);
+    return () => clearInterval(timer);
+  }, [authenticated]);
 
   const handleRecordingStart = useCallback(() => {
     pendingChunksRef.current = [];
@@ -278,10 +336,39 @@ function App() {
     setError(null);
   }, []);
 
+  const handleDocumentComplete = useCallback(async (file: File) => {
+    setStep('processing');
+    setError(null);
+    try {
+      const result = await apiClient.processDocument(file);
+      if (result.success && result.document) {
+        const documentPatientName = normalizePatientName(result.document.patient.fullName || '');
+        if (
+          activePatient &&
+          documentPatientName &&
+          documentPatientName !== normalizePatientName(activePatient.fullName)
+        ) {
+          setActivePatient(null);
+        }
+        applyProcessResult(result.transcription.text, result.document, result.warnings || []);
+        if (result.transcription.warning) {
+          console.warn('[document]', result.transcription.warning);
+        }
+      } else {
+        throw new Error('Document processing failed');
+      }
+    } catch (err) {
+      console.error('Document processing error:', err);
+      setError(err instanceof Error ? err.message : 'Ошибка обработки документа');
+      setStep('recording');
+    }
+  }, [activePatient, applyProcessResult]);
+
   const handleNewDocument = useCallback(() => {
     setDocument(emptyDocument);
     setRawTranscription('');
     setQualityWarnings([]);
+    setActivePatient(null);
     audioBlobRef.current = null;
     setError(null);
     setStep('recording');
@@ -290,26 +377,152 @@ function App() {
       sessionStorage.removeItem(SESSION_DOC_KEY);
       sessionStorage.removeItem(SESSION_RAW_TEXT_KEY);
       sessionStorage.removeItem(SESSION_WARNINGS_KEY);
-    } catch {
-      // ignore
-    }
+    } catch { /* ignore */ }
   }, []);
+
+  // ─── Sync handlers ───────────────────────────────────────────────────────
+
+  const handleClaimSync = useCallback(async (syncId: string) => {
+    try {
+      const res = await apiClient.syncClaim(syncId);
+      if (res.document) {
+        applyProcessResult(res.rawTranscription, res.document, []);
+        setPendingSyncs(prev => prev.filter(s => s.id !== syncId));
+      }
+    } catch (err) {
+      console.error('Claim sync error:', err);
+    }
+  }, [applyProcessResult]);
+
+  const handleDismissSync = useCallback(async (syncId: string) => {
+    try {
+      await apiClient.syncDelete(syncId);
+      setPendingSyncs(prev => prev.filter(s => s.id !== syncId));
+    } catch { /* ignore */ }
+  }, []);
+
+  // ─── Patient card handlers ────────────────────────────────────────────────
+
+  const handleOpenPatients = useCallback(() => setStep('patients'), []);
+  const handleOpenSettings = useCallback(() => setStep('settings'), []);
+
+  const handleLogout = useCallback(async () => {
+    await apiClient.logout();
+    setDoctor(null);
+    setAuthenticated(false);
+    setStep('recording');
+  }, []);
+
+  const handleSelectPatient = useCallback((p: PatientSummary) => {
+    setSelectedPatientId(p.id);
+    setStep('patient');
+  }, []);
+
+  const handleNewRecordingForPatient = useCallback((p: PatientSummary) => {
+    setActivePatient(p);
+    setStep('recording');
+  }, []);
+
+  const handleViewVisitDocument = useCallback((doc: MedicalDocument, rawText: string) => {
+    setDocument(doc);
+    setRawTranscription(rawText);
+    setQualityWarnings([]);
+    setStep('editing');
+  }, []);
+
+  const handleSaveToPatient = useCallback(async (patientId: number) => {
+    await apiClient.saveVisit(patientId, document, rawTranscription);
+  }, [document, rawTranscription]);
+
+  const handleCreatePatientAndSaveVisit = useCallback(async (): Promise<PatientSummary> => {
+    const fullName = document.patient.fullName.trim().replace(/\s+/g, ' ');
+    if (!fullName) {
+      throw new Error('Укажите ФИО пациента перед сохранением карточки');
+    }
+
+    const birthDate =
+      document.patient.birthDate ||
+      inferBirthDateFromAge(document.patient.age, document.patient.complaintDate);
+    const gender = normalizePatientGender(document.patient.gender);
+
+    const existing = await apiClient.getPatients({ q: fullName, page: 1 });
+    const normalizedName = normalizePatientName(fullName);
+    const matched = existing.patients.find((patient) => {
+      if (normalizePatientName(patient.fullName) !== normalizedName) return false;
+      if (birthDate) return patient.birthDate === birthDate;
+      return !patient.birthDate;
+    });
+
+    const patient = matched || (await apiClient.createPatient({
+      fullName,
+      birthDate,
+      gender,
+      phone: '',
+      iin: '',
+      notes: '',
+    })).patient;
+
+    setActivePatient(patient);
+    setSelectedPatientId(patient.id);
+    await apiClient.saveVisit(patient.id, document, rawTranscription);
+    return patient;
+  }, [document, rawTranscription]);
+
+  // ─── Render ───────────────────────────────────────────────────────────────
 
   if (authenticated === null) {
     return <div className="min-h-screen flex items-center justify-center"><p className="text-text-muted">Загрузка...</p></div>;
   }
 
   if (!authenticated) {
-    return <LoginScreen onLogin={() => setAuthenticated(true)} />;
+    return <LoginScreen onLogin={handleLoginDoctor} />;
   }
 
   return (
     <div className="min-h-screen">
+      {step === 'patients' && doctor && (
+        <PatientListScreen
+          doctor={doctor}
+          onSelectPatient={handleSelectPatient}
+          onNewRecording={() => setStep('recording')}
+        />
+      )}
+
+      {step === 'patient' && selectedPatientId !== null && (
+        <PatientScreen
+          patientId={selectedPatientId}
+          onBack={() => setStep('patients')}
+          onNewRecording={handleNewRecordingForPatient}
+          onViewDocument={handleViewVisitDocument}
+        />
+      )}
+
+      {step === 'sync-upload' && (
+        <SyncUploadScreen onBack={() => setStep('recording')} />
+      )}
+
+      {step === 'settings' && doctor && (
+        <SettingsScreen
+          doctor={doctor}
+          onBack={() => setStep('recording')}
+          onLogout={handleLogout}
+          onDoctorUpdate={setDoctor}
+        />
+      )}
+
       {step === 'recording' && (
         <RecordingScreen
           onRecordingComplete={handleRecordingComplete}
           onRecordingStart={handleRecordingStart}
           streamOptions={streamOptions}
+          onDocumentUpload={handleDocumentComplete}
+          activePatient={activePatient}
+          onOpenPatients={doctor ? handleOpenPatients : undefined}
+          onOpenSettings={doctor ? handleOpenSettings : undefined}
+          onSyncUpload={doctor ? () => setStep('sync-upload') : undefined}
+          pendingSyncs={pendingSyncs}
+          onClaimSync={handleClaimSync}
+          onDismissSync={handleDismissSync}
           error={error}
         />
       )}
@@ -326,10 +539,21 @@ function App() {
           qualityWarnings={qualityWarnings}
           onRestructure={handleRestructure}
           isRestructuring={isRestructuring}
+          activePatient={activePatient}
+          onSaveToPatient={handleSaveToPatient}
+          onCreatePatientFromDocument={handleCreatePatientAndSaveVisit}
+          onOpenPatients={doctor ? handleOpenPatients : undefined}
         />
       )}
 
-      {step === 'preview' && <PreviewScreen document={document} audioBlob={audioBlobRef.current} onEdit={handleEdit} onNewDocument={handleNewDocument} />}
+      {step === 'preview' && (
+        <PreviewScreen
+          document={document}
+          audioBlob={audioBlobRef.current}
+          onEdit={handleEdit}
+          onNewDocument={handleNewDocument}
+        />
+      )}
     </div>
   );
 }
