@@ -1,8 +1,8 @@
-﻿/**
- * routes-doctors.ts вЂ” Auth, Patient cards, Visit history.
+/**
+ * routes-doctors.ts — Auth, Patient cards, Visit history.
  *
- * Р РµРіРёСЃС‚СЂРёСЂСѓРµС‚СЃСЏ РѕС‚РґРµР»СЊРЅРѕ РѕС‚ routes.ts С‡С‚РѕР±С‹ РЅРµ С‚СЂРѕРіР°С‚СЊ СЃСѓС‰РµСЃС‚РІСѓСЋС‰СѓСЋ Р»РѕРіРёРєСѓ.
- * Р’СЃРµ РјР°СЂС€СЂСѓС‚С‹ Р·РґРµСЃСЊ С‚СЂРµР±СѓСЋС‚ JWT РєСЂРѕРјРµ /api/auth/register Рё /api/auth/login.
+ * Регистрируется отдельно от routes.ts чтобы не трогать существующую логику.
+ * Все маршруты здесь требуют JWT кроме /api/auth/register и /api/auth/login.
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
@@ -46,7 +46,7 @@ export async function registerDoctorRoutes(
   documentExtractor?: DocumentExtractorService,
   llmService?: LLMService,
 ): Promise<void> {
-  // РџРµСЂРёРѕРґРёС‡РµСЃРєР°СЏ РѕС‡РёСЃС‚РєР° РїСЂРѕСЃСЂРѕС‡РµРЅРЅС‹С… sync-СЃРµСЃСЃРёР№
+  // Периодическая очистка просроченных sync-сессий
   const cleanupSyncs = () => {
     try {
       db.delete(syncSessions).where(lt(syncSessions.expiresAt, new Date().toISOString())).run();
@@ -72,7 +72,7 @@ export async function registerDoctorRoutes(
       return reply.status(401).send({ error: 'Unauthorized' });
     }
     if (!doctor.isActive) {
-      return reply.status(403).send({ error: 'РђРєРєР°СѓРЅС‚ РґРµР°РєС‚РёРІРёСЂРѕРІР°РЅ' });
+      return reply.status(403).send({ error: 'Аккаунт деактивирован' });
     }
 
     request.user = {
@@ -89,13 +89,11 @@ export async function registerDoctorRoutes(
       .all()
       .some((doctor) => doctor.id !== doctorId);
   };
-  // в”Ђв”Ђв”Ђ Auth в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+  // ─── Auth ─────────────────────────────────────────────────────────────────
 
   /**
    * POST /api/auth/register
-   * Р Р°Р±РѕС‚Р°РµС‚ РўРћР›Р¬РљРћ РµСЃР»Рё РІ Р‘Р” РЅРµС‚ РЅРё РѕРґРЅРѕРіРѕ РґРѕРєС‚РѕСЂР° (РїРµСЂРІРёС‡РЅР°СЏ РЅР°СЃС‚СЂРѕР№РєР°).
-   * РџРѕСЃР»Рµ СЃРѕР·РґР°РЅРёСЏ РїРµСЂРІРѕРіРѕ Р°РєРєР°СѓРЅС‚Р° РІРѕР·РІСЂР°С‰Р°РµС‚ 409 РґР»СЏ СЃР»РµРґСѓСЋС‰РёС… РїРѕРїС‹С‚РѕРє
-   * (РЅРѕРІС‹С… РІСЂР°С‡РµР№ РґРѕР±Р°РІР»СЏРµС‚ С‚РѕР»СЊРєРѕ admin вЂ” С„СѓРЅРєС†РёРѕРЅР°Р» TODO Step 3).
+   * Первый зарегистрированный врач становится admin, следующие — doctor.
    */
   fastify.post('/api/auth/register', async (request: FastifyRequest, reply: FastifyReply) => {
     const body = request.body;
@@ -107,24 +105,19 @@ export async function registerDoctorRoutes(
     const specialty = typeof body.specialty === 'string' ? body.specialty.trim() : '';
 
     if (!name || !email || !password) {
-      return reply.status(400).send({ error: 'name, email Рё password РѕР±СЏР·Р°С‚РµР»СЊРЅС‹' });
+      return reply.status(400).send({ error: 'name, email и password обязательны' });
     }
 
     if (password.length < 8) {
-      return reply.status(400).send({ error: 'РџР°СЂРѕР»СЊ РґРѕР»Р¶РµРЅ Р±С‹С‚СЊ РЅРµ РјРµРЅРµРµ 8 СЃРёРјРІРѕР»РѕРІ' });
+      return reply.status(400).send({ error: 'Пароль должен быть не менее 8 символов' });
     }
 
-    // Р Р°Р·СЂРµС€Р°РµРј СЂРµРіРёСЃС‚СЂР°С†РёСЋ С‚РѕР»СЊРєРѕ РµСЃР»Рё РґРѕРєС‚РѕСЂРѕРІ РµС‰С‘ РЅРµС‚
     const existing = db.select({ id: doctors.id }).from(doctors).limit(1).all();
-    if (existing.length > 0) {
-      return reply.status(409).send({
-        error: 'Р РµРіРёСЃС‚СЂР°С†РёСЏ Р·Р°РєСЂС‹С‚Р°. РћР±СЂР°С‚РёС‚РµСЃСЊ Рє Р°РґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂСѓ.',
-      });
-    }
+    const role: DoctorRole = existing.length === 0 ? 'admin' : 'doctor';
 
     const emailExists = db.select({ id: doctors.id }).from(doctors).where(eq(doctors.email, email)).get();
     if (emailExists) {
-      return reply.status(409).send({ error: 'Email СѓР¶Рµ Р·Р°СЂРµРіРёСЃС‚СЂРёСЂРѕРІР°РЅ' });
+      return reply.status(409).send({ error: 'Email уже зарегистрирован' });
     }
 
     const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
@@ -133,7 +126,7 @@ export async function registerDoctorRoutes(
       email,
       passwordHash,
       specialty,
-      role: 'admin',
+      role,
       isActive: true,
       createdAt: now(),
     }).returning().all();
@@ -149,7 +142,7 @@ export async function registerDoctorRoutes(
 
   /**
    * POST /api/auth/login
-   * { email, password } в†’ { token, doctor }
+   * { email, password } → { token, doctor }
    */
   fastify.post('/api/auth/login', async (request: FastifyRequest, reply: FastifyReply) => {
     const body = request.body;
@@ -159,7 +152,7 @@ export async function registerDoctorRoutes(
     const password = typeof body.password === 'string' ? body.password : '';
 
     if (!email || !password) {
-      return reply.status(400).send({ error: 'email Рё password РѕР±СЏР·Р°С‚РµР»СЊРЅС‹' });
+      return reply.status(400).send({ error: 'email и password обязательны' });
     }
 
     const doctor = db.select().from(doctors).where(eq(doctors.email, email)).get();
@@ -172,11 +165,11 @@ export async function registerDoctorRoutes(
 
     if (!valid || !doctor) {
       await new Promise((r) => setTimeout(r, 400));
-      return reply.status(401).send({ error: 'РќРµРІРµСЂРЅС‹Р№ email РёР»Рё РїР°СЂРѕР»СЊ' });
+      return reply.status(401).send({ error: 'Неверный email или пароль' });
     }
 
     if (!doctor.isActive) {
-      return reply.status(403).send({ error: 'РђРєРєР°СѓРЅС‚ РґРµР°РєС‚РёРІРёСЂРѕРІР°РЅ' });
+      return reply.status(403).send({ error: 'Аккаунт деактивирован' });
     }
 
     const token = await reply.jwtSign({
@@ -193,7 +186,7 @@ export async function registerDoctorRoutes(
     };
   });
 
-  /** GET /api/auth/me вЂ” С‚РµРєСѓС‰РёР№ РґРѕРєС‚РѕСЂ */
+  /** GET /api/auth/me — текущий доктор */
   fastify.get('/api/auth/me', { preValidation: [requireActiveDoctor] }, async (request) => {
     const { doctorId } = request.user;
     const doctor = db.select({
@@ -210,7 +203,7 @@ export async function registerDoctorRoutes(
     return { doctor };
   });
 
-  /** GET /api/auth/check вЂ” РїСЂРѕРІРµСЂРєР° С‚РѕРєРµРЅР° (JWT-СЃРѕРІРјРµСЃС‚РёРјС‹Р№ Р°Р»РёР°СЃ) */
+  /** GET /api/auth/check — проверка токена (JWT-совместимый алиас) */
   fastify.get('/api/auth/check', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
       await request.jwtVerify();
@@ -227,17 +220,17 @@ export async function registerDoctorRoutes(
     }
   });
 
-  /** POST /api/auth/logout вЂ” РєР»РёРµРЅС‚ СѓРґР°Р»СЏРµС‚ С‚РѕРєРµРЅ, СЃРµСЂРІРµСЂ РїСЂРѕСЃС‚Рѕ РїРѕРґС‚РІРµСЂР¶РґР°РµС‚ */
+  /** POST /api/auth/logout — клиент удаляет токен, сервер просто подтверждает */
   fastify.post('/api/auth/logout', async () => ({ success: true }));
 
-  // в”Ђв”Ђв”Ђ Admin / Settings в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+  // ─── Admin / Settings ─────────────────────────────────────────────────────
 
   fastify.get(
     '/api/admin/doctors',
     { preValidation: [requireActiveDoctor] },
     async (request: FastifyRequest, reply: FastifyReply) => {
       if (request.user.role !== 'admin') {
-        return reply.status(403).send({ error: 'РўСЂРµР±СѓСЋС‚СЃСЏ РїСЂР°РІР° Р°РґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂР°' });
+        return reply.status(403).send({ error: 'Требуются права администратора' });
       }
 
       const list = db.select({
@@ -259,7 +252,7 @@ export async function registerDoctorRoutes(
     { preValidation: [requireActiveDoctor] },
     async (request: FastifyRequest, reply: FastifyReply) => {
       if (request.user.role !== 'admin') {
-        return reply.status(403).send({ error: 'РўСЂРµР±СѓСЋС‚СЃСЏ РїСЂР°РІР° Р°РґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂР°' });
+        return reply.status(403).send({ error: 'Требуются права администратора' });
       }
 
       const body = request.body;
@@ -272,15 +265,15 @@ export async function registerDoctorRoutes(
       const role = parseRole(body.role) ?? 'doctor';
 
       if (!name || !email || !password) {
-        return reply.status(400).send({ error: 'name, email Рё password РѕР±СЏР·Р°С‚РµР»СЊРЅС‹' });
+        return reply.status(400).send({ error: 'name, email и password обязательны' });
       }
       if (password.length < 8) {
-        return reply.status(400).send({ error: 'РџР°СЂРѕР»СЊ РґРѕР»Р¶РµРЅ Р±С‹С‚СЊ РЅРµ РјРµРЅРµРµ 8 СЃРёРјРІРѕР»РѕРІ' });
+        return reply.status(400).send({ error: 'Пароль должен быть не менее 8 символов' });
       }
 
       const emailExists = db.select({ id: doctors.id }).from(doctors).where(eq(doctors.email, email)).get();
       if (emailExists) {
-        return reply.status(409).send({ error: 'Email СѓР¶Рµ Р·Р°СЂРµРіРёСЃС‚СЂРёСЂРѕРІР°РЅ' });
+        return reply.status(409).send({ error: 'Email уже зарегистрирован' });
       }
 
       const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
@@ -311,7 +304,7 @@ export async function registerDoctorRoutes(
     { preValidation: [requireActiveDoctor] },
     async (request: FastifyRequest, reply: FastifyReply) => {
       if (request.user.role !== 'admin') {
-        return reply.status(403).send({ error: 'РўСЂРµР±СѓСЋС‚СЃСЏ РїСЂР°РІР° Р°РґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂР°' });
+        return reply.status(403).send({ error: 'Требуются права администратора' });
       }
 
       const { id } = request.params as { id: string };
@@ -328,14 +321,14 @@ export async function registerDoctorRoutes(
         const role = parseRole(body.role);
         if (!role) return reply.status(400).send({ error: 'Invalid role' });
         if (doctorId === request.user.doctorId && role !== 'admin') {
-          return reply.status(400).send({ error: 'РќРµР»СЊР·СЏ СЃРЅСЏС‚СЊ СЂРѕР»СЊ Р°РґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂР° Сѓ СЃРµР±СЏ' });
+          return reply.status(400).send({ error: 'Нельзя снять роль администратора у себя' });
         }
         updates.role = role;
       }
       if (body.isActive !== undefined) {
         if (typeof body.isActive !== 'boolean') return reply.status(400).send({ error: 'Invalid isActive' });
         if (doctorId === request.user.doctorId && !body.isActive) {
-          return reply.status(400).send({ error: 'РќРµР»СЊР·СЏ РґРµР°РєС‚РёРІРёСЂРѕРІР°С‚СЊ СЃРµР±СЏ' });
+          return reply.status(400).send({ error: 'Нельзя деактивировать себя' });
         }
         updates.isActive = body.isActive;
       }
@@ -345,7 +338,7 @@ export async function registerDoctorRoutes(
         role: doctors.role,
         isActive: doctors.isActive,
       }).from(doctors).where(eq(doctors.id, doctorId)).get();
-      if (!existing) return reply.status(404).send({ error: 'Р’СЂР°С‡ РЅРµ РЅР°Р№РґРµРЅ' });
+      if (!existing) return reply.status(404).send({ error: 'Врач не найден' });
 
       const nextRole = updates.role ?? existing.role;
       const nextIsActive = updates.isActive ?? existing.isActive;
@@ -382,14 +375,14 @@ export async function registerDoctorRoutes(
     { preValidation: [requireActiveDoctor] },
     async (request: FastifyRequest, reply: FastifyReply) => {
       if (request.user.role !== 'admin') {
-        return reply.status(403).send({ error: 'РўСЂРµР±СѓСЋС‚СЃСЏ РїСЂР°РІР° Р°РґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂР°' });
+        return reply.status(403).send({ error: 'Требуются права администратора' });
       }
 
       const { id } = request.params as { id: string };
       const doctorId = parseInt(id, 10);
       if (!Number.isInteger(doctorId)) return reply.status(400).send({ error: 'Invalid doctor id' });
       if (doctorId === request.user.doctorId) {
-        return reply.status(400).send({ error: 'РќРµР»СЊР·СЏ СѓРґР°Р»РёС‚СЊ СЃРµР±СЏ' });
+        return reply.status(400).send({ error: 'Нельзя удалить себя' });
       }
 
       const existing = db.select({
@@ -397,13 +390,13 @@ export async function registerDoctorRoutes(
         role: doctors.role,
         isActive: doctors.isActive,
       }).from(doctors).where(eq(doctors.id, doctorId)).get();
-      if (!existing) return reply.status(404).send({ error: 'Р’СЂР°С‡ РЅРµ РЅР°Р№РґРµРЅ' });
+      if (!existing) return reply.status(404).send({ error: 'Врач не найден' });
       if (existing.role === 'admin' && existing.isActive && !hasOtherActiveAdmin(doctorId)) {
         return reply.status(400).send({ error: 'Нельзя оставить систему без активного администратора' });
       }
 
       const updated = db.update(doctors).set({ isActive: false }).where(eq(doctors.id, doctorId)).run();
-      if (!updated.changes) return reply.status(404).send({ error: 'Р’СЂР°С‡ РЅРµ РЅР°Р№РґРµРЅ' });
+      if (!updated.changes) return reply.status(404).send({ error: 'Врач не найден' });
       return { success: true };
     },
   );
@@ -419,7 +412,7 @@ export async function registerDoctorRoutes(
       if (typeof body.name === 'string') updates.name = body.name.trim();
       if (typeof body.specialty === 'string') updates.specialty = body.specialty.trim();
 
-      if (updates.name === '') return reply.status(400).send({ error: 'РРјСЏ РЅРµ РјРѕР¶РµС‚ Р±С‹С‚СЊ РїСѓСЃС‚С‹Рј' });
+      if (updates.name === '') return reply.status(400).send({ error: 'Имя не может быть пустым' });
 
       const [doctor] = Object.keys(updates).length > 0
         ? db.update(doctors).set(updates).where(eq(doctors.id, request.user.doctorId)).returning({
@@ -452,16 +445,16 @@ export async function registerDoctorRoutes(
       const currentPassword = typeof body.currentPassword === 'string' ? body.currentPassword : '';
       const newPassword = typeof body.newPassword === 'string' ? body.newPassword : '';
       if (!currentPassword || !newPassword) {
-        return reply.status(400).send({ error: 'currentPassword Рё newPassword РѕР±СЏР·Р°С‚РµР»СЊРЅС‹' });
+        return reply.status(400).send({ error: 'currentPassword и newPassword обязательны' });
       }
       if (newPassword.length < 8) {
-        return reply.status(400).send({ error: 'РќРѕРІС‹Р№ РїР°СЂРѕР»СЊ РґРѕР»Р¶РµРЅ Р±С‹С‚СЊ РЅРµ РјРµРЅРµРµ 8 СЃРёРјРІРѕР»РѕРІ' });
+        return reply.status(400).send({ error: 'Новый пароль должен быть не менее 8 символов' });
       }
 
       const doctor = db.select().from(doctors).where(eq(doctors.id, request.user.doctorId)).get();
       if (!doctor) return reply.status(404).send({ error: 'Doctor not found' });
       const valid = await bcrypt.compare(currentPassword, doctor.passwordHash);
-      if (!valid) return reply.status(400).send({ error: 'РўРµРєСѓС‰РёР№ РїР°СЂРѕР»СЊ РЅРµРІРµСЂРЅС‹Р№' });
+      if (!valid) return reply.status(400).send({ error: 'Текущий пароль неверный' });
 
       const passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
       db.update(doctors).set({ passwordHash }).where(eq(doctors.id, doctor.id)).run();
@@ -469,11 +462,11 @@ export async function registerDoctorRoutes(
     },
   );
 
-  // в”Ђв”Ђв”Ђ Patients в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+  // ─── Patients ─────────────────────────────────────────────────────────────
 
   /**
    * GET /api/patients?q=...&page=1
-   * Р’РѕР·РІСЂР°С‰Р°РµС‚ СЃРїРёСЃРѕРє РїР°С†РёРµРЅС‚РѕРІ С‚РµРєСѓС‰РµРіРѕ РґРѕРєС‚РѕСЂР°.
+   * Возвращает список пациентов текущего доктора.
    */
   fastify.get(
     '/api/patients',
@@ -512,7 +505,7 @@ export async function registerDoctorRoutes(
   );
 
   /**
-   * POST /api/patients вЂ” СЃРѕР·РґР°С‚СЊ РїР°С†РёРµРЅС‚Р°
+   * POST /api/patients — создать пациента
    */
   fastify.post(
     '/api/patients',
@@ -523,7 +516,7 @@ export async function registerDoctorRoutes(
       if (!isRecord(body)) return reply.status(400).send({ error: 'Invalid body' });
 
       const fullName = typeof body.fullName === 'string' ? body.fullName.trim() : '';
-      if (!fullName) return reply.status(400).send({ error: 'fullName РѕР±СЏР·Р°С‚РµР»РµРЅ' });
+      if (!fullName) return reply.status(400).send({ error: 'fullName обязателен' });
 
       const ts = now();
       const [patient] = db.insert(patients).values({
@@ -543,7 +536,7 @@ export async function registerDoctorRoutes(
   );
 
   /**
-   * GET /api/patients/:id вЂ” РєР°СЂС‚РѕС‡РєР° РїР°С†РёРµРЅС‚Р° + РїРѕСЃР»РµРґРЅРёРµ 20 РІРёР·РёС‚РѕРІ
+   * GET /api/patients/:id — карточка пациента + последние 20 визитов
    */
   fastify.get(
     '/api/patients/:id',
@@ -559,14 +552,14 @@ export async function registerDoctorRoutes(
         .where(and(eq(patients.id, patientId), eq(patients.doctorId, doctorId)))
         .get();
 
-      if (!patient) return reply.status(404).send({ error: 'РџР°С†РёРµРЅС‚ РЅРµ РЅР°Р№РґРµРЅ' });
+      if (!patient) return reply.status(404).send({ error: 'Пациент не найден' });
 
       const visitList = db
         .select({
           id:        visits.id,
           visitDate: visits.visitDate,
           createdAt: visits.createdAt,
-          // РљСЂР°С‚РєРѕРµ РїСЂРµРІСЊСЋ: С‚РѕР»СЊРєРѕ РґРёР°РіРЅРѕР· (РїРµСЂРІС‹Рµ 120 СЃРёРјРІРѕР»РѕРІ)
+          // Краткое превью: только диагноз (первые 120 символов)
           diagnosisPreview: visits.documentJson,
         })
         .from(visits)
@@ -588,7 +581,7 @@ export async function registerDoctorRoutes(
   );
 
   /**
-   * PUT /api/patients/:id вЂ” РѕР±РЅРѕРІРёС‚СЊ РєР°СЂС‚РѕС‡РєСѓ
+   * PUT /api/patients/:id — обновить карточку
    */
   fastify.put(
     '/api/patients/:id',
@@ -606,7 +599,7 @@ export async function registerDoctorRoutes(
         .where(and(eq(patients.id, patientId), eq(patients.doctorId, doctorId)))
         .get();
 
-      if (!existing) return reply.status(404).send({ error: 'РџР°С†РёРµРЅС‚ РЅРµ РЅР°Р№РґРµРЅ' });
+      if (!existing) return reply.status(404).send({ error: 'Пациент не найден' });
 
       const updates: Partial<typeof patients.$inferInsert> = { updatedAt: now() };
       if (typeof body.fullName  === 'string') updates.fullName  = body.fullName.trim();
@@ -627,10 +620,10 @@ export async function registerDoctorRoutes(
     },
   );
 
-  // в”Ђв”Ђв”Ђ Visits в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+  // ─── Visits ───────────────────────────────────────────────────────────────
 
   /**
-   * POST /api/patients/:id/visits вЂ” СЃРѕС…СЂР°РЅРёС‚СЊ РѕСЃРјРѕС‚СЂ Рє РєР°СЂС‚РѕС‡РєРµ РїР°С†РёРµРЅС‚Р°
+   * POST /api/patients/:id/visits — сохранить осмотр к карточке пациента
    * Body: { document: MedicalDocument, rawTranscription?: string, visitDate?: string }
    */
   fastify.post(
@@ -643,17 +636,17 @@ export async function registerDoctorRoutes(
       const body = request.body;
       if (!isRecord(body)) return reply.status(400).send({ error: 'Invalid body' });
 
-      // РџСЂРѕРІРµСЂСЏРµРј, С‡С‚Рѕ РїР°С†РёРµРЅС‚ РїСЂРёРЅР°РґР»РµР¶РёС‚ СЌС‚РѕРјСѓ РґРѕРєС‚РѕСЂСѓ
+      // Проверяем, что пациент принадлежит этому доктору
       const patient = db
         .select({ id: patients.id })
         .from(patients)
         .where(and(eq(patients.id, patientId), eq(patients.doctorId, doctorId)))
         .get();
 
-      if (!patient) return reply.status(404).send({ error: 'РџР°С†РёРµРЅС‚ РЅРµ РЅР°Р№РґРµРЅ' });
+      if (!patient) return reply.status(404).send({ error: 'Пациент не найден' });
 
       const document = body.document;
-      if (!isRecord(document)) return reply.status(400).send({ error: 'document РѕР±СЏР·Р°С‚РµР»РµРЅ' });
+      if (!isRecord(document)) return reply.status(400).send({ error: 'document обязателен' });
 
       const ts = now();
       const visitDate = typeof body.visitDate === 'string' && body.visitDate
@@ -669,7 +662,7 @@ export async function registerDoctorRoutes(
         createdAt: ts,
       }).returning().all();
 
-      // РћР±РЅРѕРІР»СЏРµРј updatedAt Сѓ РїР°С†РёРµРЅС‚Р°
+      // Обновляем updatedAt у пациента
       db.update(patients).set({ updatedAt: ts }).where(eq(patients.id, patientId)).run();
 
       return { success: true, visitId: visit.id, visitDate: visit.visitDate };
@@ -677,7 +670,7 @@ export async function registerDoctorRoutes(
   );
 
   /**
-   * GET /api/visits/:id вЂ” РїРѕР»РЅС‹Р№ РґРѕРєСѓРјРµРЅС‚ РєРѕРЅРєСЂРµС‚РЅРѕРіРѕ РІРёР·РёС‚Р°
+   * GET /api/visits/:id — полный документ конкретного визита
    */
   fastify.get(
     '/api/visits/:id',
@@ -693,7 +686,7 @@ export async function registerDoctorRoutes(
         .where(and(eq(visits.id, visitId), eq(visits.doctorId, doctorId)))
         .get();
 
-      if (!visit) return reply.status(404).send({ error: 'РћСЃРјРѕС‚СЂ РЅРµ РЅР°Р№РґРµРЅ' });
+      if (!visit) return reply.status(404).send({ error: 'Осмотр не найден' });
 
       let document: MedicalDocument | null = null;
       try { document = JSON.parse(visit.documentJson); } catch { /* corrupt */ }
@@ -711,12 +704,12 @@ export async function registerDoctorRoutes(
     },
   );
 
-  // в”Ђв”Ђв”Ђ Mobile в†” Desktop Sync в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+  // ─── Mobile ↔ Desktop Sync ────────────────────────────────────────────────
 
   /**
-   * POST /api/sync/upload вЂ” РІСЂР°С‡ Р·Р°РіСЂСѓР¶Р°РµС‚ PDF/Word/С„РѕС‚Рѕ СЃ С‚РµР»РµС„РѕРЅР°.
-   * РћР±СЂР°Р±Р°С‚С‹РІР°РµС‚СЃСЏ Р°СЃРёРЅС…СЂРѕРЅРЅРѕ. Р’РѕР·РІСЂР°С‰Р°РµС‚ { syncId } РЅРµРјРµРґР»РµРЅРЅРѕ.
-   * РЎС‚Р°С‚СѓСЃ РґРѕРєСѓРјРµРЅС‚Р° РјРѕР¶РЅРѕ Р·Р°РїСЂРѕСЃРёС‚СЊ С‡РµСЂРµР· GET /api/sync/:id/status.
+   * POST /api/sync/upload — врач загружает PDF/Word/фото с телефона.
+   * Обрабатывается асинхронно. Возвращает { syncId } немедленно.
+   * Статус документа можно запросить через GET /api/sync/:id/status.
    */
   fastify.post(
     '/api/sync/upload',
@@ -727,25 +720,25 @@ export async function registerDoctorRoutes(
       }
 
       const data = await request.file();
-      if (!data) return reply.status(400).send({ error: 'Р¤Р°Р№Р» РЅРµ Р·Р°РіСЂСѓР¶РµРЅ' });
+      if (!data) return reply.status(400).send({ error: 'Файл не загружен' });
 
       const MAX = 20 * 1024 * 1024;
       const chunks: Buffer[] = [];
       let total = 0;
       for await (const chunk of data.file) {
         total += chunk.length;
-        if (total > MAX) return reply.status(413).send({ error: 'Р¤Р°Р№Р» > 20 РњР‘' });
+        if (total > MAX) return reply.status(413).send({ error: 'Файл > 20 МБ' });
         chunks.push(chunk);
       }
       const buffer = Buffer.concat(chunks);
-      if (!buffer.length) return reply.status(400).send({ error: 'РџСѓСЃС‚РѕР№ С„Р°Р№Р»' });
+      if (!buffer.length) return reply.status(400).send({ error: 'Пустой файл' });
 
       const { doctorId } = request.user;
       const syncId = randomUUID();
       const filename = toSafeUploadFilename(data.filename || 'document');
       const ts = now();
 
-      // РЎРѕР·РґР°С‘Рј СЃРµСЃСЃРёСЋ СЃРѕ СЃС‚Р°С‚СѓСЃРѕРј 'processing' вЂ” СЃСЂР°Р·Сѓ РІРѕР·РІСЂР°С‰Р°РµРј syncId
+      // Создаём сессию со статусом 'processing' — сразу возвращаем syncId
       db.insert(syncSessions).values({
         id: syncId,
         doctorId,
@@ -755,7 +748,7 @@ export async function registerDoctorRoutes(
         expiresAt: syncExpiresAt(),
       }).run();
 
-      // РћР±СЂР°Р±Р°С‚С‹РІР°РµРј РІ С„РѕРЅРµ вЂ” РЅРµ Р±Р»РѕРєРёСЂСѓРµРј РѕС‚РІРµС‚
+      // Обрабатываем в фоне — не блокируем ответ
       (async () => {
         try {
           const extraction = await documentExtractor.extract(buffer, data.mimetype, filename);
@@ -780,7 +773,7 @@ export async function registerDoctorRoutes(
   );
 
   /**
-   * GET /api/sync/:id/status вЂ” С‚РµР»РµС„РѕРЅ РѕРїСЂР°С€РёРІР°РµС‚ СЃС‚Р°С‚СѓСЃ РѕР±СЂР°Р±РѕС‚РєРё
+   * GET /api/sync/:id/status — телефон опрашивает статус обработки
    */
   fastify.get(
     '/api/sync/:id/status',
@@ -805,7 +798,7 @@ export async function registerDoctorRoutes(
   );
 
   /**
-   * GET /api/sync/pending вЂ” РґРµСЃРєС‚РѕРї РїРѕР»СѓС‡Р°РµС‚ СЃРїРёСЃРѕРє РіРѕС‚РѕРІС‹С… РґРѕРєСѓРјРµРЅС‚РѕРІ
+   * GET /api/sync/pending — десктоп получает список готовых документов
    */
   fastify.get(
     '/api/sync/pending',
@@ -830,7 +823,7 @@ export async function registerDoctorRoutes(
   );
 
   /**
-   * POST /api/sync/:id/claim вЂ” РґРµСЃРєС‚РѕРї Р·Р°Р±РёСЂР°РµС‚ РґРѕРєСѓРјРµРЅС‚ Рё СѓРґР°Р»СЏРµС‚ СЃРµСЃСЃРёСЋ
+   * POST /api/sync/:id/claim — десктоп забирает документ и удаляет сессию
    */
   fastify.post(
     '/api/sync/:id/claim',
@@ -852,7 +845,7 @@ export async function registerDoctorRoutes(
       let document = null;
       try { document = JSON.parse(session.documentJson ?? ''); } catch { /* corrupt */ }
 
-      // РЈРґР°Р»СЏРµРј РїРѕСЃР»Рµ claim вЂ” РѕРґРЅРѕСЂР°Р·РѕРІС‹Р№
+      // Удаляем после claim — одноразовый
       db.delete(syncSessions).where(eq(syncSessions.id, id)).run();
 
       return {
@@ -865,7 +858,7 @@ export async function registerDoctorRoutes(
   );
 
   /**
-   * DELETE /api/sync/:id вЂ” РѕС‚РјРµРЅРёС‚СЊ/СѓРґР°Р»РёС‚СЊ СЃРµСЃСЃРёСЋ
+   * DELETE /api/sync/:id — отменить/удалить сессию
    */
   fastify.delete(
     '/api/sync/:id',
