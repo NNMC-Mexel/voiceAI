@@ -67,7 +67,8 @@ async function main() {
       if (!origin) return cb(null, true);
       if (config.security.corsOrigins.includes(origin)) return cb(null, true);
       if (!isProduction && isDevLocalOrigin(origin)) return cb(null, true);
-      return cb(new Error('CORS blocked'), false);
+      fastify.log.warn({ origin }, 'CORS origin rejected');
+      return cb(null, false);
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   });
