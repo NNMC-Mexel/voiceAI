@@ -5,10 +5,13 @@ import {
   toSafeUploadFilename,
   isValidMedicalDocument,
   documentFromExactSourceText,
+  documentFromConsultationProtocolText,
   assessDocumentUsefulness,
   isFieldMeaningful,
   collectDocumentQualityWarnings,
   collectDocumentQualityWarningDetails,
+  enrichDocumentFromSourceName,
+  withTimeout,
 } from './routes.ts';
 import type { MedicalDocument } from './types.js';
 
@@ -43,6 +46,44 @@ test('resolveUploadPath blocks traversal outside upload root', () => {
 test('resolveUploadPath allows valid file path', () => {
   const resolved = resolveUploadPath('./uploads', '1700000_audio.webm');
   assert.match(resolved, /uploads/);
+});
+
+test('withTimeout returns fallback when dependency health check hangs', async () => {
+  const result = await withTimeout(new Promise<boolean>(() => undefined), 10, false);
+  assert.equal(result, false);
+});
+
+test('quality warnings flag live dictation without patient identity', () => {
+  const doc = mkDoc({
+    complaints: 'Головная боль',
+    diagnosis: 'Артериальная гипертензия',
+    recommendations: '1. Контроль АД',
+  });
+
+  const warnings = collectDocumentQualityWarningDetails(
+    'Жалобы на головную боль. Диагноз артериальная гипертензия. Рекомендован контроль АД.',
+    doc,
+    assessDocumentUsefulness(doc),
+  );
+
+  assert.ok(warnings.some((warning) => warning.code === 'patient_identity_missing'));
+});
+
+test('quality warnings flag generic recommendation without raw intent', () => {
+  const doc = mkDoc({
+    patient: { fullName: 'Иванов Иван Иванович', age: '45 лет', gender: 'мужской', complaintDate: '' },
+    complaints: 'Головная боль',
+    diagnosis: 'Артериальная гипертензия',
+    recommendations: '1. Ограничить алкоголь и соблюдать диету',
+  });
+
+  const warnings = collectDocumentQualityWarningDetails(
+    'Пациент Иванов Иван Иванович 45 лет. Жалобы на головную боль. Диагноз артериальная гипертензия.',
+    doc,
+    assessDocumentUsefulness(doc),
+  );
+
+  assert.ok(warnings.some((warning) => warning.code === 'unsupportedRecommendation'));
 });
 
 // ─── assessDocumentUsefulness — критерий «полезности» документа ──────────────
@@ -84,6 +125,93 @@ Recognised for excellence
   assert.doesNotMatch(doc.outpatientExams, /Анамнез|Министерство|EFQM|Адрес|неразборчиво/iu);
   assert.equal(doc.complaints, '');
   assert.equal(doc.anamnesis, '');
+});
+
+test('documentFromConsultationProtocolText preserves generated protocol sections', () => {
+  const doc = documentFromConsultationProtocolText(`
+КОНСУЛЬТАЦИЯ
+Дата составления: 09.04.2026
+ФИО пациента: -
+Возраст: -
+Пол: -
+Дата обращения: 09.04.2026
+Оценка риска (шкала Морзе)
+Падал (3 мес.): нет
+Головокружение: нет
+Сопровождение: нет
+Оценка боли: 0б
+Амбулаторные обследования
+1. ОАК от 11.03.2026: Hb - 139 г/л, Эр - 4,6 *10¹²/л, Тр - 299 *10⁹/л, Л - 4,5 *10⁹/л, СОЭ - 9 мм/ч.
+2. Б/х анализ крови от 11.03.2026: креатинин - 75,8 мкмоль/л, глюкоза - 5,2 ммоль/л, АЛТ - 13,1 МЕ/л,
+АСТ - 17,4 МЕ/л, общий билирубин - 10,1 мкмоль/л, прямой билирубин - 2,4 мкмоль/л, ТГ - 1,45
+ммоль/л.
+3. Ферритин от 05.10.2025г: 295 нг/мл
+Подпись врача
+Документ сформирован автоматически 09.04.2026
+-- 1 of 1 --
+`);
+
+  assert.ok(doc);
+  assert.equal(doc.patient.complaintDate, '2026-04-09');
+  assert.equal(doc.riskAssessment.fallInLast3Months, 'нет');
+  assert.equal(doc.riskAssessment.painScore, '0');
+  assert.match(doc.outpatientExams, /АСТ - 17,4 МЕ\/л/u);
+  assert.match(doc.outpatientExams, /Ферритин от 05\.10\.2025г: 295 нг\/мл/u);
+  assert.equal(doc.recommendations, '');
+  assert.doesNotMatch(doc.outpatientExams, /\u0414\u043e\u043a\u0443\u043c\u0435\u043d\u0442\s+\u0441\u0444\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u043d/u);
+});
+
+test('documentFromConsultationProtocolText does not let nested protocol text overwrite header fields', () => {
+  const doc = documentFromConsultationProtocolText(`
+КОНСУЛЬТАЦИЯ
+Дата составления: 09.04.2026
+Оценка риска (шкала Морзе)
+Оценка боли: 0б
+Рекомендации / План лечения
+Оценка боли: 9б Амбулаторные обследования 1.
+Дата обращения: 01.01.2099
+`);
+
+  assert.ok(doc);
+  assert.equal(doc.patient.complaintDate, '2026-04-09');
+  assert.equal(doc.riskAssessment.painScore, '0');
+  assert.match(doc.recommendations, /Оценка боли: 9б/u);
+  assert.match(doc.recommendations, /Дата обращения: 01\.01\.2099/u);
+});
+
+test('documentFromConsultationProtocolText preserves a single outpatient exams screenshot section', () => {
+  const doc = documentFromConsultationProtocolText(`
+Амбулаторные обследования
+
+1. ОАК от 11.03.2026: Нь - 139 г/л, Эр - 4,6 *10^12/л, Тр - 299 *10^9/л, Л - 4,5 *10^9/л, СОЭ - 9 мм/ч.
+
+2. Б/х анализ крови от 11.03.2026: креатинин - 75,8 мкмоль/л, глюкоза - 5,2 ммоль/л, АЛТ - 13,1 МЕ/л, АСТ - 17,4 МЕ/л, общий билирубин - 10,1 мкмоль/л, прямой билирубин - 2,4 мкмоль/л, ТГ - 1,45 ммоль/л.
+
+3. Ферритин от 05.10.2025: 295 нг/мл
+
+4. ОАМ от 11.03.2026: белок - 0 г/л, Л - 0 в п/з, Эр - 0 в п/з.
+
+5. ЭхоКГ от 14.03.2023г: Признаки минимальной трикуспидальной регургитации, не связанной с легочной гипертензией, диастолическая функция в норме, FV 69.5%, NPV признаков застоя нет
+
+6. УЗДГ БЦА от 13.02.2026г: КИМ не утолщен, атеросклеротического поражения артерии не выявлено, атеросклеротического поражения артерии нет
+
+7. кт три Ферритин от 05.
+
+8. ОАМ от 11: отн. плотность - , белок - г/л, Л - в п/з, Эр - в п/з.
+
+9. кт 5 ЭХОК эхо кардиография от 14.
+
+10. кт 5 Эхо кардиография от 14.
+
+11. кт 6 УЗДГ БЦА – ультразвуковая допплерография брахиоцефальных артерий от 13.
+`);
+
+  assert.ok(doc);
+  assert.match(doc.outpatientExams, /1\. ОАК от 11\.03\.2026: Hb - 139/u);
+  assert.match(doc.outpatientExams, /2\. Б\/х анализ крови/u);
+  assert.match(doc.outpatientExams, /5\. ЭхоКГ/u);
+  assert.match(doc.outpatientExams, /11\. кт 6 УЗДГ БЦА/u);
+  assert.equal((doc.outpatientExams.match(/^\d+\./gmu) || []).length, 11);
 });
 
 test('isFieldMeaningful rejects bare section headers', () => {
@@ -179,6 +307,15 @@ test('collectDocumentQualityWarnings reports suspicious unit garbage', () => {
   assert.ok(warnings.includes('suspicious_unit_garbage_in_document'));
 });
 
+test('collectDocumentQualityWarnings does not flag real words that contain a garbage token', () => {
+  const doc = mkDoc({
+    outpatientExams: 'УЗДГ БЦА: КИМ не утолщен, атеросклеротического поражения артерии нет.',
+  });
+  const usefulness = assessDocumentUsefulness(doc);
+  const warnings = collectDocumentQualityWarnings(doc.outpatientExams, doc, usefulness);
+  assert.ok(!warnings.includes('suspicious_unit_garbage_in_document'));
+});
+
 test('collectDocumentQualityWarningDetails reports advanced QA issues', () => {
   const doc = mkDoc({
     outpatientExams: '1. КТ миокарда в 58 лет, мать страдала сахарным диабетом 2 типа.',
@@ -207,6 +344,62 @@ test('collectDocumentQualityWarningDetails reports possible lost lab value', () 
     usefulness,
   );
   assert.ok(warnings.some((w) => w.code === 'possibleLostLabValue' && w.evidence === '8,9'));
+});
+
+test('collectDocumentQualityWarningDetails reports low document coverage', () => {
+  const raw = [
+    'Жалобы на боль в грудной клетке при нагрузке.',
+    'Анамнез: в течение двух месяцев отмечает одышку, сердцебиение, повышение давления до 165/100.',
+    'По ЭКГ синусовый ритм, по ЭхоКГ ФВ 48 процентов.',
+    'Рекомендовано принимать бисопролол 5 мг и контроль кардиолога.',
+  ].join(' ');
+  const doc = mkDoc({
+    complaints: 'Боль в грудной клетке при нагрузке.',
+  });
+  const usefulness = assessDocumentUsefulness(doc);
+  const warnings = collectDocumentQualityWarningDetails(raw, doc, usefulness);
+  assert.ok(warnings.some((w) => w.code === 'lowDocumentCoverage'));
+});
+
+test('collectDocumentQualityWarningDetails reports missing critical section by raw marker', () => {
+  const doc = mkDoc({
+    complaints: 'Боль в грудной клетке.',
+    diagnosis: 'ИБС.',
+  });
+  const usefulness = assessDocumentUsefulness(doc);
+  const warnings = collectDocumentQualityWarningDetails(
+    'Жалобы на боль. Диагноз ИБС. Рекомендовано принимать препарат и контроль врача.',
+    doc,
+    usefulness,
+  );
+  assert.ok(warnings.some((w) => w.code === 'criticalFieldMissing' && w.field === 'recommendations'));
+});
+
+test('enrichDocumentFromSourceName fills weak patient name from audio filename', () => {
+  const doc = mkDoc({
+    patient: { fullName: 'Пациентка', age: '', gender: '', complaintDate: '' },
+    complaints: 'Боль в ноге.',
+  });
+  const { document, warnings } = enrichDocumentFromSourceName(
+    doc,
+    'Иванова Мария Петровна, 12.07.1948г.р. УЗДГ вен нк__01_audio.wav',
+  );
+  assert.equal(document.patient.fullName, 'Иванова Мария Петровна');
+  assert.equal(document.patient.birthDate, '1948-07-12');
+  assert.ok(warnings.some((w) => w.code === 'patientNameFromFilename'));
+});
+
+test('collectDocumentQualityWarningDetails ignores date-like numbers in lab sources', () => {
+  const doc = mkDoc({
+    outpatientExams: 'HbA1c 7,2 %.',
+  });
+  const usefulness = assessDocumentUsefulness(doc);
+  const warnings = collectDocumentQualityWarningDetails(
+    'date 09.04.2026 HbA1c 7,2 %.',
+    doc,
+    usefulness,
+  );
+  assert.ok(!warnings.some((w) => w.code === 'possibleLostLabValue' && w.evidence === '09.04'));
 });
 
 test('isValidMedicalDocument validates minimal shape', () => {

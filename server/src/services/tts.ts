@@ -34,13 +34,28 @@ export class TtsService {
     if (!response.ok) {
       let msg = `TTS server error: ${response.status}`;
       try {
-        const err = await response.json() as { error?: string };
-        if (err?.error) msg = `TTS error: ${err.error}`;
+        const text = await response.text();
+        if (text) {
+          try {
+            const err = JSON.parse(text) as { error?: unknown; message?: unknown };
+            const detail = typeof err.error === 'string' && err.error.trim()
+              ? err.error.trim()
+              : typeof err.message === 'string' && err.message.trim()
+                ? err.message.trim()
+                : '';
+            if (detail) msg = `TTS error: ${detail}`;
+          } catch {
+            msg = text;
+          }
+        }
       } catch { /* ignore */ }
       throw new Error(msg);
     }
 
-    const data = await response.json() as { audio_base64: string };
+    const data = await response.json() as { audio_base64?: string };
+    if (!data.audio_base64) {
+      throw new Error('TTS response does not contain audio_base64');
+    }
     return data.audio_base64;
   }
 }

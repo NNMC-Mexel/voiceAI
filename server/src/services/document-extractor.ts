@@ -383,8 +383,14 @@ export class DocumentExtractorService {
         throw new Error(`Ollama Vision не ответил за ${Math.round(this.ollama.timeoutMs / 1000)} секунд.`);
       }
       const message = messageFromError(err);
+      if (/model\b.*\bnot found|not found.*model/i.test(message)) {
+        throw new Error(
+          `Модель Ollama Vision "${this.ollama.model}" не установлена в ${this.ollama.serverUrl}. ` +
+          'Установите локальную vision-модель и задайте DOCUMENT_VISION_MODEL или переключите DOCUMENT_VISION_PROVIDER=anthropic.',
+        );
+      }
       if (/does not support images|vision|image|unsupported/i.test(message)) {
-        throw new Error(`Модель Ollama ${this.ollama.model} не поддерживает изображения. Установите vision-модель, например qwen2.5vl, и задайте DOCUMENT_VISION_MODEL.`);
+        throw new Error(`Модель Ollama ${this.ollama.model} не поддерживает изображения. Установите vision-модель и задайте DOCUMENT_VISION_MODEL.`);
       }
       throw new Error(`Ошибка Ollama Vision: ${message}`);
     } finally {

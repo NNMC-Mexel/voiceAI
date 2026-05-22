@@ -41,6 +41,17 @@ function resolveAnthropicConfig() {
   };
 }
 
+function resolveGroqWhisperConfig() {
+  if (parseBoolean(process.env.WHISPER_DISABLE_GROQ, false)) return undefined;
+  const apiKey = process.env.GROQ_API_KEY?.trim();
+  if (!apiKey) return undefined;
+  return {
+    apiKey,
+    model: process.env.GROQ_WHISPER_MODEL?.trim() || 'whisper-large-v3',
+    baseUrl: (process.env.GROQ_BASE_URL?.trim() || 'https://api.groq.com/openai/v1').replace(/\/+$/, ''),
+  };
+}
+
 function resolveLlmServerUrl(): string {
   const direct = process.env.LLM_SERVER_URL?.trim();
   if (direct) return direct;
@@ -64,7 +75,9 @@ export function loadConfig(): ServerConfig {
       language: process.env.WHISPER_LANGUAGE || defaultConfig.whisper.language,
       device: (process.env.WHISPER_DEVICE as 'cuda' | 'cpu') || defaultConfig.whisper.device,
       serverUrl: process.env.WHISPER_SERVER_URL?.trim() || undefined,
+      remoteOnly: parseBoolean(process.env.WHISPER_REMOTE_ONLY, false),
       beamSize: parseIntSafe(process.env.WHISPER_BEAM_SIZE, defaultConfig.whisper.beamSize),
+      groq: resolveGroqWhisperConfig(),
     },
     llm: {
       provider: resolveLlmProvider(),

@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { readFile, writeFile, unlink, mkdir } from 'fs/promises';
+import { readFile, writeFile, unlink, mkdir, readdir, rm, stat } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
 import type { TranscriptionResult, WhisperConfig } from '../types.js';
@@ -23,6 +23,10 @@ interface WhisperServerResponse {
   avg_logprob?: number;
   low_confidence?: boolean;
 }
+
+const REMOTE_CHUNK_SECONDS = Number.parseInt(process.env.WHISPER_REMOTE_CHUNK_SECONDS || '600', 10);
+const REMOTE_CHUNK_MIN_SIZE_BYTES = Number.parseInt(process.env.WHISPER_REMOTE_CHUNK_MIN_MB || '100', 10) * 1024 * 1024;
+const REMOTE_CHUNK_MIN_DURATION_SECONDS = Number.parseInt(process.env.WHISPER_REMOTE_CHUNK_MIN_SECONDS || '1200', 10);
 
 // КОРОТКИЙ initial_prompt — только структура консультации.
 // Whisper hard limit: 224 токена. Всё что сверху — молча обрезается с НАЧАЛА.
@@ -62,6 +66,12 @@ export class WhisperService {
   }
 
   async healthCheck(): Promise<boolean> {
+    // Groq hosted Whisper: если задан ключ — подсистема считается доступной
+    // (Groq + локальный fallback). Не дёргаем Groq API на каждый /api/health,
+    // чтобы не жечь rate-limit; реальные ошибки уходят в fallback при транскрипции.
+    if (this.config.groq) {
+      return true;
+    }
     // Если настроен persistent HTTP-сервер — проверяем его
     if (this.config.serverUrl) {
       try {
@@ -260,16 +270,58 @@ export class WhisperService {
       return { ...result, text: corrected };
     };
 
+    // Шаг 0: Groq hosted Whisper (OpenAI-совместимый) — если задан GROQ_API_KEY.
+    // Приоритетный путь; при любой ошибке падаем в локальную цепочку ниже.
+    if (this.config.groq) {
+      const attempts = this.getRetryCount('GROQ_WHISPER_RETRIES', 3);
+      for (let attempt = 1; attempt <= attempts; attempt++) {
+        try {
+          const result = await this.transcribeWithGroqSmart(audioPath, filename);
+          return applyDict({
+            ...result,
+            duration: (Date.now() - startTime) / 1000,
+          });
+        } catch (error) {
+          if (attempt >= attempts) {
+            console.warn(`[whisper] Groq unavailable after ${attempts} attempts, falling back to server/local... (${error})`);
+            break;
+          }
+          const delayMs = 1500 * attempt;
+          console.warn(`[whisper] Groq failed on attempt ${attempt}/${attempts}; retrying in ${delayMs}ms (${error})`);
+          await this.sleep(delayMs);
+        }
+      }
+    }
+
     // Шаг 1: Persistent HTTP whisper-сервер (нет перезагрузки модели → быстро)
     if (this.config.serverUrl) {
-      try {
-        const result = await this.transcribeWithServer(audioPath);
-        return applyDict({
-          ...result,
-          duration: (Date.now() - startTime) / 1000,
-        });
-      } catch (error) {
-        console.warn(`Whisper HTTP server unavailable, falling back to subprocess... (${error})`);
+      const attempts = this.getRetryCount('WHISPER_SERVER_RETRIES', 2);
+      let lastServerError: unknown;
+      for (let attempt = 1; attempt <= attempts; attempt++) {
+        try {
+          const result = await this.transcribeWithServer(audioPath);
+          return applyDict({
+            ...result,
+            duration: (Date.now() - startTime) / 1000,
+          });
+        } catch (error) {
+          lastServerError = error;
+          if (attempt >= attempts) {
+            console.warn(`Whisper HTTP server unavailable after ${attempts} attempts, falling back to subprocess... (${error})`);
+            break;
+          }
+          const delayMs = 1500 * attempt;
+          console.warn(`[whisper] HTTP server failed on attempt ${attempt}/${attempts}; retrying in ${delayMs}ms (${error})`);
+          await this.sleep(delayMs);
+        }
+      }
+
+      if (this.config.remoteOnly) {
+        const reason = lastServerError instanceof Error ? lastServerError.message : String(lastServerError ?? 'unknown error');
+        throw new Error(
+          `Whisper remote-only mode is enabled, and WHISPER_SERVER_URL failed for ${filename}. ` +
+          `Groq and local subprocess fallbacks are disabled by configuration. Last remote error: ${reason}`
+        );
       }
     }
 
@@ -284,6 +336,11 @@ export class WhisperService {
       console.log(`whisper.cpp not available, trying faster-whisper... (${error})`);
 
       // Шаг 3: faster-whisper CUDA subprocess
+      const localPythonIssue = this.localPythonConfigIssue();
+      if (localPythonIssue) {
+        throw new Error(`Whisper transcription failed for ${filename}: ${localPythonIssue}`);
+      }
+
       try {
         const result = await this.transcribeWithFasterWhisper(audioPath, this.config.device);
         return applyDict({
@@ -357,9 +414,202 @@ export class WhisperService {
     }
   }
 
+  // ─── Groq hosted Whisper (OpenAI-совместимый) ───────────────────────────────
+
+  private guessAudioMime(name: string): string {
+    const ext = name.toLowerCase().split('.').pop() || '';
+    switch (ext) {
+      case 'webm': return 'audio/webm';
+      case 'wav': return 'audio/wav';
+      case 'mp3':
+      case 'mpga': return 'audio/mpeg';
+      case 'mp4':
+      case 'm4a': return 'audio/mp4';
+      case 'ogg':
+      case 'oga': return 'audio/ogg';
+      case 'flac': return 'audio/flac';
+      default: return 'application/octet-stream';
+    }
+  }
+
+  private async transcribeWithGroq(
+    audioPath: string,
+    filename: string
+  ): Promise<Omit<TranscriptionResult, 'duration'>> {
+    const groq = this.config.groq;
+    if (!groq) throw new Error('Groq config missing');
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 300_000);
+
+    try {
+      const audioBytes = await readFile(audioPath);
+      const safeName = path.basename(filename) || 'audio.webm';
+      const blob = new Blob([audioBytes], { type: this.guessAudioMime(safeName) });
+
+      const form = new FormData();
+      form.append('file', blob, safeName);
+      form.append('model', groq.model);
+      form.append('language', this.config.language);
+      // verbose_json — чтобы получить распознанный language; на text fallback ниже
+      form.append('response_format', 'verbose_json');
+      form.append('temperature', '0');
+      // initial_prompt → prompt: помогает с медицинской лексикой.
+      // Whisper hard limit 224 токена — тот же, что и у локального пути.
+      form.append('prompt', MEDICAL_INITIAL_PROMPT);
+
+      const response = await fetch(`${groq.baseUrl}/audio/transcriptions`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${groq.apiKey}` },
+        body: form,
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const errText = await response.text().catch(() => response.statusText);
+        throw new Error(`Groq transcription error ${response.status}: ${errText.slice(0, 300)}`);
+      }
+
+      const data = (await response.json()) as { text?: string; language?: string };
+      if (typeof data.text !== 'string') {
+        throw new Error('Groq response missing "text" field');
+      }
+
+      console.log(`[whisper] Groq ${groq.model} → ${data.text.length} chars (lang=${data.language ?? this.config.language})`);
+
+      return {
+        text: data.text,
+        language: data.language || this.config.language,
+      };
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error('Groq transcription request timeout');
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   // ─── Persistent HTTP whisper-сервер ─────────────────────────────────────────
 
+  private async transcribeWithGroqSmart(
+    audioPath: string,
+    filename: string
+  ): Promise<Omit<TranscriptionResult, 'duration'>> {
+    const maxBytes = this.getByteLimit('GROQ_WHISPER_MAX_BYTES', 20 * 1024 * 1024);
+    const audioStat = await stat(audioPath);
+    if (audioStat.size <= maxBytes) {
+      return this.transcribeWithGroq(audioPath, filename);
+    }
+
+    console.log(`[whisper] Groq chunking large audio ${(audioStat.size / 1024 / 1024).toFixed(1)} MB: ${filename}`);
+    return this.transcribeWithGroqChunked(audioPath, filename);
+  }
+
+  private async transcribeWithGroqChunked(
+    audioPath: string,
+    filename: string
+  ): Promise<Omit<TranscriptionResult, 'duration'>> {
+    const chunkDir = path.join(this.tempDir, `groq_chunks_${Date.now()}_${process.pid}`);
+    await mkdir(chunkDir, { recursive: true });
+
+    try {
+      const segmentSeconds = Math.max(120, Math.min(
+        Number.parseInt(process.env.GROQ_WHISPER_SEGMENT_SECONDS || '300', 10) || 300,
+        900,
+      ));
+      const outputPattern = path.join(chunkDir, 'chunk_%03d.mp3');
+      await this.runFfmpeg([
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-i', audioPath,
+        '-vn',
+        '-ac', '1',
+        '-ar', '16000',
+        '-b:a', process.env.GROQ_WHISPER_CHUNK_BITRATE || '48k',
+        '-f', 'segment',
+        '-segment_time', String(segmentSeconds),
+        '-reset_timestamps', '1',
+        outputPattern,
+      ]);
+
+      const chunks = (await readdir(chunkDir))
+        .filter((name) => /\.mp3$/i.test(name))
+        .sort()
+        .map((name) => path.join(chunkDir, name));
+
+      if (chunks.length === 0) {
+        throw new Error('ffmpeg produced no Groq audio chunks');
+      }
+
+      const texts: string[] = [];
+      const failedChunks: string[] = [];
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        const chunkSize = (await stat(chunk)).size;
+        console.log(`[whisper] Groq chunk ${i + 1}/${chunks.length}: ${(chunkSize / 1024 / 1024).toFixed(1)} MB`);
+        try {
+          const result = await this.transcribeGroqChunkWithRetry(chunk, `${path.basename(filename)}.part${i + 1}.mp3`);
+          if (result.text.trim()) texts.push(result.text.trim());
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          failedChunks.push(`${i + 1}/${chunks.length}: ${message.slice(0, 160)}`);
+          console.warn(`[whisper] Groq chunk ${i + 1}/${chunks.length} failed: ${message}`);
+        }
+      }
+
+      if (texts.length === 0) {
+        throw new Error(`all Groq chunks failed: ${failedChunks.join('; ')}`);
+      }
+
+      if (failedChunks.length > 0) {
+        texts.push(`[Внимание: не удалось распознать ${failedChunks.length} фрагмент(ов) аудио.]`);
+      }
+
+      return {
+        text: texts.join('\n').trim(),
+        language: this.config.language,
+      };
+    } finally {
+      await rm(chunkDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  private async transcribeGroqChunkWithRetry(
+    audioPath: string,
+    filename: string
+  ): Promise<Omit<TranscriptionResult, 'duration'>> {
+    const attempts = this.getRetryCount('GROQ_WHISPER_CHUNK_RETRIES', 2);
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        return await this.transcribeWithGroq(audioPath, filename);
+      } catch (error) {
+        lastError = error;
+        if (attempt >= attempts) break;
+        const delayMs = 1000 * attempt;
+        console.warn(`[whisper] Groq chunk failed on attempt ${attempt}/${attempts}; retrying in ${delayMs}ms (${error})`);
+        await this.sleep(delayMs);
+      }
+    }
+    throw lastError;
+  }
+
   private async transcribeWithServer(audioPath: string): Promise<Omit<TranscriptionResult, 'duration'>> {
+    const fileStat = await stat(audioPath);
+    const durationSeconds = await this.getAudioDurationSeconds(audioPath);
+    if (
+      fileStat.size >= REMOTE_CHUNK_MIN_SIZE_BYTES ||
+      (durationSeconds > 0 && durationSeconds >= REMOTE_CHUNK_MIN_DURATION_SECONDS)
+    ) {
+      return this.transcribeWithServerChunkedFile(audioPath, durationSeconds);
+    }
+
+    return this.transcribeWithServerChunk(audioPath);
+  }
+
+  private async transcribeWithServerChunk(audioPath: string): Promise<Omit<TranscriptionResult, 'duration'>> {
     const controller = new AbortController();
     // 10 минут — с chunking каждый кусок транскрибируется отдельно
     const timeout = setTimeout(() => controller.abort(), 600_000);
@@ -437,6 +687,160 @@ export class WhisperService {
   }
 
   // ─── whisper.cpp subprocess ──────────────────────────────────────────────────
+
+  private async transcribeWithServerChunkedFile(audioPath: string, durationSeconds: number): Promise<Omit<TranscriptionResult, 'duration'>> {
+    const base = path.basename(audioPath, path.extname(audioPath)).replace(/[^\w.-]+/g, '_');
+    const chunkDir = path.join(this.tempDir, `remote_chunks_${Date.now()}_${base}`);
+    await mkdir(chunkDir, { recursive: true });
+
+    try {
+      const fileStat = await stat(audioPath);
+      const configuredSeconds = Math.max(60, REMOTE_CHUNK_SECONDS);
+      const segmentSeconds = fileStat.size >= 100 * 1024 * 1024
+        ? Math.min(configuredSeconds, Number.parseInt(process.env.WHISPER_REMOTE_LARGE_FILE_CHUNK_SECONDS || '180', 10) || 180)
+        : configuredSeconds;
+      const chunkPattern = path.join(chunkDir, 'chunk_%03d.wav');
+      await this.runProcess('ffmpeg', [
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-i', audioPath,
+        '-f', 'segment',
+        '-segment_time', String(Math.max(60, segmentSeconds)),
+        '-reset_timestamps', '1',
+        '-ar', '16000',
+        '-ac', '1',
+        chunkPattern,
+      ], 120_000);
+
+      const chunks = (await readdir(chunkDir))
+        .filter((name) => /^chunk_\d+\.wav$/i.test(name))
+        .sort()
+        .map((name) => path.join(chunkDir, name));
+
+      if (chunks.length === 0) {
+        throw new Error('ffmpeg produced no remote Whisper chunks');
+      }
+
+      const parts: string[] = [];
+      const warnings: NonNullable<TranscriptionResult['warnings']> = [];
+      let language = this.config.language;
+
+      console.log(
+        `[whisper] Remote client-side chunking: ${chunks.length} chunks` +
+        (durationSeconds > 0 ? `, source=${Math.round(durationSeconds)}s` : '') +
+        `, segment=${Math.max(60, segmentSeconds)}s`
+      );
+
+      for (let i = 0; i < chunks.length; i++) {
+        try {
+          const result = await this.transcribeServerChunkWithRetry(chunks[i], i + 1, chunks.length);
+          const text = result.text.trim();
+          if (text) parts.push(text);
+          if (result.language) language = result.language;
+          for (const warning of result.warnings ?? []) {
+            warnings.push({ ...warning, chunk: i + 1 });
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          warnings.push({
+            chunk: i + 1,
+            reasons: ['remote_chunk_failed'],
+            avgLogprob: 0,
+            fallbackUsed: false,
+            selectedBeam: 0,
+          });
+          console.warn(`[whisper] remote chunk ${i + 1}/${chunks.length} failed after retries; continuing with partial transcription (${message})`);
+        }
+      }
+
+      if (parts.length === 0) {
+        throw new Error('all remote Whisper chunks failed');
+      }
+
+      return {
+        text: parts.join('\n\n'),
+        language,
+        ...(warnings.length > 0 ? { warnings } : {}),
+      };
+    } finally {
+      await rm(chunkDir, { recursive: true, force: true });
+    }
+  }
+
+  private async transcribeServerChunkWithRetry(
+    audioPath: string,
+    chunkIndex: number,
+    totalChunks: number,
+  ): Promise<Omit<TranscriptionResult, 'duration'>> {
+    const attempts = this.getRetryCount('WHISPER_SERVER_CHUNK_RETRIES', 3);
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        return await this.transcribeWithServerChunk(audioPath);
+      } catch (error) {
+        lastError = error;
+        if (attempt >= attempts) break;
+        const delayMs = 1500 * attempt;
+        console.warn(
+          `[whisper] remote chunk ${chunkIndex}/${totalChunks} failed on attempt ${attempt}/${attempts}; ` +
+          `retrying in ${delayMs}ms (${error})`
+        );
+        await this.sleep(delayMs);
+      }
+    }
+    throw lastError;
+  }
+
+  private async getAudioDurationSeconds(audioPath: string): Promise<number> {
+    try {
+      const output = await this.runProcess('ffprobe', [
+        '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'default=nw=1:nk=1',
+        audioPath,
+      ], 30_000);
+      const duration = Number.parseFloat(output.trim());
+      return Number.isFinite(duration) ? duration : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  private runProcess(command: string, args: string[], timeoutMs: number): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(command, args, { windowsHide: true });
+      let stdout = '';
+      let stderr = '';
+      let done = false;
+      const timer = setTimeout(() => {
+        if (!done) {
+          done = true;
+          child.kill('SIGKILL');
+          reject(new Error(`${command} timed out after ${timeoutMs}ms`));
+        }
+      }, timeoutMs);
+
+      child.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+      child.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+      child.on('error', (error) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.on('close', (code) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (code === 0) resolve(stdout);
+        else reject(new Error(`${command} exited with code ${code}: ${stderr.trim()}`));
+      });
+    });
+  }
 
   private async transcribeWithWhisperCpp(audioPath: string): Promise<Omit<TranscriptionResult, 'duration'>> {
     return new Promise((resolve, reject) => {
@@ -546,6 +950,62 @@ print(json.dumps({"text": text, "language": info.language}))
   }
 
   // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private getRetryCount(envName: string, fallback: number): number {
+    const value = Number.parseInt(process.env[envName] || '', 10);
+    if (!Number.isFinite(value)) return fallback;
+    return Math.max(1, Math.min(value, 5));
+  }
+
+  private getByteLimit(envName: string, fallback: number): number {
+    const value = Number.parseInt(process.env[envName] || '', 10);
+    if (!Number.isFinite(value) || value <= 0) return fallback;
+    return value;
+  }
+
+  private runFfmpeg(args: string[]): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const ffmpeg = spawn('ffmpeg', args, { windowsHide: true });
+      let stderr = '';
+
+      ffmpeg.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      ffmpeg.on('close', (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(`ffmpeg exited with code ${code}: ${stderr.slice(-1000)}`));
+        }
+      });
+
+      ffmpeg.on('error', (error) => {
+        reject(error);
+      });
+    });
+  }
+
+  private localPythonConfigIssue(): string | null {
+    const pythonCmd = (process.env.WHISPER_PYTHON || '').trim();
+    if (!pythonCmd) return null;
+
+    const looksLikePath =
+      path.isAbsolute(pythonCmd) ||
+      pythonCmd.includes('/') ||
+      pythonCmd.includes('\\') ||
+      /\.exe$/i.test(pythonCmd);
+
+    if (looksLikePath && !existsSync(pythonCmd)) {
+      return `local faster-whisper Python path does not exist: ${pythonCmd}`;
+    }
+
+    return null;
+  }
 
   private parseWhisperCppOutput(output: string): string {
     const lines = output.split('\n');

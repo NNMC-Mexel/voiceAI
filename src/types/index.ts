@@ -41,7 +41,11 @@ export interface QualityWarning {
     | 'suspiciousExamRescue'
     | 'sectionRoutingIssue'
     | 'drugListMayBeMerged'
-    | 'important_number_missing';
+    | 'lowDocumentCoverage'
+    | 'criticalFieldMissing'
+    | 'patientNameFromFilename'
+    | 'important_number_missing'
+    | 'max_bp_value_missing';
   severity: 'info' | 'warning' | 'critical';
   message: string;
   field?: keyof MedicalDocument | 'document';

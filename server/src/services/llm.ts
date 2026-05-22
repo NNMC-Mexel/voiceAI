@@ -367,6 +367,7 @@ Return JSON patch only.`;
     // добавить данные, которые уже корректно уложены в основном блоке).
     this.rescueDiagnosisFromRawText(enriched, rawText);
     this.rescueRecommendationsFromRawText(enriched, rawText);
+    this.rescueSparseClinicalContentFromRawText(enriched, rawText);
     this.clearRiskAssessmentIfNotMentioned(enriched, rawText);
 
     // Детерминированные семантические пост-проходы (P1-P5)
@@ -446,6 +447,8 @@ Return JSON patch only.`;
 
     // Спасаем рекомендации из исходного текста если LLM их потерял
     this.rescueRecommendationsFromRawText(enriched, rawText);
+
+    this.rescueSparseClinicalContentFromRawText(enriched, rawText);
 
     this.clearRiskAssessmentIfNotMentioned(enriched, rawText);
 
@@ -1004,8 +1007,21 @@ Return STRICT JSON (use empty strings if data is missing):
 JSON:`;
   }
 
-  private normalizeYesNo(value: string): string {
-    const v = (value || '').trim().toLowerCase();
+  private textValue(value: unknown): string {
+    if (typeof value === 'string') return value;
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => this.textValue(item))
+        .filter(Boolean)
+        .join('\n');
+    }
+    return '';
+  }
+
+  private normalizeYesNo(value: unknown): string {
+    const v = this.textValue(value).trim().toLowerCase();
     if (!v) return '';
     if (/^(да|yes|true|1)$/i.test(v)) return 'да';
     if (/^(нет|no|false|0|отриц\w*)$/i.test(v)) return 'нет';
@@ -1013,8 +1029,8 @@ JSON:`;
     return '';
   }
 
-  private normalizePainScore(value: string | number): string {
-    const v = String(value ?? '').trim().replace(/[бb]/gi, '');
+  private normalizePainScore(value: unknown): string {
+    const v = this.textValue(value).trim().replace(/[бb]/gi, '');
     if (!v) return '';
     const num = parseInt(v, 10);
     if (isNaN(num) || num < 0) return '';
@@ -1031,48 +1047,47 @@ JSON:`;
     };
   }
 
-  private unescapeLiteralNewlines(v: string): string {
-    if (!v) return '';
+  private unescapeLiteralNewlines(v: unknown): string {
+    const text = this.textValue(v);
+    if (!text) return '';
     // Claude иногда возвращает литеральные "\n" (два символа) вместо переноса.
     // Также встречаются "\\n", "\r\n". Приводим всё к настоящему \n.
-    return v
+    return text
       .replace(/\\r\\n/g, '\n')
       .replace(/\\n/g, '\n')
       .replace(/\r\n/g, '\n');
   }
 
   private validateAndCleanDocument(doc: MedicalDocument): MedicalDocument {
-    const rawAge = doc.patient?.age || '';
-    const rawGender = doc.patient?.gender || '';
+    const rawAge = this.textValue(doc.patient?.age);
+    const rawGender = this.textValue(doc.patient?.gender);
     // Разэкранируем литеральные "\n" во всех текстовых полях до любой обработки
     for (const f of ALL_TEXT_FIELDS) {
-      if (typeof (doc as any)[f] === 'string') {
-        (doc as any)[f] = this.unescapeLiteralNewlines((doc as any)[f]);
-      }
+      (doc as any)[f] = this.unescapeLiteralNewlines((doc as any)[f]);
     }
     const result: MedicalDocument = {
       patient: {
-        fullName: doc.patient?.fullName || '',
+        fullName: this.textValue(doc.patient?.fullName),
         age: this.normalizeAge(rawAge),
         gender: this.normalizeGender(rawGender),
-        complaintDate: doc.patient?.complaintDate || '',
+        complaintDate: this.textValue(doc.patient?.complaintDate),
       },
       riskAssessment: this.validateRiskAssessment(doc.riskAssessment),
-      complaints: this.stripSectionPrefix('complaints', doc.complaints || ''),
-      anamnesis: this.stripSectionPrefix('anamnesis', doc.anamnesis || ''),
+      complaints: this.stripSectionPrefix('complaints', this.textValue(doc.complaints)),
+      anamnesis: this.stripSectionPrefix('anamnesis', this.textValue(doc.anamnesis)),
       outpatientExams: this.config.provider === 'anthropic'
-        ? this.stripSectionPrefix('outpatientExams', doc.outpatientExams || '')
-        : this.postProcessOutpatientExams(this.stripSectionPrefix('outpatientExams', doc.outpatientExams || '')),
-      clinicalCourse: this.stripSectionPrefix('clinicalCourse', doc.clinicalCourse || ''),
-      allergyHistory: this.stripSectionPrefix('allergyHistory', doc.allergyHistory || ''),
-      objectiveStatus: this.stripSectionPrefix('objectiveStatus', doc.objectiveStatus || ''),
-      neurologicalStatus: this.stripSectionPrefix('neurologicalStatus', doc.neurologicalStatus || ''),
-      diagnosis: this.stripSectionPrefix('diagnosis', doc.diagnosis || ''),
-      finalDiagnosis: this.stripSectionPrefix('finalDiagnosis', doc.finalDiagnosis || ''),
-      conclusion: this.formatConclusionAsList(this.stripSectionPrefix('conclusion', doc.conclusion || '')),
-      doctorNotes: this.formatDoctorNotesAsList(this.stripSectionPrefix('doctorNotes', doc.doctorNotes || '')),
-      recommendations: this.groupRecommendations(this.splitInlineNumberedList(this.stripSectionPrefix('recommendations', doc.recommendations || ''))),
-      manualCheck: typeof doc.manualCheck === 'string' ? this.unescapeLiteralNewlines(doc.manualCheck).trim() : '',
+        ? this.stripSectionPrefix('outpatientExams', this.textValue(doc.outpatientExams))
+        : this.postProcessOutpatientExams(this.stripSectionPrefix('outpatientExams', this.textValue(doc.outpatientExams))),
+      clinicalCourse: this.stripSectionPrefix('clinicalCourse', this.textValue(doc.clinicalCourse)),
+      allergyHistory: this.stripSectionPrefix('allergyHistory', this.textValue(doc.allergyHistory)),
+      objectiveStatus: this.stripSectionPrefix('objectiveStatus', this.textValue(doc.objectiveStatus)),
+      neurologicalStatus: this.stripSectionPrefix('neurologicalStatus', this.textValue(doc.neurologicalStatus)),
+      diagnosis: this.stripSectionPrefix('diagnosis', this.textValue(doc.diagnosis)),
+      finalDiagnosis: this.stripSectionPrefix('finalDiagnosis', this.textValue(doc.finalDiagnosis)),
+      conclusion: this.formatConclusionAsList(this.stripSectionPrefix('conclusion', this.textValue(doc.conclusion))),
+      doctorNotes: this.formatDoctorNotesAsList(this.stripSectionPrefix('doctorNotes', this.textValue(doc.doctorNotes))),
+      recommendations: this.groupRecommendations(this.splitInlineNumberedList(this.stripSectionPrefix('recommendations', this.textValue(doc.recommendations)))),
+      manualCheck: this.unescapeLiteralNewlines(doc.manualCheck).trim(),
     };
 
     // Пост-обработка: очистка висячих кавычек (" ' „ “ » ) которые LLM иногда
@@ -1115,6 +1130,10 @@ JSON:`;
 
     // Пост-обработка: удаление мусорных токенов в начале/конце полей
     this.cleanFieldGarbage(result);
+
+    // Пост-обработка: жалобы не должны начинаться с паспортной фразы
+    // "Пациент ФИО ..."; это отдельные данные пациента, не симптом.
+    this.cleanPatientLeadFromComplaints(result);
 
     // Пост-обработка: перемещение контента с секционными маркерами в правильные поля
     this.redistributeMisplacedSections(result);
@@ -2281,7 +2300,7 @@ JSON:`;
       { templateId: '', label: 'ЭхоКГ', pattern: /(?:ЭхоКГ|ЭХОКГ|Эхакаге|эхокардиография)\s+(?:от\s+)?[\s\S]*?(?=(?:ЭКГ|ЭКО|УЗДГ|УЗИ|СМАД|суточн\S+\s+(?:мониторир|монетарир)\S+\s+артериальн\S+\s+давлен\S+|холтер|ХМЭКГ|коагулограмма|ФГДС|Туберкул[её]з|Аллерголог|Объективн|Предварительн|Заключительн|Амбулаторн\S+\s+терап|План\s+обследован|Рекомендац|$))/gimu },
       { templateId: '', label: 'ХМЭКГ', pattern: /(?:ХМЭКГ|холтер\S*\s+мониторирование|холтер)\s+(?:от\s+)?[^.]*?(?:\.|$)/gimu },
       { templateId: '', label: 'СМАД', pattern: /(?:СМАД|суточн\S+\s+(?:мониторир|монетарир)\S+\s+артериальн\S+\s+давлен\S+)\s+(?:от\s+)?[\s\S]*?(?=(?:ЭКГ|ЭКО|ЭхоКГ|ЭХОКГ|Эхакаге|УЗДГ|УЗИ|Туберкул[её]з|Аллерголог|Объективн|Предварительн|Заключительн|Амбулаторн\S+\s+терап|План\s+обследован|Рекомендац|$))/gimu },
-      { templateId: '', label: 'УЗДГ', pattern: /(?:УЗДГ|УЗДС)\s+[^.]*?(?:\.|$)/gimu },
+      { templateId: '', label: 'УЗДГ', pattern: /(?:УЗДГ|УЗДС|ультразвуковая\s+доплерография)\s+[\s\S]*?(?=(?:ЭКГ|ЭКО|ЭхоКГ|ЭХОКГ|Эхакаге|УЗИ|СМАД|суточн\S+\s+(?:мониторир|монетарир)\S+\s+артериальн\S+\s+давлен\S+|холтер|ХМЭКГ|Туберкул[её]з|Аллерголог|Объективн|Предварительн|Заключительн|Амбулаторн\S+\s+терап|План\s+обследован|Рекомендац|$))/gimu },
       { templateId: '', label: 'УЗИ', pattern: /(?:УЗИ)\s+[\s\S]*?(?=(?:ЭКГ|ЭКО|ЭхоКГ|ЭХОКГ|Эхакаге|УЗДГ|СМАД|суточн\S+\s+(?:мониторир|монетарир)\S+\s+артериальн\S+\s+давлен\S+|холтер|ХМЭКГ|Туберкул[её]з|Аллерголог|Объективн|Предварительн|Заключительн|Амбулаторн\S+\s+терап|План\s+обследован|Рекомендац|$))/gimu },
       { templateId: '', label: 'рентген', pattern: /(?:рентген\S*)\s+[^.]*?(?:\.|$)/gimu },
       { templateId: '', label: 'МРТ', pattern: /(?<![А-ЯЁа-яёA-Za-z])(?:МРТ|КТ|МСКТ)(?![А-ЯЁа-яёA-Za-z])\s+[^.]*?(?:\.|$)/gimu },
@@ -2307,8 +2326,9 @@ JSON:`;
 
       for (const match of matches) {
         const fullBlock = match.trim();
-        // Минимальная валидация: должно содержать числовое значение
-        if (fullBlock.length < 10 || !/\d/.test(fullBlock)) continue;
+        // Лабораторные блоки должны содержать числа; инструментальные заключения
+        // вроде УЗДГ вен могут быть полностью качественными.
+        if (fullBlock.length < 10 || (!/\d/.test(fullBlock) && !this.examBlockMayLackNumbers(label, fullBlock))) continue;
         if (!this.isUsableRawExamBlock(label, fullBlock)) continue;
 
         // Для шаблонов с параметрами — парсим значения из голосового ввода
@@ -2374,6 +2394,12 @@ JSON:`;
       return /(?:hba1c|гликированн|гликозилированн)[\s\S]*\d+(?:[,.]\d+)?\s*%/iu.test(text);
     }
     return true;
+  }
+
+  private examBlockMayLackNumbers(label: string, block: string): boolean {
+    const normalizedLabel = label.toLowerCase();
+    if (!/^(?:уздг|узи|мрт|рентген|фгдс)$/iu.test(normalizedLabel)) return false;
+    return /(?:проходим|сжима|кровоток|стеноз|тромбоз|патолог|изменени|заключени|артери|вен|датчик|доплерограф)/iu.test(block);
   }
 
   private shouldPreserveRawExamBlock(block: string, parsedValueCount: number): boolean {
@@ -2504,10 +2530,12 @@ JSON:`;
       String.raw`заключительн\S*\s+диагноз\S*`,
       String.raw`окончательн\S*\s+диагноз\S*`,
       String.raw`диагноз\S*`,
+      String.raw`диагнос\S*`,
       String.raw`заключени\S*`,
       String.raw`план\s+(?:обследовани\S*|лечени\S*)`,
       String.raw`рекомендаци\S*`,
       String.raw`назначени\S*`,
+      String.raw`лечени\S*`,
     ].join('|');
   }
 
@@ -2529,7 +2557,7 @@ JSON:`;
     const start = match.index + match[0].length;
     const tail = rawText.slice(start);
     const boundary = new RegExp(
-      `(?:^|[\\n.!?;])\\s*(?:${this.rawSectionBoundaryPattern()})\\s*[:\\-.—–]?`,
+      `(?:^|[\\n.!?;]|\\s+)\\s*(?:${this.rawSectionBoundaryPattern()})\\s*[:\\-.—–]?`,
       'iu'
     );
     const next = boundary.exec(tail);
@@ -2555,9 +2583,22 @@ JSON:`;
     return cleaned;
   }
 
+  private normalizedIncludes(haystack: string, needle: string): boolean {
+    const normalize = (value: string) => value
+      .toLowerCase()
+      .replace(/ё/g, 'е')
+      .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const h = normalize(haystack || '');
+    const n = normalize(needle || '');
+    return Boolean(n) && h.includes(n);
+  }
+
   private extractPatientNameFromText(rawText: string): string {
     const text = rawText.replace(/\s+/g, ' ').trim();
     const patterns = [
+      /(?:^|\s)(?:фио\s+пациента|фио|пациент(?:ка)?|больн(?:ой|ая))\s*[:\-]?\s+([А-ЯЁ][А-ЯЁа-яё-]{1,}(?:\s+[А-ЯЁ][А-ЯЁа-яё-]{1,}){1,3}?)(?=\s+(?:дата|дато|доторожд|дата\s+рождени|дата\s+осмотр|диагноз|диагнос|жалоб|анамнез|мужской|женский)\b|[,.;]|\d{1,3}\s*(?:лет|года|год)|$)/iu,
       /(?:^|[.!?\n]\s*)(?:фио|пациент(?:ка)?|больн(?:ой|ая))\s*[:\-]?\s+([А-ЯЁ][А-ЯЁа-яё-]{1,}(?:\s+[А-ЯЁ][А-ЯЁа-яё-]{1,}){1,3})(?=\s*(?:[,.;]|\d{1,3}\s*(?:лет|года|год)|$))/iu,
       /(?:фамилия\s+имя\s+отчество|ф\.?\s*и\.?\s*о\.?)\s*[:\-]?\s*([А-ЯЁ][А-ЯЁа-яё-]{1,}(?:\s+[А-ЯЁ][А-ЯЁа-яё-]{1,}){1,3})/iu,
     ];
@@ -2588,7 +2629,7 @@ JSON:`;
   private rescueDiagnosisFromRawText(doc: MedicalDocument, rawText: string): void {
     const rawDiag = this.extractRawSection(
       rawText,
-      String.raw`(?:предварительн\S*\s+|клиническ\S*\s+)?диагноз\S*`
+      String.raw`(?:предварительн\S*\s+|клиническ\S*\s+)?(?:диагноз|диагнос)\S*`
     ).replace(/^предварительн\S*\s*[:.,-]?\s*/iu, '');
     if (!rawDiag) return;
 
@@ -2612,7 +2653,7 @@ JSON:`;
 
     const rawReco = this.extractRawSection(
       rawText,
-      String.raw`(?:рекомендаци\S*|план\s+лечени\S*|назначени\S*)`
+      String.raw`(?:рекомендаци\S*|план\s+лечени\S*|назначени\S*|лечени\S*)`
     );
 
     if (rawReco.length > 20) {
@@ -2638,6 +2679,182 @@ JSON:`;
     }
   }
 
+  private rescueSparseClinicalContentFromRawText(doc: MedicalDocument, rawText: string): void {
+    const raw = (rawText || '').replace(/\s+/g, ' ').trim();
+    if (raw.length < 80) return;
+
+    this.rescueInstrumentalConclusion(doc, raw);
+    this.rescueProcedureStudyFromRawText(doc, raw);
+    this.rescueWeakDiagnosisMarkers(doc, raw);
+    this.rescueTreatmentTailAsRecommendations(doc, raw);
+    this.moveMisroutedDiagnosisIntoDiagnosis(doc);
+    this.moveNewTreatmentFromConclusionToRecommendations(doc);
+    this.fillComplaintsFromReasonOrSymptoms(doc, raw);
+  }
+
+  private rescueInstrumentalConclusion(doc: MedicalDocument, raw: string): void {
+    const hasInstrumentalStudy = /(?:ультразвуковая\s+доплерограф|узд[гс]|узи|дуплекс)/iu.test(raw);
+    if (!hasInstrumentalStudy) return;
+
+    if (!doc.complaints.trim()) {
+      const reason = raw.match(/(?:для\s+исключения\s+[^.]{8,120}|по\s+поводу\s+[^.]{8,120})/iu)?.[0];
+      if (reason) {
+        doc.complaints = this.cleanRescuedRawBlock(reason);
+        console.log(`[postprocess] complaints rescued as instrumental reason: ${doc.complaints.length} chars`);
+      }
+    }
+
+    const conclusion = raw.match(/(?:тромбоз|стеноз|патологи[яи]|атеросклеротическ\S+\s+изменени\S*)[^.]{0,180}(?:не\s+выявлен[аоы]?|без\s+[^.]{6,120}|кровоток\s+магистральный)[^.]*\.?/iu)?.[0] ||
+      raw.match(/(?:[^.]{0,120}(?:не\s+выявлен[аоы]?|без\s+гемодинамически\s+значимых\s+стенозов)[^.]*\.?)/iu)?.[0];
+
+    if (conclusion && !doc.finalDiagnosis.trim() && !doc.diagnosis.trim()) {
+      doc.finalDiagnosis = this.cleanRescuedRawBlock(conclusion);
+      console.log(`[postprocess] finalDiagnosis rescued from instrumental conclusion: ${doc.finalDiagnosis.length} chars`);
+    }
+  }
+
+  private rescueProcedureStudyFromRawText(doc: MedicalDocument, raw: string): void {
+    const isOct = /(?:оптическ\S+\s+когерентн\S+\s+томограф|окт\b|дзн|ганглиозн\S+\s+клет)/iu.test(raw);
+    if (!isOct) return;
+
+    const studyMatch = raw.match(/(?:оптическ\S+\s+когерентн\S+\s+томограф|окт\b|дзн)[^]{20,900}?(?=(?:\s+рекоменд|$))/iu);
+    const study = this.cleanRescuedRawBlock(studyMatch?.[0] || '');
+    if (study.length >= 30 && !this.normalizedIncludes(doc.outpatientExams, study)) {
+      doc.outpatientExams = [doc.outpatientExams.trim(), study].filter(Boolean).join('\n');
+      console.log(`[postprocess] OCT/procedure study rescued to outpatientExams: ${study.length} chars`);
+    }
+
+    const recommended = raw.match(/(?:рекоменд\w*)\s*[:\-–—.]?\s*([^]{20,700})/iu)?.[1] || '';
+    const reco = this.cleanRescuedRawBlock(recommended);
+    if (reco.length >= 20 && doc.recommendations.trim().length < 20) {
+      doc.recommendations = this.numberFreeformRecommendations(reco);
+      console.log(`[postprocess] OCT/procedure recommendations rescued: ${doc.recommendations.length} chars`);
+    }
+  }
+
+  private rescueWeakDiagnosisMarkers(doc: MedicalDocument, raw: string): void {
+    if (doc.diagnosis.trim().length >= 20 || doc.finalDiagnosis.trim().length >= 20) return;
+
+    const patterns = [
+      /(?:предварительн\S*\s+диагноз\s+основн\S*|основн\S*\s+диагноз|диагноз(?:ом)?|дз)\s*[:\-–—.]?\s*([^]{20,700}?)(?=(?:\s+(?:рекоменд|назначен|план\s+лечени|план\s+обследован|объективн|анамнез|жалоб|диета|повторн\S+\s+осмотр)|$))/iu,
+      /(?:диагнос)\s*[:\-–—.]?\s*([^]{20,700}?)(?=(?:\s+(?:лечени|рекоменд|назначен|план\s+лечени|план\s+обследован|объективн|анамнез|жалоб|диета|повторн\S+\s+осмотр)|$))/iu,
+      /(?:дзотомикоз|отомикоз)\s+справа[^.]*\.?/iu,
+      /(?:возрастн\S+\s+макулодистрофи\S+[^.]{0,260})/iu,
+      /(?:серн\S+\s+пробк\S+[^.]{0,160})/iu,
+    ];
+
+    for (const pattern of patterns) {
+      const match = raw.match(pattern);
+      const candidate = this.cleanRescuedRawBlock((match?.[1] || match?.[0] || '').trim());
+      if (candidate.length >= 15) {
+        doc.diagnosis = candidate;
+        console.log(`[postprocess] diagnosis rescued from weak marker: ${candidate.length} chars`);
+        return;
+      }
+    }
+  }
+
+  private rescueTreatmentTailAsRecommendations(doc: MedicalDocument, raw: string): void {
+    if (doc.recommendations.trim().length >= 20) return;
+
+    const patterns = [
+      /(?:рек(?:ом|вно|но)?|рекомендовано|рекомендации|план\s+лечени\S*|назначени\S*)\s*[:\-–—.]?\s*([^]{30,1400})/iu,
+      /(?:лечени\S*)\s*[:\-–—.]?\s*([^]{20,1400})/iu,
+      /(?:наружное\s+лечение\s+продолжить|повторный\s+осмотр|повторный\s+прием|консультация\s+[а-яё]+)[^.]{0,1400}/iu,
+    ];
+
+    for (const pattern of patterns) {
+      const match = raw.match(pattern);
+      const candidate = this.cleanRescuedRawBlock((match?.[1] || match?.[0] || '').trim());
+      if (candidate.length >= 30) {
+        doc.recommendations = this.numberFreeformRecommendations(candidate);
+        console.log(`[postprocess] recommendations rescued from treatment tail: ${doc.recommendations.length} chars`);
+        return;
+      }
+    }
+  }
+
+  private moveNewTreatmentFromConclusionToRecommendations(doc: MedicalDocument): void {
+    if (doc.recommendations.trim().length >= 20 || !doc.conclusion.trim()) return;
+
+    const conclusion = doc.conclusion.trim();
+    const hasNewTreatment = /(?:на\s+воспален|на\s+гнойнич|наружн\S+\s+лечени|повторн\S+\s+(?:осмотр|прием)|контроль|диет|капли|крем|гель|бальзам|таблетк|капсул|по\s+\d+\s+(?:раз|кап|таб|капсул)|раза?\s+в\s+день)/iu.test(conclusion);
+    const hasCurrentTherapyOnly = /(?:продолжать|продолжает\s+принимать|амбулаторно\s+принимает|принимает\s+постоянн|постоянн\S+\s+прием)/iu.test(conclusion) &&
+      !/(?:повторн\S+\s+(?:осмотр|прием)|на\s+воспален|на\s+гнойнич|наружн\S+\s+лечени|назнач)/iu.test(conclusion);
+
+    if (hasNewTreatment && !hasCurrentTherapyOnly) {
+      doc.recommendations = this.numberFreeformRecommendations(conclusion);
+      doc.conclusion = '';
+      console.log('[postprocess] moved new-treatment conclusion → recommendations');
+    }
+  }
+
+  private moveMisroutedDiagnosisIntoDiagnosis(doc: MedicalDocument): void {
+    if (doc.diagnosis.trim().length >= 20 || doc.finalDiagnosis.trim().length >= 20) return;
+
+    const sourceFields: RewriteableField[] = [
+      'recommendations',
+      'conclusion',
+      'doctorNotes',
+      'outpatientExams',
+      'objectiveStatus',
+      'complaints',
+    ];
+
+    for (const field of sourceFields) {
+      const value = doc[field] || '';
+      if (!value.trim()) continue;
+
+      const match = value.match(/(?:^|[\n.]\s*|\b)(?:ДИАГНОЗ|диагноз|клинический\s+диагноз|дз)\s*[:\-–—.]?\s*([^]{20,600}?)(?=(?:\n\s*\d+[\.)]|\s+(?:рекомендаци|план\s+лечени|контроль|повторн\S+\s+(?:осмотр|прием)|диета|таблетк|капсул)|$))/u);
+      if (!match || typeof match.index !== 'number') continue;
+      const candidate = this.cleanRescuedRawBlock(match?.[1] || '');
+      if (candidate.length < 20) continue;
+
+      doc.diagnosis = candidate;
+      const before = value.slice(0, match.index).trim();
+      const after = value.slice(match.index + match[0].length).trim();
+      const cleanedSource = [before, after].filter(Boolean).join('\n').trim();
+      doc[field] = field === 'recommendations'
+        ? this.numberFreeformRecommendations(cleanedSource)
+        : cleanedSource;
+      console.log(`[postprocess] moved misrouted diagnosis from ${field} → diagnosis`);
+      return;
+    }
+  }
+
+  private fillComplaintsFromReasonOrSymptoms(doc: MedicalDocument, raw: string): void {
+    if (doc.complaints.trim().length >= 10) return;
+
+    const patterns = [
+      /(?:жалоб[аы]?|жилобы|шағым)\s*[,.:;\-–—]?\s*(?:на)?\s*([^]{15,450}?)(?=(?:\s+(?:анамнез|риск\s+падени|оценка\s+боли|объективн|диагноз|предварительн|при\s+осмотре)|$))/iu,
+      /(?:бол[ьи]\s+в\s+[^.]{8,220}|высыпани\S+\s+в\s+[^.]{8,160}|заложенность\s+в\s+[^.]{8,160}|повышени\S+\s+артериальн\S+\s+давлени\S+[^.]{0,220})/iu,
+    ];
+
+    for (const pattern of patterns) {
+      const match = raw.match(pattern);
+      const candidate = this.cleanRescuedRawBlock((match?.[1] || match?.[0] || '').trim());
+      if (candidate.length >= 10) {
+        doc.complaints = candidate;
+        console.log(`[postprocess] complaints rescued from symptoms: ${candidate.length} chars`);
+        return;
+      }
+    }
+  }
+
+  private numberFreeformRecommendations(value: string): string {
+    const cleaned = this.cleanRescuedRawBlock(value);
+    if (!cleaned) return '';
+    if (/^\s*\d+[\.\)]/u.test(cleaned)) return cleaned;
+
+    const chunks = cleaned
+      .split(/(?<=[.!?])\s+|(?=\b(?:диета|контроль|повторн\S+\s+(?:осмотр|прием)|консультаци\S+|таблетк|капсул|капли|крем|гель|бальзам|на\s+гнойнич|на\s+воспален|наружн\S+\s+лечени)\b)/giu)
+      .map((part) => part.trim().replace(/^[,.;:\-–—]+/u, ''))
+      .filter((part) => part.length >= 8);
+
+    const items = chunks.length > 1 ? chunks : [cleaned];
+    return items.map((item, index) => `${index + 1}. ${item}`).join('\n');
+  }
+
   /**
    * Детерминированный набор финальных пост-проходов, исправляющих типовые ошибки
    * маршрутизации LLM: препараты для постоянного приёма уезжают в conclusion,
@@ -2655,21 +2872,143 @@ JSON:`;
     doc.conclusion = this.formatConclusionAsList(doc.conclusion || '');
     // P5 должен идти до словаря, чтобы восстановленный текст прошёл нормализацию.
     this.recoverMissingContent(doc, rawText, coverageHints);
+    this.moveMisroutedDiagnosisIntoDiagnosis(doc);
+    this.stripRecommendationTailFromDiagnosis(doc);
     // Словарь может ДОБАВЛЯТЬ токены (напр. «HbA1c» после «гликированный гемоглобин»),
     // поэтому применяем ПЕРЕД P4 — иначе P4 удалит дубль, а словарь его вернёт.
     this.reapplyMedicalDictionary(doc);
+    this.moveAcuteEntTreatmentFromConclusionToRecommendations(doc);
+    this.stripHeaderEchoFromClinicalFields(doc);
     this.fixRedundantTokens(doc);
     // Финальный дедуп: P5 мог вернуть в recommendations строку с препаратами,
     // которые уже перечислены в conclusion (Whisper-артефактный echo-хвост).
     // Запускаем в самом конце, чтобы убрать последний эхо-дубль.
     this.dedupRecommendationsAgainstConclusion(doc);
     this.filterGarbageRecommendationItems(doc);
+    this.moveRawRecommendedTherapyFromConclusion(doc, rawText);
+    this.dropUnsupportedGenericRecommendations(doc, rawText);
     this.dedupOutpatientExamsAgainstDoctorNotes(doc);
     doc.conclusion = this.formatConclusionAsList(doc.conclusion || '');
     // После P5-routing в recommendations мог вернуться эхо-хвост («Таблетка X»,
     // «По одной таблетке…») в виде отдельных пунктов. Повторяем merge+dedup,
     // чтобы схлопнуть continuation и убрать нормализованные дубли.
     this.cleanRecommendations(doc);
+  }
+
+  private stripRecommendationTailFromDiagnosis(doc: MedicalDocument): void {
+    const diagnosis = doc.diagnosis.trim();
+    if (!diagnosis) return;
+
+    const match = diagnosis.match(/(?:^|[\s.;,:-])(?:рекомендовано|рекомендации|план\s+лечени[яю]|назначено|назначения)\s*[:\-–—.]?\s*([^]+)$/iu);
+    if (!match || typeof match.index !== 'number') return;
+
+    const cleanDiagnosis = diagnosis.slice(0, match.index).trim().replace(/[.;,:-]+$/u, '').trim();
+    const tail = this.cleanRescuedRawBlock(match[1] || '');
+    if (cleanDiagnosis.length < 8 || tail.length < 8) return;
+
+    doc.diagnosis = cleanDiagnosis;
+    const current = doc.recommendations.trim();
+    const numberedTail = this.numberFreeformRecommendations(tail);
+    doc.recommendations = current
+      ? `${current}\n${numberedTail}`.trim()
+      : numberedTail;
+    console.log('[postprocess] moved recommendation tail from diagnosis → recommendations');
+  }
+
+  private moveRawRecommendedTherapyFromConclusion(doc: MedicalDocument, rawText: string): void {
+    const conclusion = doc.conclusion.trim();
+    if (!conclusion) return;
+
+    const rawReco = rawText.match(/(?:^|[\s.;,:-])(?:рекомендовано|рекомендации|план\s+лечени[яю]|назначено|назначения)\s*[:\-–—.]?\s*([^]+)$/iu)?.[1] || '';
+    if (!rawReco) return;
+
+    const currentTherapyMarker = /(?:амбулаторно\s+принима|постоянно|продолжает\s+принимать|продолжить\s+при[её]м|принимает\s+постоянн)/iu;
+    if (currentTherapyMarker.test(conclusion)) return;
+
+    const conclusionLines = conclusion
+      .split(/\n+/)
+      .map((line) => line.replace(/^\s*\d+[\.)]\s*/, '').trim())
+      .filter(Boolean);
+    const rawNorm = rawReco.toLowerCase().replace(/ё/g, 'е');
+    const kept: string[] = [];
+    const moved: string[] = [];
+
+    for (const line of conclusionLines) {
+      const drug = line.match(/\b([А-ЯЁA-Z][А-ЯЁа-яёA-Za-z-]{3,})\b/u)?.[1] || '';
+      const dose = line.match(/\d+(?:[,.]\d+)?\s*(?:мг|мкг|г|мл)\b/iu)?.[0] || '';
+      const isDrugLike = !!drug && !!dose;
+      const appearsInRawRecommendation = drug
+        ? rawNorm.includes(drug.toLowerCase().replace(/ё/g, 'е'))
+        : false;
+      if (isDrugLike && appearsInRawRecommendation) {
+        moved.push(line);
+      } else {
+        kept.push(line);
+      }
+    }
+
+    if (moved.length === 0) return;
+    const current = doc.recommendations.trim();
+    const movedText = moved.map((line, index) => `${index + 1}. ${line}`).join('\n');
+    doc.recommendations = current ? `${current}\n${movedText}`.trim() : movedText;
+    doc.conclusion = kept.map((line, index) => `${index + 1}. ${line}`).join('\n');
+    console.log(`[postprocess] moved ${moved.length} raw-recommended therapy item(s) conclusion → recommendations`);
+  }
+
+  private dropUnsupportedGenericRecommendations(doc: MedicalDocument, rawText: string): void {
+    const reco = doc.recommendations;
+    if (!reco.trim()) return;
+
+    const rawHasRecommendationIntent = /(?:рекоменд|назнач|план\s+лечени|лечение|принимать|контроль|повторн\S+\s+(?:осмотр|прием|приём)|консультаци|диет|стол\s*№|режим|огранич|исключить|увеличить|снизить)/iu.test(rawText);
+    if (rawHasRecommendationIntent) return;
+
+    const genericLifestyleRe = /(?:диет|питани|ограничить|исключить|алкогол|курени|физическ\S+\s+активн|контроль\s+(?:ад|веса|массы)|здоров\S+\s+образ|соблюдение\s+режима)/iu;
+    const lines = reco
+      .split(/\n+/)
+      .map((line) => line.replace(/^\s*\d+[\.)]\s*/, '').trim())
+      .filter(Boolean);
+
+    const kept: string[] = [];
+    let dropped = 0;
+    for (const line of lines) {
+      if (genericLifestyleRe.test(line)) {
+        dropped++;
+        continue;
+      }
+      kept.push(line);
+    }
+
+    if (dropped === 0) return;
+    doc.recommendations = kept.map((line, index) => `${index + 1}. ${line}`).join('\n');
+    console.log(`[postprocess] dropped ${dropped} unsupported generic recommendation(s)`);
+  }
+
+  private moveAcuteEntTreatmentFromConclusionToRecommendations(doc: MedicalDocument): void {
+    if (doc.recommendations.trim().length >= 20 || !doc.conclusion.trim()) return;
+    const conclusion = doc.conclusion.trim();
+    const isEntTreatment = /(?:\bсинупрет\b|отоларинголог|отри[вф]ин|неодекс|промыван\w*\s+нос|проетц|в\s+нос\s+(?:спрей|капли)|кап\w*\s+\d+\s*раз|цеф\w*\s+.*\bв\/?м\b)/iu.test(conclusion);
+    if (!isEntTreatment) return;
+
+    doc.recommendations = this.numberFreeformRecommendations(conclusion);
+    doc.conclusion = '';
+    console.log('[postprocess] moved acute ENT treatment conclusion → recommendations');
+  }
+
+  private stripHeaderEchoFromClinicalFields(doc: MedicalDocument): void {
+    const clean = (value: string): string => this.cleanRescuedRawBlock(
+      value
+        .replace(/\b(?:фио\s+пациента|дата\s+рождени\w*|дата\s+(?:при[её]ма|осмотра))\b[^.]{0,120}?\b(?:жалоб[аы]?|анамнез(?:\s+заболевания)?)\b\s*[,.:;–—-]?\s*/giu, '')
+        .replace(/\b(?:фио\s+пациента|дата\s+рождени\w*|дата\s+(?:при[её]ма|осмотра))\b[^.]{0,160}$/giu, '')
+    );
+
+    for (const field of ['complaints', 'anamnesis'] as const) {
+      const before = doc[field];
+      const after = clean(before);
+      if (after && after !== before) {
+        doc[field] = after;
+        console.log(`[postprocess] stripped header echo from ${field}`);
+      }
+    }
   }
 
   /**
@@ -3483,6 +3822,10 @@ JSON:`;
     const low = trimmed.toLowerCase();
     if (/(?:жалоб[аы]?|жалуется|беспоко(?:ит|ят))/iu.test(low)) return 'complaints';
     if (/(?:предварительн\S*\s+диагноз\S*|клиническ\S*\s+диагноз\S*|диагноз\S*)/iu.test(low)) return 'diagnosis';
+    if (/(?:лор[\-\s]?статус|риноскоп|фарингоскоп|наружн\w*\s+слухов\w*\s+проход|барабанн\w*\s+перепонк|носов\w*\s+дыхани|небн\w*\s+миндалин|перегородк\w*\s+нос)/iu.test(low)) {
+      return 'objectiveStatus';
+    }
+    if (/(?:отомикоз|серн\w*\s+пробк|ринит|синусит|тонзиллит|фарингит|отит)\b/iu.test(low)) return 'diagnosis';
     if (/план\s+обследовани\S*/iu.test(low)) return 'doctorNotes';
     if (/(?:амбулаторн\S*\s+терапи\S*|амбулаторно\s+принима\S*|продолжает\s+принимать|продолжить\s+принимать)/iu.test(low)) {
       return 'conclusion';
@@ -3543,7 +3886,7 @@ JSON:`;
       const body = m[2].trim();
       if (body.length > 40) continue;
       // Грубый фильтр: пункт должен содержать слово «диета» / «стол» / «гипо…»
-      if (!/\b(?:диет\S*|стол\s*(?:№?\s*)?\d+|гипохолестерин\S*|гипонатриев\S*)\b/iu.test(body)) continue;
+      if (!/(?:диет\S*|стол\s*(?:№?\s*)?\d+|гипохолестерин\S*|гипонатриев\S*)/iu.test(body)) continue;
 
       const template = findDietTemplate(body);
       if (template) {
@@ -3554,6 +3897,27 @@ JSON:`;
     }
 
     if (changed) doc.recommendations = lines.join('\n');
+  }
+
+  private cleanPatientLeadFromComplaints(doc: MedicalDocument): void {
+    const value = doc.complaints?.trim();
+    if (!value) return;
+
+    const cleaned = value
+      .replace(
+        /^(?:пациент(?:ка)?|больн(?:ой|ая))\s+[А-ЯЁ][А-ЯЁа-яё-]{1,}(?:\s+[А-ЯЁ][А-ЯЁа-яё-]{1,}){1,3}\s+(?:бол(?:еет|ен|ьна)|жалуется|предъявляет\s+жалобы)\s*[,.:;-]?\s*/iu,
+        ''
+      )
+      .replace(
+        /^(?:пациент(?:ка)?|больн(?:ой|ая))\s+[А-ЯЁ][А-ЯЁа-яё-]{1,}(?:\s+[А-ЯЁ][А-ЯЁа-яё-]{1,}){1,3}\s*[,.:;-]\s*(?=(?:жалоб|беспоко|болит|отмечает|предъявляет)\b)/iu,
+        ''
+      )
+      .trim();
+
+    if (cleaned && cleaned !== value && cleaned.length >= 5) {
+      doc.complaints = cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+      console.log('[postprocess] stripped patient lead from complaints');
+    }
   }
 
   /**
@@ -3834,16 +4198,61 @@ JSON:`;
         throw firstError;
       }
       console.warn(`[llm] JSON parse failed (${firstError}), raw snippet: ${content.substring(0, 300)}`);
-      const repaired = await this.repairJsonWithLlm(content);
-      const parsed = this.parseLlmJson<MedicalDocument>(repaired);
-      if (this.isBooleanPlaceholderDocument(parsed)) {
-        throw new Error('LLM JSON repair produced boolean placeholders instead of a medical document');
+      try {
+        const repaired = await this.repairJsonWithLlm(content);
+        const parsed = this.parseLlmJson<MedicalDocument>(repaired);
+        if (this.isBooleanPlaceholderDocument(parsed)) {
+          throw new Error('LLM JSON repair produced boolean placeholders instead of a medical document');
+        }
+        return parsed;
+      } catch (repairError) {
+        if (_rawText && _rawText.trim().length >= 40) {
+          console.warn(`[llm] JSON repair failed (${repairError}); using deterministic raw-text fallback`);
+          return this.buildFallbackDocumentFromRawText(_rawText, repairError);
+        }
+        throw repairError;
       }
-      return parsed;
       // Бросаем наверх. Mock-fallback решает только верхний caller (structureText),
       // и только при ALLOW_MOCK_LLM=true. Без флага врач увидит явную ошибку и
       // сможет повторить — а не «успешный» пустой документ с raw в complaints.
     }
+  }
+
+  private buildFallbackDocumentFromRawText(rawText: string, cause: unknown): MedicalDocument {
+    const doc = this.validateAndCleanDocument({
+      patient: { fullName: '', age: '', gender: '', complaintDate: '' },
+      riskAssessment: { ...EMPTY_RISK_ASSESSMENT },
+      complaints: '',
+      anamnesis: '',
+      outpatientExams: '',
+      clinicalCourse: '',
+      allergyHistory: '',
+      objectiveStatus: '',
+      neurologicalStatus: '',
+      diagnosis: '',
+      finalDiagnosis: '',
+      conclusion: '',
+      doctorNotes: '',
+      recommendations: '',
+      manualCheck: 'LLM вернул невалидный JSON. Документ восстановлен детерминированно из raw-текста; проверьте вручную.',
+    });
+
+    const enriched = this.enrichPatientFromRawText(doc, rawText);
+    this.rescueCoreClinicalFieldsFromRawText(enriched, rawText);
+    this.rescueExamsFromRawText(enriched, rawText);
+    this.rescueDiagnosisFromRawText(enriched, rawText);
+    this.rescueRecommendationsFromRawText(enriched, rawText);
+    this.rescueSparseClinicalContentFromRawText(enriched, rawText);
+    this.clearRiskAssessmentIfNotMentioned(enriched, rawText);
+    this.runSemanticRoutingPasses(enriched, rawText);
+
+    const message = cause instanceof Error ? cause.message : String(cause);
+    enriched.manualCheck = [
+      enriched.manualCheck,
+      `Причина fallback: ${message.slice(0, 240)}`,
+    ].filter(Boolean).join('\n');
+
+    return enriched;
   }
 
   private isBooleanPlaceholderDocument(document: MedicalDocument): boolean {
@@ -3977,7 +4386,20 @@ JSON:`;
     const normalizedAge = this.normalizeAge(enriched.patient.age);
     enriched.patient.age = normalizedAge || this.extractAgeFromText(rawText) || '';
 
+    const patientName = this.extractPatientNameFromText(rawText);
+    if (patientName && this.isWeakPatientName(enriched.patient.fullName)) {
+      enriched.patient.fullName = patientName;
+    }
+
     return enriched;
+  }
+
+  private isWeakPatientName(value: string | undefined): boolean {
+    const clean = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!clean) return true;
+    if (/^(?:пациент|пациентка|фио(?:\s+пациента)?|не\s+указано)$/iu.test(clean)) return true;
+    if (clean.length > 90 && /(?:диагноз|диагнос|жалоб|анамнез|лечени)/iu.test(clean)) return true;
+    return clean.split(/\s+/).filter(Boolean).length < 2;
   }
 
   private normalizeGender(value: string): string {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 interface WaveformVisualizerProps {
   isActive: boolean;
@@ -6,17 +6,15 @@ interface WaveformVisualizerProps {
 }
 
 export function WaveformVisualizer({ isActive, isPaused }: WaveformVisualizerProps) {
-  const [bars] = useState(() => Array.from({ length: 32 }, () => Math.random()));
-  const animationRef = useRef<number[]>(
-    bars.map(() => Math.random() * 0.5 + 0.5)
+  const [bars] = useState(() => Array.from({ length: 32 }, (_, index) => ((index * 37) % 100) / 100));
+  const [levels, setLevels] = useState<number[]>(
+    bars.map((value) => value * 0.5 + 0.5)
   );
 
   useEffect(() => {
     if (isActive && !isPaused) {
       const interval = setInterval(() => {
-        animationRef.current = animationRef.current.map(
-          () => Math.random() * 0.7 + 0.3
-        );
+        setLevels((current) => current.map(() => Math.random() * 0.7 + 0.3));
       }, 100);
       return () => clearInterval(interval);
     }
@@ -27,7 +25,7 @@ export function WaveformVisualizer({ isActive, isPaused }: WaveformVisualizerPro
       {bars.map((_, index) => {
         const delay = index * 0.05;
         const height = isActive && !isPaused 
-          ? `${animationRef.current[index] * 100}%`
+          ? `${levels[index] * 100}%`
           : '30%';
 
         return (

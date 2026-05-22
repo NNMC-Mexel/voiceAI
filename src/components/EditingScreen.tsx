@@ -10,6 +10,8 @@
   ListTodo,
   FlaskConical,
   Eye,
+  FileText,
+  Camera,
   ArrowLeft,
   Mic,
   Pause,
@@ -27,7 +29,7 @@
   VolumeX,
   ChevronDown,
 } from 'lucide-react';
-import type { MedicalDocument, MedicalDocumentTextField, PatientInfo, RiskAssessment } from '../types';
+import type { MedicalDocument, MedicalDocumentTextField, PatientInfo, QualityWarning, RiskAssessment } from '../types';
 import type { PatientSummary } from '../api/client';
 import { fieldLabels, patientFieldLabels, riskAssessmentLabels } from '../types';
 import { CollapsibleSection } from './CollapsibleSection';
@@ -37,7 +39,7 @@ import { useWakeWord } from '../hooks/useWakeWord';
 import { WaveformVisualizer } from './WaveformVisualizer';
 import { apiClient } from '../api/client';
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { dietTemplates } from '../data/dietTemplates';
+import { dietTemplates, findDietTemplate } from '../data/dietTemplates';
 import { examTemplates, formatExamTemplate } from '../data/examTemplates';
 
 interface EditingScreenProps {
@@ -46,19 +48,28 @@ interface EditingScreenProps {
   onPreview: () => void;
   onBack: () => void;
   rawTranscription?: string;
-  qualityWarnings?: string[];
+  qualityWarnings?: QualityWarning[];
   onRestructure?: () => Promise<void>;
   isRestructuring?: boolean;
   activePatient?: PatientSummary | null;
   onSaveToPatient?: (patientId: number) => Promise<void>;
   onCreatePatientFromDocument?: () => Promise<PatientSummary>;
   onOpenPatients?: () => void;
+  onDocumentSupplementUpload?: (file: File) => Promise<string | void>;
 }
 
 interface ChatMessage {
   role: 'user' | 'assistant';
   text: string;
   kind?: 'recommendations' | 'chat';
+}
+
+interface QualityIssue {
+  id: string;
+  severity: QualityWarning['severity'];
+  field?: string;
+  message: string;
+  evidence?: string;
 }
 
 type RewriteableField = MedicalDocumentTextField;
@@ -126,13 +137,13 @@ const sectionIcons: Record<MedicalDocumentTextField, React.ReactNode> = {
 };
 
 const DIET_ITEM_RE =
-  /^(\s*\d+[\.\)]\s*).{0,600}?(?:диет\S*|стол\s*(?:№?\s*)?\d+|гипохолестерин\S*|гипонатриев\S*)/iu;
+  /^(\s*\d+[.)]\s*).{0,600}?(?:диет\S*|стол\s*(?:№?\s*)?\d+|гипохолестерин\S*|гипонатриев\S*)/iu;
 
 function applyDietTemplateToRecommendations(current: string, templateText: string): string {
   const lines = (current || '').split(/\n+/).filter((l) => l.length > 0);
   const matchIdx = lines.findIndex((l) => DIET_ITEM_RE.test(l));
   if (matchIdx >= 0) {
-    const prefix = lines[matchIdx].match(/^\s*\d+[\.\)]\s*/)?.[0] ?? '';
+    const prefix = lines[matchIdx].match(/^\s*\d+[.)]\s*/)?.[0] ?? '';
     lines[matchIdx] = prefix + templateText;
     return lines.join('\n');
   }
@@ -148,19 +159,21 @@ function countMatches(text: string, pattern: RegExp): number {
 function buildQualityIssues(
   rawText: string,
   document: MedicalDocument,
-  serverWarnings: string[]
-): string[] {
-  const issues = new Set<string>();
+  serverWarnings: QualityWarning[]
+): QualityIssue[] {
+  const issues = new Map<string, QualityIssue>();
+  const add = (issue: Omit<QualityIssue, 'id'>) => {
+    const id = `${issue.severity}:${issue.field || ''}:${issue.evidence || ''}:${issue.message}`;
+    if (!issues.has(id)) issues.set(id, { id, ...issue });
+  };
+
   for (const warning of serverWarnings) {
-    if (warning.includes('important_number_missing')) {
-      issues.add('Возможна потеря важного числового значения.');
-    } else if (warning.includes('suspicious_unit_garbage')) {
-      issues.add('Есть подозрительные единицы измерения, проверьте анализы вручную.');
-    } else if (warning.includes('document_labs_only')) {
-      issues.add('Документ похож только на лабораторный блок, проверьте клинические разделы.');
-    } else {
-      issues.add(warning);
-    }
+    add({
+      severity: warning.severity,
+      field: warning.field,
+      evidence: warning.evidence,
+      message: warning.message || warning.code,
+    });
   }
 
   const rawLabSignals = countMatches(
@@ -172,10 +185,14 @@ function buildQualityIssues(
     /(?:гемоглобин|эритроцит|лейкоцит|тромбоцит|соэ|креатинин|мочевин|глюкоз|холестерин|лпнп|лпвп|триглицерид|калий|натрий|нитрит|бактери|hba1c|гликирован)/giu
   );
   if (rawLabSignals >= 8 && finalLabSignals < Math.floor(rawLabSignals * 0.65)) {
-    issues.add('Возможна потеря лабораторных значений: в транскрипции их заметно больше, чем в итоговом блоке.');
+    add({
+      severity: 'critical',
+      field: 'outpatientExams',
+      message: 'Возможна потеря лабораторных значений: в транскрипции их заметно больше, чем в итоговом блоке.',
+    });
   }
 
-  const rawBp = rawText.match(/\b\d{2,3}\s*(?:\/|на)\s*\d{2,3}\b/giu) || [];
+  const rawBp = rawText.match(/\b\d{2,3}\s*(?:[/]|на)\s*\d{2,3}\b/giu) || [];
   const finalBpText = [
     document.complaints,
     document.anamnesis,
@@ -186,21 +203,66 @@ function buildQualityIssues(
   for (const value of rawBp.slice(0, 8)) {
     const normalized = value.replace(/\s+на\s+/iu, '/').replace(/\s+/g, '');
     if (!finalBpText.replace(/\s+/g, '').includes(normalized)) {
-      issues.add(`Проверьте АД ${normalized}: значение есть в транскрипции, но может отсутствовать в итоговых полях.`);
+      add({
+        severity: 'critical',
+        field: 'document',
+        evidence: normalized,
+        message: `Проверьте АД ${normalized}: значение есть в транскрипции, но может отсутствовать в итоговых полях.`,
+      });
     }
   }
 
   const rawRecommendationItems = countMatches(rawText, /(?:цефиксим|канефрон|амлодипин|индапамид|аторвостатин|ограничить соль|питьевой режим|снижение массы)/giu);
-  const finalRecommendationItems = document.recommendations.split(/\n+/).filter((line) => /^\s*\d+[\.\)]\s+/.test(line)).length;
+  const finalRecommendationItems = document.recommendations.split(/\n+/).filter((line) => /^\s*\d+[.)]\s+/.test(line)).length;
   if (rawRecommendationItems >= 6 && finalRecommendationItems > 0 && finalRecommendationItems < 6) {
-    issues.add('Рекомендации могли склеиться: в исходном тексте больше отдельных назначений, чем пунктов в итоговом списке.');
+    add({
+      severity: 'warning',
+      field: 'recommendations',
+      message: 'Рекомендации могли склеиться: в исходном тексте больше отдельных назначений, чем пунктов в итоговом списке.',
+    });
   }
 
-  return Array.from(issues);
+  const priority: Record<QualityWarning['severity'], number> = { critical: 0, warning: 1, info: 2 };
+  return Array.from(issues.values()).sort((a, b) => priority[a.severity] - priority[b.severity]);
+}
+
+function expandShortDietReferencesInRecommendations(value: string): string {
+  const lines = value.split(/\n/);
+  let changed = false;
+
+  const nextLines = lines.map((line) => {
+    const match = line.match(/^(\s*\d+[.)]\s*)?(.+?)\s*$/u);
+    if (!match) return line;
+
+    const prefix = match[1] ?? '';
+    const body = match[2].trim();
+    if (body.length > 40) return line;
+    if (!/(?:диет\S*|стол\s*(?:№?\s*)?\d+|^\s*(?:№\s*|номер\s*)?\d+\s*[абвг]?\s*$)/iu.test(body)) {
+      return line;
+    }
+
+    const template = findDietTemplate(body);
+    if (!template) return line;
+
+    changed = true;
+    return prefix + template.description;
+  });
+
+  return changed ? nextLines.join('\n') : value;
 }
 
 const MIN_TEXTAREA_HEIGHT = 100;
 const MAX_TEXTAREA_HEIGHT = 420;
+const QUALITY_SEVERITY_LABEL: Record<QualityWarning['severity'], string> = {
+  critical: 'Критично',
+  warning: 'Проверить',
+  info: 'Инфо',
+};
+const QUALITY_SEVERITY_CLASS: Record<QualityWarning['severity'], string> = {
+  critical: 'border-red-200 bg-red-50 text-red-800',
+  warning: 'border-amber-200 bg-amber-50 text-amber-900',
+  info: 'border-slate-200 bg-slate-50 text-slate-700',
+};
 
 export function EditingScreen({
   document,
@@ -215,6 +277,7 @@ export function EditingScreen({
   onSaveToPatient,
   onCreatePatientFromDocument,
   onOpenPatients,
+  onDocumentSupplementUpload,
 }: EditingScreenProps) {
   const [savedToPatient, setSavedToPatient] = useState(false);
   const [savingToPatient, setSavingToPatient] = useState(false);
@@ -243,6 +306,7 @@ export function EditingScreen({
   const [isUpdating, setIsUpdating] = useState(false);
   const [addendumError, setAddendumError] = useState<string | null>(null);
   const [lastAddendumText, setLastAddendumText] = useState<string | null>(null);
+  const [isFileAdding, setIsFileAdding] = useState(false);
   const [chatInput, setChatInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
   const [voiceCommandError, setVoiceCommandError] = useState<string | null>(null);
@@ -251,7 +315,10 @@ export function EditingScreen({
   const [isRecommendationsLoading, setIsRecommendationsLoading] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [ttsEnabled, setTtsEnabled] = useState(false);
+  const [ttsError, setTtsError] = useState<string | null>(null);
   const autoApplyRef = useRef(false);
+  const supplementDocInputRef = useRef<HTMLInputElement>(null);
+  const supplementPhotoInputRef = useRef<HTMLInputElement>(null);
   const [isTtsSpeaking, setIsTtsSpeaking] = useState(false);
   const [isDietListOpen, setIsDietListOpen] = useState(false);
   const [isExamListOpen, setIsExamListOpen] = useState(false);
@@ -273,6 +340,7 @@ export function EditingScreen({
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsUrlRef = useRef<string | null>(null);
   const ttsGenRef = useRef(0);
+  const submitQuestionRef = useRef<(question: string) => Promise<void>>(async () => undefined);
   const textareaRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
 
   const resizeTextarea = useCallback((textarea: HTMLTextAreaElement | null) => {
@@ -311,15 +379,18 @@ export function EditingScreen({
 
   // Cleanup on unmount
   useEffect(() => {
+    const genRef = ttsGenRef;
+    const audioRef = currentAudioRef;
+    const urlRef = ttsUrlRef;
     return () => {
-      ttsGenRef.current++;
-      if (currentAudioRef.current) {
-        currentAudioRef.current.pause();
-        currentAudioRef.current = null;
+      genRef.current++;
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
       }
-      if (ttsUrlRef.current) {
-        URL.revokeObjectURL(ttsUrlRef.current);
-        ttsUrlRef.current = null;
+      if (urlRef.current) {
+        URL.revokeObjectURL(urlRef.current);
+        urlRef.current = null;
       }
     };
   }, []);
@@ -334,6 +405,7 @@ export function EditingScreen({
 
   const playTts = async (text: string) => {
     stopTts();
+    setTtsError(null);
     const gen = ++ttsGenRef.current;
     try {
       const clean = text
@@ -363,8 +435,11 @@ export function EditingScreen({
       audio.onended = cleanup;
       audio.onerror = cleanup;
       await audio.play();
-    } catch {
-      if (gen === ttsGenRef.current) setIsTtsSpeaking(false);
+    } catch (err) {
+      if (gen === ttsGenRef.current) {
+        setIsTtsSpeaking(false);
+        setTtsError(err instanceof Error ? err.message : 'Не удалось озвучить ответ');
+      }
     }
   };
 
@@ -540,6 +615,37 @@ export function EditingScreen({
     }
   };
 
+  const handleSupplementFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    if (!file || !onDocumentSupplementUpload) return;
+
+    const maxSize = 20 * 1024 * 1024;
+    if (file.size > maxSize) {
+      setAddendumError('Файл слишком большой. Максимум 20 МБ.');
+      input.value = '';
+      return;
+    }
+
+    setIsAddendumOpen(true);
+    setIsFileAdding(true);
+    setAddendumError(null);
+
+    void onDocumentSupplementUpload(file)
+      .then((text) => {
+        const extracted = typeof text === 'string' ? text.trim() : '';
+        if (extracted) setLastAddendumText(extracted);
+      })
+      .catch((err) => {
+        console.error('[Document supplement] Error:', err);
+        setAddendumError(err instanceof Error ? err.message : 'Не удалось добавить файл в документ');
+      })
+      .finally(() => {
+        input.value = '';
+        setIsFileAdding(false);
+      });
+  };
+
   const submitQuestion = async (question: string) => {
     const trimmedQuestion = question.trim();
     if (!trimmedQuestion || chatLoading || rewriteLoadingField !== null || isVoiceCommandProcessing) return;
@@ -617,6 +723,10 @@ export function EditingScreen({
     }
   };
 
+  useEffect(() => {
+    submitQuestionRef.current = submitQuestion;
+  });
+
   const applyQuickInstruction = async (instruction: string, label: string) => {
     if (chatLoading || isVoiceCommandProcessing || rewriteLoadingField !== null || quickFixLoading) return;
     setQuickFixLoading(label);
@@ -656,7 +766,7 @@ export function EditingScreen({
     await submitQuestion(question);
   };
 
-  const handleVoiceCommandToggle = async () => {
+  const handleVoiceCommandToggle = useCallback(async () => {
     if (chatLoading || isVoiceCommandProcessing || rewriteLoadingField !== null) return;
     setVoiceCommandError(null);
 
@@ -674,9 +784,18 @@ export function EditingScreen({
     } catch (err) {
       setVoiceCommandError(err instanceof Error ? err.message : 'Не удалось начать запись голосовой команды');
     }
-  };
+  }, [
+    chatLoading,
+    commandBlob,
+    isCommandRecording,
+    isVoiceCommandProcessing,
+    resetCommandRecording,
+    rewriteLoadingField,
+    startCommandRecording,
+    stopCommandRecording,
+  ]);
 
-  const handleMainDictationToggle = async () => {
+  const handleMainDictationToggle = useCallback(async () => {
     if (isUpdating) return;
 
     if (isAddendumRecording) {
@@ -702,7 +821,16 @@ export function EditingScreen({
         err instanceof Error ? err.message : 'Не удалось начать запись дополнения'
       );
     }
-  };
+  }, [
+    addendumBlob,
+    isAddendumOpen,
+    isAddendumPaused,
+    isAddendumRecording,
+    isUpdating,
+    pauseAddendumRecording,
+    resumeAddendumRecording,
+    startAddendumRecording,
+  ]);
 
   // Wake word: "Нави" starts addendum recording, "Стоп Нави" stops and auto-applies
   const handleWakeWord = useCallback(() => {
@@ -804,7 +932,7 @@ export function EditingScreen({
           return;
         }
 
-        await submitQuestion(spokenCommand);
+        await submitQuestionRef.current(spokenCommand);
       } catch (err) {
         setVoiceCommandError(
           err instanceof Error ? err.message : 'Не удалось обработать голосовую команду'
@@ -1014,11 +1142,19 @@ export function EditingScreen({
                 <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
                   <div className="mb-2 text-sm font-semibold text-amber-900">Проверить вручную</div>
                   {qualityIssues.length > 0 ? (
-                    <ul className="space-y-1 text-sm text-amber-900">
+                    <ul className="space-y-2 text-sm">
                       {qualityIssues.map((issue) => (
-                        <li key={issue} className="flex gap-2">
-                          <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-600" />
-                          <span>{issue}</span>
+                        <li key={issue.id} className={`rounded-lg border px-3 py-2 ${QUALITY_SEVERITY_CLASS[issue.severity]}`}>
+                          <div className="mb-1 flex flex-wrap items-center gap-2">
+                            <span className="text-[11px] font-semibold uppercase tracking-wide">{QUALITY_SEVERITY_LABEL[issue.severity]}</span>
+                            {issue.field && (
+                              <span className="rounded bg-white/70 px-1.5 py-0.5 text-[11px] text-slate-600">{issue.field}</span>
+                            )}
+                            {issue.evidence && (
+                              <span className="rounded bg-white/70 px-1.5 py-0.5 text-[11px] text-slate-600">{issue.evidence}</span>
+                            )}
+                          </div>
+                          <div>{issue.message}</div>
                         </li>
                       ))}
                     </ul>
@@ -1095,7 +1231,10 @@ export function EditingScreen({
                   </button>
                 )}
                 <button
-                  onClick={() => setTtsEnabled((v) => !v)}
+                  onClick={() => {
+                    setTtsError(null);
+                    setTtsEnabled((v) => !v);
+                  }}
                   title={ttsEnabled ? 'Выключить голос ИИ' : 'Включить голос ИИ'}
                   className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs transition-colors ${
                     ttsEnabled
@@ -1112,6 +1251,11 @@ export function EditingScreen({
                 </button>
               </div>
             </div>
+            {ttsError && (
+              <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                {ttsError}
+              </div>
+            )}
             <div className="mb-3">
               <button
                 onClick={() => void handleVoiceCommandToggle()}
@@ -1188,11 +1332,48 @@ export function EditingScreen({
                       Дополнение
                     </div>
                     <h2 className="text-base sm:text-lg font-semibold text-medical-900">
-                      Если забыли важную информацию — добавьте голосом
+                      Если забыли важную информацию — добавьте голосом, фото или документом
                     </h2>
-                    <p className="text-text-secondary text-sm mt-1">Дополнение будет расшифровано и встроено в текущий документ.</p>
+                    <p className="text-text-secondary text-sm mt-1">Дополнение будет распознано и встроено в текущий документ.</p>
                   </div>
-                  <div className="flex items-center gap-2 sm:shrink-0">
+                  <div className="flex flex-wrap items-center gap-2 sm:shrink-0">
+                    {onDocumentSupplementUpload && (
+                      <>
+                        <input
+                          ref={supplementDocInputRef}
+                          type="file"
+                          accept=".pdf,.docx,.doc,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                          onChange={handleSupplementFileChange}
+                          className="hidden"
+                        />
+                        <input
+                          ref={supplementPhotoInputRef}
+                          type="file"
+                          accept="image/*"
+                          capture="environment"
+                          onChange={handleSupplementFileChange}
+                          className="hidden"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => supplementDocInputRef.current?.click()}
+                          disabled={isUpdating || isFileAdding}
+                          className="btn-secondary flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {isFileAdding ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
+                          PDF / Word
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => supplementPhotoInputRef.current?.click()}
+                          disabled={isUpdating || isFileAdding}
+                          className="btn-secondary flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {isFileAdding ? <Loader2 className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}
+                          Фото
+                        </button>
+                      </>
+                    )}
                     <button
                       onClick={() => setIsAddendumOpen((v) => !v)}
                       className="btn-secondary flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap"
@@ -1543,7 +1724,10 @@ export function EditingScreen({
                         <textarea
                           ref={bindTextareaRef('recommendations')}
                           value={document.recommendations}
-                          onChange={(e) => handleFieldChange('recommendations', e.target.value)}
+                          onChange={(e) => handleFieldChange(
+                            'recommendations',
+                            expandShortDietReferencesInRecommendations(e.target.value)
+                          )}
                           onInput={handleTextareaInput}
                           onMouseDown={handleTextareaMouseDown}
                           onContextMenu={(e) => handleTextareaContextMenu(e, 'recommendations')}

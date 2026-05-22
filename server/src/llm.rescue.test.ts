@@ -59,6 +59,28 @@ test('raw rescue reads recommendations block at end of text', () => {
   assert.match(doc.recommendations, /Контроль ФГДС/iu);
 });
 
+test('postprocess strips patient lead from complaints', () => {
+  const service = new LLMService(config) as any;
+  const doc = emptyDoc();
+  doc.patient.fullName = 'Оли Фрустам';
+  doc.complaints = 'Пациент Оли Фрустам болен, болит голова, отекают ноги, бронхиты.';
+
+  const result = service.validateAndCleanDocument(doc);
+
+  assert.equal(result.complaints, 'Болит голова, отекают ноги, бронхиты.');
+});
+
+test('postprocess expands short diet 1B recommendation', () => {
+  const service = new LLMService(config) as any;
+  const doc = emptyDoc();
+  doc.recommendations = '1. Диета №1Б';
+
+  const result = service.validateAndCleanDocument(doc);
+
+  assert.match(result.recommendations, /^1\. Диета №1б/u);
+  assert.match(result.recommendations, /при ГЭРБ/u);
+});
+
 test('empty structured result is rejected for meaningful source text', () => {
   const service = new LLMService(config) as any;
   const doc = emptyDoc();
@@ -70,4 +92,37 @@ test('empty structured result is rejected for meaningful source text', () => {
     ),
     /empty structured document/i
   );
+});
+
+test('semantic pass drops generic recommendations not supported by live dictation', () => {
+  const service = new LLMService(config) as any;
+  const doc = emptyDoc();
+  doc.patient.fullName = 'Иванов Иван Иванович';
+  doc.complaints = 'Головная боль';
+  doc.diagnosis = 'Артериальная гипертензия';
+  doc.recommendations = '1. Ограничить алкоголь и соблюдать диету\n2. Контроль веса';
+
+  service.runSemanticRoutingPasses(
+    doc,
+    'Пациент Иванов Иван Иванович. Жалобы на головную боль. Диагноз артериальная гипертензия.'
+  );
+
+  assert.equal(doc.recommendations, '');
+});
+
+test('semantic pass moves recommendation tail out of diagnosis', () => {
+  const service = new LLMService(config) as any;
+  const doc = emptyDoc();
+  doc.patient.fullName = 'Иванов Иван Иванович';
+  doc.complaints = 'Головная боль';
+  doc.diagnosis = 'Артериальная гипертензия. Рекомендовано: контроль АД, бисопролол 5 мг утром, повторный прием кардиолога.';
+
+  service.runSemanticRoutingPasses(
+    doc,
+    'Пациент Иванов Иван Иванович. Жалобы на головную боль. Диагноз: артериальная гипертензия. Рекомендовано: контроль АД, бисопролол 5 мг утром, повторный прием кардиолога.'
+  );
+
+  assert.equal(doc.diagnosis, 'Артериальная гипертензия');
+  assert.match(doc.recommendations, /бисопролол 5 мг/iu);
+  assert.match(doc.recommendations, /кардиолога/iu);
 });

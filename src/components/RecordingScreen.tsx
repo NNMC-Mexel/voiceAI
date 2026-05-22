@@ -16,6 +16,7 @@ interface PendingSync {
 interface RecordingScreenProps {
   onRecordingComplete: (audioBlob: Blob) => void;
   onRecordingStart?: () => void;
+  onRecordingTranscript?: (text: string, isFinal: boolean) => void;
   streamOptions?: VoiceRecorderStreamOptions;
   onDocumentUpload?: (file: File) => void;
   activePatient?: PatientSummary | null;
@@ -28,8 +29,16 @@ interface RecordingScreenProps {
   error?: string | null;
 }
 
+function formatExternalErrorMessage(message: string): string {
+  const isDocumentError = /документ|pdf|word|фото|изображ|vision|claude|anthropic|ollama|модель|model|распозна|баланс|средств/i.test(message);
+  return isDocumentError
+    ? `Ошибка обработки: ${message}`
+    : `Ошибка обработки: ${message}. Попробуйте записать снова.`;
+}
+
 export function RecordingScreen({
   onRecordingComplete, onRecordingStart, streamOptions, onDocumentUpload,
+  onRecordingTranscript,
   activePatient, onOpenPatients, onOpenSettings, onSyncUpload,
   pendingSyncs = [], onClaimSync, onDismissSync,
   error: externalError,
@@ -75,6 +84,7 @@ export function RecordingScreen({
     isRecording,
     onWakeWord: handleWakeWord,
     onStopWord: handleStopWord,
+    onTranscript: onRecordingTranscript,
   });
 
   // Auto-submit after stop word: when audioBlob appears and autoSubmit flag is set
@@ -88,12 +98,9 @@ export function RecordingScreen({
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const MAX_SIZE = 100 * 1024 * 1024; // 100 МБ
-    if (file.size > MAX_SIZE) {
-      setError('Файл слишком большой. Максимальный размер — 100 МБ.');
-      if (fileInputRef.current) fileInputRef.current.value = '';
-      return;
-    }
+    // Лимит размера аудио снят по требованию (ранее был 100 МБ).
+    // NB: Groq принимает ≤25 МБ (free) / ≤100 МБ (dev) — файлы крупнее
+    // автоматически уходят в fallback на локальный whisper-сервер.
     onRecordingComplete(file);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
@@ -115,9 +122,11 @@ export function RecordingScreen({
   useEffect(() => {
     const mediaDevices = navigator.mediaDevices;
     if (!mediaDevices?.getUserMedia) {
-      setHasPermission(false);
-      setError('Микрофон недоступен: откройте приложение по HTTPS или localhost.');
-      return;
+      const timer = window.setTimeout(() => {
+        setHasPermission(false);
+        setError('Микрофон недоступен: откройте приложение по HTTPS или localhost.');
+      }, 0);
+      return () => window.clearTimeout(timer);
     }
 
     mediaDevices
@@ -158,9 +167,10 @@ export function RecordingScreen({
         return;
       }
 
-      if (!!audioBlob) return;
+      if (audioBlob) return;
 
       setError(null);
+      onRecordingStart?.();
       void startRecording().catch((err) => {
         setError(err instanceof Error ? err.message : 'Ошибка записи');
       });
@@ -173,6 +183,7 @@ export function RecordingScreen({
     hasPermission,
     isPaused,
     isRecording,
+    onRecordingStart,
     pauseRecording,
     resumeRecording,
     startRecording,
@@ -295,7 +306,7 @@ export function RecordingScreen({
           {externalError && (
             <div className="flex items-center gap-3 p-4 bg-red-50 border border-red-200 rounded-xl mb-6">
               <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
-              <p className="text-red-700 text-sm">Ошибка обработки: {externalError}. Попробуйте записать снова.</p>
+              <p className="text-red-700 text-sm">{formatExternalErrorMessage(externalError)}</p>
             </div>
           )}
 
