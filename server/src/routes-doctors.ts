@@ -13,7 +13,7 @@ import type { AppDb } from './db/index.js';
 import { doctors, patients, visits, syncSessions } from './db/schema.js';
 import { DocumentExtractorService } from './services/document-extractor.js';
 import { LLMService } from './services/llm.js';
-import { documentFromExactSourceText, toSafeUploadFilename } from './routes.js';
+import { documentFromConsultationProtocolText, documentFromExactSourceText, toSafeUploadFilename } from './routes.js';
 import type { MedicalDocument } from './types.js';
 
 const BCRYPT_ROUNDS = 12;
@@ -93,8 +93,13 @@ export async function registerDoctorRoutes(
 
   /**
    * POST /api/auth/register
-   * Первый зарегистрированный врач становится admin, следующие — doctor.
+   * Первый зарегистрированный врач становится admin. Дальше врачей создаёт admin.
    */
+  fastify.get('/api/auth/setup-status', async () => {
+    const existing = db.select({ id: doctors.id }).from(doctors).limit(1).all();
+    return { setupRequired: existing.length === 0 };
+  });
+
   fastify.post('/api/auth/register', async (request: FastifyRequest, reply: FastifyReply) => {
     const body = request.body;
     if (!isRecord(body)) return reply.status(400).send({ error: 'Invalid body' });
@@ -113,7 +118,10 @@ export async function registerDoctorRoutes(
     }
 
     const existing = db.select({ id: doctors.id }).from(doctors).limit(1).all();
-    const role: DoctorRole = existing.length === 0 ? 'admin' : 'doctor';
+    if (existing.length > 0) {
+      return reply.status(403).send({ error: 'Регистрация закрыта. Новых врачей добавляет администратор в настройках.' });
+    }
+    const role: DoctorRole = 'admin';
 
     const emailExists = db.select({ id: doctors.id }).from(doctors).where(eq(doctors.email, email)).get();
     if (emailExists) {
@@ -752,9 +760,11 @@ export async function registerDoctorRoutes(
       (async () => {
         try {
           const extraction = await documentExtractor.extract(buffer, data.mimetype, filename);
-          const document = extraction.extractionMethod === 'vision'
-            ? documentFromExactSourceText(extraction.text)
-            : (await llmService.structureText(extraction.text)).document;
+          const protocolDocument = documentFromConsultationProtocolText(extraction.text);
+          const document = protocolDocument ||
+            (extraction.extractionMethod === 'vision'
+              ? documentFromExactSourceText(extraction.text)
+              : (await llmService.structureText(extraction.text)).document);
           db.update(syncSessions).set({
             status: 'ready',
             documentJson: JSON.stringify(document),

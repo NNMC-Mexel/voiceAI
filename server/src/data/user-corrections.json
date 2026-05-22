@@ -35,6 +35,14 @@
       "wrong": "Цификсим",
       "correct": "Цефиксим",
       "createdAt": "2026-04-23T03:41:11.629Z"
+    },
+    {
+      "id": "corr_1779416962838_2sag",
+      "wrong": "СН ФК",
+      "correct": "СН ФК II (NYHA)",
+      "createdAt": "2026-05-22T02:29:22.838Z",
+      "scope": "global",
+      "requireDose": false
     }
   ]
 }

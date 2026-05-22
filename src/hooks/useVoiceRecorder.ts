@@ -22,6 +22,11 @@ export function useVoiceRecorder(streamOptions?: VoiceRecorderStreamOptions) {
   const batchTimerRef = useRef<number | null>(null);
   const sentChunkCountRef = useRef(0);
   const batchIndexRef = useRef(0);
+  const streamOptionsRef = useRef(streamOptions);
+
+  useEffect(() => {
+    streamOptionsRef.current = streamOptions;
+  }, [streamOptions]);
 
   const pickSupportedMimeType = useCallback((): string => {
     const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
@@ -81,13 +86,14 @@ export function useVoiceRecorder(streamOptions?: VoiceRecorderStreamOptions) {
           : chunksRef.current;
 
         // Streaming: flush оставшиеся необработанные чанки как финальный батч
-        if (streamOptions?.onBatch) {
+        const activeStreamOptions = streamOptionsRef.current;
+        if (activeStreamOptions?.onBatch) {
           const sent = sentChunkCountRef.current;
           if (sent < chunks.length) {
             const remaining = chunks.slice(sent);
             const finalChunks = sent === 0 ? remaining : [chunks[0], ...remaining];
             const finalBlob = new Blob(finalChunks, { type: recorderMimeType });
-            streamOptions.onBatch(finalBlob, recorderMimeType, batchIndexRef.current++);
+            activeStreamOptions.onBatch(finalBlob, recorderMimeType, batchIndexRef.current++);
           }
         }
 
@@ -101,11 +107,14 @@ export function useVoiceRecorder(streamOptions?: VoiceRecorderStreamOptions) {
       timerRef.current = window.setInterval(updateDuration, 1000);
 
       // Streaming: отправляем батчи чанков во время записи
-      if (streamOptions) {
+      const activeStreamOptions = streamOptionsRef.current;
+      if (activeStreamOptions) {
         sentChunkCountRef.current = 0;
         batchIndexRef.current = 0;
-        const intervalMs = streamOptions.batchIntervalSeconds * 1000;
+        const intervalMs = activeStreamOptions.batchIntervalSeconds * 1000;
         batchTimerRef.current = window.setInterval(() => {
+          const currentStreamOptions = streamOptionsRef.current;
+          if (!currentStreamOptions) return;
           const curr = chunksRef.current.length;
           const sent = sentChunkCountRef.current;
           // Ждём минимум 5 чанков (5 сек), чтобы webm-контейнер был валидным
@@ -116,7 +125,7 @@ export function useVoiceRecorder(streamOptions?: VoiceRecorderStreamOptions) {
           // Батч 0 содержит header, остальные батчи префиксируем chunk[0] (webm header)
           const batchChunks = sent === 0 ? newChunks : [chunksRef.current[0], ...newChunks];
           const blob = new Blob(batchChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
-          streamOptions.onBatch(blob, mediaRecorder.mimeType || 'audio/webm', batchIndexRef.current++);
+          currentStreamOptions.onBatch(blob, mediaRecorder.mimeType || 'audio/webm', batchIndexRef.current++);
         }, intervalMs);
       }
 

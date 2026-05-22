@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Lock, UserPlus } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type { DoctorInfo } from '../api/client';
@@ -15,11 +15,27 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
   const [specialty, setSpecialty] = useState('');
   const [error, setError]       = useState('');
   const [loading, setLoading]   = useState(false);
+  const [setupRequired, setSetupRequired] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiClient.getSetupStatus()
+      .then((status) => {
+        if (cancelled) return;
+        setSetupRequired(status.setupRequired);
+        if (!status.setupRequired) setMode('login');
+      })
+      .catch(() => {
+        if (!cancelled) setSetupRequired(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email.trim() || !password.trim()) return;
     if (mode === 'register' && !name.trim()) return;
+    if (mode === 'register' && !setupRequired) return;
 
     setLoading(true);
     setError('');
@@ -118,11 +134,14 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
 
           <button
             type="button"
+            disabled={mode === 'login' && !setupRequired}
             onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError(''); }}
-            className="w-full text-center text-sm text-medical-600 hover:text-medical-700 py-1"
+            className="w-full text-center text-sm text-medical-600 hover:text-medical-700 py-1 disabled:cursor-default disabled:text-text-muted"
           >
             {mode === 'login'
-              ? <><UserPlus className="inline w-4 h-4 mr-1" />Первый вход? Создать аккаунт</>
+              ? setupRequired
+                ? <><UserPlus className="inline w-4 h-4 mr-1" />Первый вход? Создать аккаунт</>
+                : 'Вход только для добавленных врачей'
               : 'Уже есть аккаунт? Войти'}
           </button>
         </form>

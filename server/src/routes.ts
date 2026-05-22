@@ -224,6 +224,235 @@ function cleanExactOutpatientExams(rawText: string, patient: MedicalDocument['pa
     .trim();
 }
 
+const CONSULTATION_SECTION_FIELDS: Array<[RegExp, RewriteableField]> = [
+  [/^Жалобы$/iu, 'complaints'],
+  [/^Анамнез\s+заболевания$/iu, 'anamnesis'],
+  [/^Амбулаторные\s+обследования$/iu, 'outpatientExams'],
+  [/^Анамнез\s+жизни$/iu, 'clinicalCourse'],
+  [/^Аллергологический\s+анамнез$/iu, 'allergyHistory'],
+  [/^Объективный\s+статус$/iu, 'objectiveStatus'],
+  [/^Неврологический\s+статус$/iu, 'neurologicalStatus'],
+  [/^Предварительный\s+диагноз$/iu, 'diagnosis'],
+  [/^Заключение$/iu, 'finalDiagnosis'],
+  [/^План\s+обследования$/iu, 'doctorNotes'],
+  [/^Рекомендации\s*\/\s*План\s+лечения$/iu, 'recommendations'],
+  [/^План\s+лечения$/iu, 'recommendations'],
+  [/^Рекомендации$/iu, 'recommendations'],
+  [/^Амбулаторная\s+терапия$/iu, 'conclusion'],
+];
+
+function stripPlaceholderValue(value: string): string {
+  const clean = value.replace(/\s+/g, ' ').trim();
+  return clean === '-' || clean === '—' ? '' : clean;
+}
+
+function normalizeDmyOrIsoDate(value: string): string {
+  const clean = stripPlaceholderValue(value);
+  const dmy = clean.match(/\b(\d{2}\.\d{2}\.\d{4})\b/u)?.[1];
+  if (dmy) return dmyToIso(dmy);
+
+  const iso = clean.match(/\b(\d{4}-\d{2}-\d{2})\b/u)?.[1];
+  return iso || clean;
+}
+
+function consultationFieldFromHeading(line: string): RewriteableField | null {
+  const heading = line.replace(/\s+/g, ' ').replace(/[:.]+$/u, '').trim();
+  for (const [pattern, field] of CONSULTATION_SECTION_FIELDS) {
+    if (pattern.test(heading)) return field;
+  }
+  return null;
+}
+
+function consultationInlineSection(line: string): { field: RewriteableField; content: string } | null {
+  const match = line.match(/^(.{3,80}?):\s*(.+)$/u);
+  if (!match) return null;
+
+  const field = consultationFieldFromHeading(match[1]);
+  if (!field) return null;
+
+  return { field, content: match[2].trim() };
+}
+
+function isConsultationServiceLine(line: string): boolean {
+  return /^--\s*\d+\s+of\s+\d+\s*--$/iu.test(line) ||
+    /^Подпись\s+врача$/iu.test(line) ||
+    /^Документ\s+сформирован\s+автоматически(?:\s|$)/iu.test(line);
+}
+
+function appendProtocolLine(
+  sections: Record<RewriteableField, string[]>,
+  field: RewriteableField | null,
+  line: string,
+) {
+  if (!field) return;
+  const clean = line
+    .trim()
+    .replace(/(?<![А-ЯЁа-яёA-Za-z])Н(?:ь|Ь|b|B|в|В)(?=\s*[-–—]\s*\d)/gu, 'Hb');
+  if (!clean) return;
+  sections[field].push(clean);
+}
+
+export function documentFromConsultationProtocolText(rawText: string): MedicalDocument | null {
+  const lines = toCleanOcrLines(rawText).filter((line) => !isConsultationServiceLine(line));
+  const hasProtocolMarker = lines.some((line) => /^КОНСУЛЬТАЦИЯ$/iu.test(line)) ||
+    lines.some((line) => /^Дата\s+составления:/iu.test(line));
+  const sectionHeadingCount = lines.filter((line) => consultationFieldFromHeading(line)).length;
+  const hasOutpatientSection = lines.some((line) =>
+    consultationFieldFromHeading(line) === 'outpatientExams' ||
+    consultationInlineSection(line)?.field === 'outpatientExams',
+  );
+
+  if (!hasProtocolMarker && sectionHeadingCount < 2 && !hasOutpatientSection) {
+    return null;
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const patient: MedicalDocument['patient'] = {
+    fullName: '',
+    age: '',
+    gender: '',
+    complaintDate: '',
+    birthDate: '',
+  };
+  const riskAssessment: MedicalDocument['riskAssessment'] = {
+    fallInLast3Months: '',
+    dizzinessOrWeakness: '',
+    needsEscort: '',
+    painScore: '',
+  };
+  const sections = Object.fromEntries(
+    rewriteableFields.map((field) => [field, [] as string[]]),
+  ) as Record<RewriteableField, string[]>;
+
+  let documentDate = '';
+  let currentField: RewriteableField | null = null;
+  let matchedProtocolField = false;
+
+  for (const line of lines) {
+    const inlineSection = consultationInlineSection(line);
+    if (inlineSection) {
+      currentField = inlineSection.field;
+      appendProtocolLine(sections, currentField, inlineSection.content);
+      matchedProtocolField = true;
+      continue;
+    }
+
+    const headingField = consultationFieldFromHeading(line);
+    if (headingField) {
+      currentField = headingField;
+      matchedProtocolField = true;
+      continue;
+    }
+
+    if (/^(?:КОНСУЛЬТАЦИЯ|Оценка\s+риска\s+\(шкала\s+Морзе\))$/iu.test(line)) {
+      currentField = null;
+      matchedProtocolField = true;
+      continue;
+    }
+
+    if (currentField) {
+      appendProtocolLine(sections, currentField, line);
+      continue;
+    }
+
+    let match = line.match(/^Дата\s+составления:\s*(.+)$/iu);
+    if (match) {
+      documentDate = normalizeDmyOrIsoDate(match[1]);
+      currentField = null;
+      matchedProtocolField = true;
+      continue;
+    }
+
+    match = line.match(/^ФИО\s+пациента:\s*(.+)$/iu);
+    if (match) {
+      patient.fullName = stripPlaceholderValue(match[1]);
+      currentField = null;
+      matchedProtocolField = true;
+      continue;
+    }
+
+    match = line.match(/^Возраст:\s*(.+)$/iu);
+    if (match) {
+      patient.age = stripPlaceholderValue(match[1]);
+      currentField = null;
+      matchedProtocolField = true;
+      continue;
+    }
+
+    match = line.match(/^Пол:\s*(.+)$/iu);
+    if (match) {
+      patient.gender = stripPlaceholderValue(match[1]);
+      currentField = null;
+      matchedProtocolField = true;
+      continue;
+    }
+
+    match = line.match(/^Дата\s+обращения:\s*(.+)$/iu);
+    if (match) {
+      patient.complaintDate = normalizeDmyOrIsoDate(match[1]);
+      currentField = null;
+      matchedProtocolField = true;
+      continue;
+    }
+
+    match = line.match(/^Падал\s*\(3\s*мес\.?\):\s*(.+)$/iu);
+    if (match) {
+      riskAssessment.fallInLast3Months = stripPlaceholderValue(match[1]);
+      currentField = null;
+      matchedProtocolField = true;
+      continue;
+    }
+
+    match = line.match(/^Головокружение:\s*(.+)$/iu);
+    if (match) {
+      riskAssessment.dizzinessOrWeakness = stripPlaceholderValue(match[1]);
+      currentField = null;
+      matchedProtocolField = true;
+      continue;
+    }
+
+    match = line.match(/^Сопровождение:\s*(.+)$/iu);
+    if (match) {
+      riskAssessment.needsEscort = stripPlaceholderValue(match[1]);
+      currentField = null;
+      matchedProtocolField = true;
+      continue;
+    }
+
+    match = line.match(/^Оценка\s+боли:\s*(.+)$/iu);
+    if (match) {
+      riskAssessment.painScore = stripPlaceholderValue(match[1]).replace(/\s*б(?:алл[а-я]*)?\.?$/iu, '');
+      currentField = null;
+      matchedProtocolField = true;
+      continue;
+    }
+
+    appendProtocolLine(sections, currentField, line);
+  }
+
+  patient.complaintDate = patient.complaintDate || documentDate || today;
+
+  const document: MedicalDocument = {
+    patient,
+    riskAssessment,
+    complaints: sections.complaints.join('\n').trim(),
+    anamnesis: sections.anamnesis.join('\n').trim(),
+    outpatientExams: sections.outpatientExams.join('\n').trim(),
+    clinicalCourse: sections.clinicalCourse.join('\n').trim(),
+    allergyHistory: sections.allergyHistory.join('\n').trim(),
+    objectiveStatus: sections.objectiveStatus.join('\n').trim(),
+    neurologicalStatus: sections.neurologicalStatus.join('\n').trim(),
+    diagnosis: sections.diagnosis.join('\n').trim(),
+    finalDiagnosis: sections.finalDiagnosis.join('\n').trim(),
+    conclusion: sections.conclusion.join('\n').trim(),
+    doctorNotes: sections.doctorNotes.join('\n').trim(),
+    recommendations: sections.recommendations.join('\n').trim(),
+  };
+
+  const hasSectionContent = rewriteableFields.some((field) => document[field].trim().length > 0);
+  return matchedProtocolField && (hasProtocolMarker || hasSectionContent) ? document : null;
+}
+
 export function documentFromExactSourceText(rawText: string, base?: MedicalDocument): MedicalDocument {
   const patient = extractPatientFromExactText(rawText);
   const text = cleanExactOutpatientExams(rawText, patient);
@@ -311,7 +540,7 @@ const NON_EXAMS_CLINICAL_FIELDS = [
 ] as const;
 
 const SUSPICIOUS_UNIT_GARBAGE_RE =
-  /(?:СЛЧЭЛЬ|СЛЦАЛЬ|ЛЩЕ|ММС\s+ЛЩЕ|ГЭСЛЧЭЛЬ|ГЕСЛШЕЛЬ|КОЭСЛЧ|МОЛЬСЛЧ|МГСЛЧЭЛЬ)/iu;
+  /(?<![А-ЯЁа-яёA-Za-z])(?:СЛЧЭЛЬ|СЛЦАЛЬ|ЛЩЕ|ММС\s+ЛЩЕ|ГЭСЛЧЭЛЬ|ГЕСЛШЕЛЬ|КОЭСЛЧ|МОЛЬСЛЧ|МГСЛЧЭЛЬ)(?![А-ЯЁа-яёA-Za-z])/iu;
 
 function documentClinicalText(doc: MedicalDocument): string {
   return [
@@ -360,6 +589,15 @@ export function collectDocumentQualityWarningDetails(
     warnings.push(warning);
   };
   const docText = documentClinicalText(doc);
+
+  if (isWeakPatientName(doc.patient?.fullName)) {
+    add({
+      code: 'patient_identity_missing',
+      severity: 'info',
+      field: 'patient',
+      message: 'ФИО пациента не найдено в диктовке. Для live-диктанта врач должен продиктовать пациента или заполнить поле вручную.',
+    });
+  }
 
   if (usefulness.status === 'labs_only') {
     add({
@@ -419,6 +657,189 @@ function normalizeForCoverage(value: string): string {
     .trim();
 }
 
+function appendManualCheck(doc: MedicalDocument, message: string): void {
+  const current = (doc.manualCheck || '').trim();
+  if (current.includes(message)) return;
+  doc.manualCheck = current ? `${current}\n${message}` : message;
+}
+
+function tokenCoverage(reference: string, actual: string): number | null {
+  const refTokens = new Set(
+    normalizeForCoverage(reference)
+      .split(/\s+/)
+      .filter((token) => token.length >= 4),
+  );
+  if (refTokens.size === 0) return null;
+
+  const actualTokens = new Set(
+    normalizeForCoverage(actual)
+      .split(/\s+/)
+      .filter((token) => token.length >= 4),
+  );
+
+  let found = 0;
+  for (const token of refTokens) {
+    if (actualTokens.has(token)) found++;
+  }
+  return Math.round((found / refTokens.size) * 100);
+}
+
+function sentenceCoverage(reference: string, actual: string): { total: number; found: number; percent: number | null; missing: string[] } {
+  const actualNorm = normalizeForCoverage(actual);
+  const sentences = reference
+    .split(/(?<=[.!?])\s+|\n+/u)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => normalizeForCoverage(sentence).length >= 25);
+
+  let found = 0;
+  const missing: string[] = [];
+
+  for (const sentence of sentences) {
+    const normalized = normalizeForCoverage(sentence);
+    const probes = [
+      normalized.slice(0, Math.min(35, normalized.length)),
+      normalized.slice(Math.max(0, Math.floor(normalized.length / 2) - 18), Math.floor(normalized.length / 2) + 18),
+      normalized.slice(Math.max(0, normalized.length - 35)),
+    ].filter((probe) => probe.length >= 18);
+
+    if (probes.some((probe) => actualNorm.includes(probe))) {
+      found++;
+    } else {
+      missing.push(sentence);
+    }
+  }
+
+  return {
+    total: sentences.length,
+    found,
+    percent: sentences.length ? Math.round((found / sentences.length) * 100) : null,
+    missing: missing.slice(0, 5),
+  };
+}
+
+function isWeakPatientName(value: string | undefined): boolean {
+  const clean = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return true;
+  if (/^(?:пациент|пациентка|фио(?:\s+пациента)?|не\s+указано)$/iu.test(clean)) return true;
+  if (/^(?:и\.?\s*о\.?|ф\.?\s*и\.?\s*о\.?)[\s!.,:;-]+/iu.test(clean)) return true;
+  if (clean.length > 90 && /(?:диагноз|диагнос|жалоб|анамнез|лечени)/iu.test(clean)) return true;
+  return clean.split(/\s+/).filter(Boolean).length < 2;
+}
+
+export function extractPatientHintsFromFilename(originalName: string): Partial<MedicalDocument['patient']> {
+  const base = path.parse(path.basename(originalName)).name
+    .replace(/__\d+_audio$/iu, '')
+    .replace(/__audio$/iu, '')
+    .replace(/[_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const firstPart = base.split(',')[0]?.trim() || '';
+  const nameMatch = firstPart.match(/^([А-ЯЁӘІҢҒҮҰҚӨҺA-Z][А-ЯЁӘІҢҒҮҰҚӨҺа-яёәіңғүұқөһA-Za-z'-]+(?:\s+[А-ЯЁӘІҢҒҮҰҚӨҺA-Z][А-ЯЁӘІҢҒҮҰҚӨҺа-яёәіңғүұқөһA-Za-z'-]+){1,3})$/u);
+  const fullName = nameMatch?.[1] || '';
+  const birthDate = base.match(/\b(\d{2})\.(\d{2})\.(\d{4})\s*г?\.?\s*р?\.?/iu);
+  const yearOnly = !birthDate ? base.match(/\b((?:19|20)\d{2})\s*г?\.?\s*р?\.?/iu) : null;
+  const gender = /\bжен(?:ский)?\b/iu.test(base)
+    ? 'женский'
+    : /\bмуж(?:ской)?\b/iu.test(base)
+      ? 'мужской'
+      : '';
+
+  const hints: Partial<MedicalDocument['patient']> = {};
+  if (fullName && !/^(?:документ|шаблон|консультаци|назначения|выписки|протоколы)$/iu.test(fullName)) {
+    hints.fullName = fullName;
+  }
+  if (birthDate) {
+    hints.birthDate = `${birthDate[3]}-${birthDate[2]}-${birthDate[1]}`;
+  } else if (yearOnly) {
+    hints.birthDate = yearOnly[1];
+  }
+  if (gender) hints.gender = gender;
+  return hints;
+}
+
+export function enrichDocumentFromSourceName(
+  doc: MedicalDocument,
+  originalName: string,
+): { document: MedicalDocument; warnings: QualityWarning[] } {
+  const hints = extractPatientHintsFromFilename(originalName);
+  const warnings: QualityWarning[] = [];
+  if (!hints.fullName && !hints.birthDate && !hints.gender) {
+    return { document: doc, warnings };
+  }
+
+  const enriched: MedicalDocument = {
+    ...doc,
+    patient: { ...doc.patient },
+    riskAssessment: { ...doc.riskAssessment },
+  };
+
+  if (hints.fullName && isWeakPatientName(enriched.patient.fullName)) {
+    enriched.patient.fullName = hints.fullName;
+    appendManualCheck(enriched, `ФИО пациента подставлено из имени файла: ${hints.fullName}. Проверьте вручную.`);
+    warnings.push({
+      code: 'patientNameFromFilename',
+      severity: 'info',
+      field: 'patient',
+      message: 'ФИО пациента не было надежно извлечено из диктовки и подставлено из имени файла.',
+      evidence: hints.fullName,
+    });
+  }
+  if (hints.birthDate && !enriched.patient.birthDate) {
+    enriched.patient.birthDate = hints.birthDate;
+  }
+  if (hints.gender && !enriched.patient.gender) {
+    enriched.patient.gender = hints.gender;
+  }
+
+  return { document: enriched, warnings };
+}
+
+function warningCodes(warnings: QualityWarning[]): string[] {
+  return [...new Set(warnings.map((warning) => warning.code === 'important_number_missing'
+    ? `important_number_missing:${warning.evidence || 'value'}`
+    : warning.code))];
+}
+
+function isRetryableLlmError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /timeout|таймаут|aborted|ECONNRESET|ECONNREFUSED|fetch failed|socket|503|502|500|json|parse|expected|unterminated|text\.trim is not a function/i.test(message);
+}
+
+async function structureTextWithRetry(
+  llmService: LLMService,
+  text: string,
+  attempts = 2,
+): Promise<Awaited<ReturnType<LLMService['structureText']>>> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await llmService.structureText(text);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts || !isRetryableLlmError(error)) break;
+      const delayMs = 1200 * attempt;
+      console.warn(`[llm] structureText failed on attempt ${attempt}/${attempts}; retrying in ${delayMs}ms`, error);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError;
+}
+
+export async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timeout = setTimeout(() => resolve(fallback), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 function collectAdvancedQualityWarnings(
   rawText: string,
   doc: MedicalDocument,
@@ -427,13 +848,55 @@ function collectAdvancedQualityWarnings(
   const rawNorm = normalizeForCoverage(rawText);
   const docText = documentClinicalText(doc);
 
+  const tokenPct = tokenCoverage(rawText, docText);
+  const sentencePct = sentenceCoverage(rawText, docText);
+  if (tokenPct !== null && tokenPct < 60) {
+    add({
+      code: 'lowDocumentCoverage',
+      severity: tokenPct < 40 ? 'critical' : 'warning',
+      field: 'document',
+      message: `Итоговый документ покрывает только ${tokenPct}% значимых слов raw-текста. Возможна потеря клинических данных.`,
+      evidence: `token_${tokenPct}`,
+    });
+  }
+  if (sentencePct.percent !== null && sentencePct.percent < 50) {
+    add({
+      code: 'lowDocumentCoverage',
+      severity: sentencePct.percent < 25 ? 'critical' : 'warning',
+      field: 'document',
+      message: `Итоговый документ покрывает только ${sentencePct.percent}% предложений raw-текста. Проверьте пропущенные фрагменты.`,
+      evidence: `sentence_${sentencePct.percent}`,
+    });
+  }
+
+  const criticalFieldChecks: Array<{ field: keyof Pick<MedicalDocument, 'complaints' | 'diagnosis' | 'recommendations'>; raw: RegExp; label: string }> = [
+    { field: 'complaints', raw: /(?:жалоб[а-яё]*|беспоко[а-яё]*|предъявля[а-яё]*|отмеча[а-яё]*)/iu, label: 'жалобы' },
+    { field: 'diagnosis', raw: /(?:диагноз|код\s+мкб|мкб|основн[а-яё]*\s+заболеван[а-яё]*)/iu, label: 'диагноз' },
+    { field: 'recommendations', raw: /(?:рекоменд[а-яё]*|назнач[а-яё]*|план\s+лечени[а-яё]*|принимать|контроль)/iu, label: 'рекомендации' },
+  ];
+  for (const check of criticalFieldChecks) {
+    if (check.raw.test(rawText) && !doc[check.field]?.trim()) {
+      add({
+        code: 'criticalFieldMissing',
+        severity: 'warning',
+        field: check.field,
+        message: `В raw есть маркеры раздела "${check.label}", но итоговое поле пустое.`,
+        evidence: check.field,
+      });
+    }
+  }
+
   const rawLabish = /(?:оак|оам|биохим|анализ|гемоглобин|креатинин|глюкоз|холестерин|лпнп|лпвп|триглицерид|лейкоцит|эритроцит|тромбоцит|соэ|hba1c|гликирован)/iu.test(rawText);
   if (rawLabish) {
-    const values = rawText.match(/\d+(?:[,.]\d+)?/gu) || [];
-    for (const value of values) {
+    const valueMatches = rawText.matchAll(/\d+(?:[,.]\d+)?/gu);
+    for (const match of valueMatches) {
+      const value = match[0];
+      const index = match.index ?? 0;
+      const after = rawText.slice(index + value.length, index + value.length + 8);
       const compact = value.replace(',', '.');
       if (/^\d{1,2}$/.test(compact)) continue;
       if (/^(?:19|20)\d{2}$/.test(compact)) continue;
+      if (/^\d{1,2}\.\d{1,2}$/.test(value) && /^\.\d{2,4}\b/.test(after)) continue;
       const docHas = docText.includes(value) || docText.includes(value.replace(',', '.')) || docText.includes(value.replace('.', ','));
       if (!docHas) {
         add({
@@ -485,6 +948,24 @@ function collectAdvancedQualityWarnings(
       field: 'recommendations',
       message: 'В рекомендациях обнаружена фраза, похожая на анамнез жизни.',
       evidence: lifeHistoryInRecommendations.slice(0, 160),
+    });
+  }
+
+  const rawHasRecommendationIntent = /(?:рекоменд|назнач|план\s+лечени|лечение|принимать|контроль|повторн\S+\s+(?:осмотр|прием|приём)|консультаци|диет|стол\s*№|режим|огранич)/iu.test(rawText);
+  const unsupportedRecommendation = (doc.recommendations || '')
+    .split(/\n+/)
+    .map((line) => line.replace(/^\s*\d+[\.)]\s*/, '').trim())
+    .find((line) => {
+      if (!line || rawHasRecommendationIntent) return false;
+      return /(?:диет|питани|ограничить|исключить|алкогол|курени|физическ\S+\s+активн|контроль\s+(?:ад|веса|массы)|здоров\S+\s+образ)/iu.test(line);
+    });
+  if (unsupportedRecommendation) {
+    add({
+      code: 'unsupportedRecommendation',
+      severity: 'warning',
+      field: 'recommendations',
+      message: 'В рекомендациях есть типовой пункт, но в raw-диктовке нет явного назначения или рекомендации.',
+      evidence: unsupportedRecommendation.slice(0, 160),
     });
   }
 
@@ -641,6 +1122,58 @@ interface StreamSession {
   createdAt: number;
 }
 
+type AudioJobStatus = 'queued' | 'transcribing' | 'structuring' | 'done' | 'failed';
+
+interface AudioProcessSuccess {
+  success: true;
+  transcription: {
+    text: string;
+    duration: number;
+    language: string;
+  };
+  document: MedicalDocument;
+  processingTime: number;
+  warnings: string[];
+  qualityWarnings: QualityWarning[];
+  timingsMs: {
+    saveFile: number;
+    whisper: number;
+    llm: number;
+    total: number;
+  };
+}
+
+interface AudioProcessFailurePayload {
+  success: false;
+  error: string;
+  message?: string;
+  reason?: string;
+  emptyFields?: string[];
+  placeholderFields?: string[];
+  transcription?: AudioProcessSuccess['transcription'];
+}
+
+interface AudioProcessHttpError extends Error {
+  statusCode: number;
+  payload: AudioProcessFailurePayload;
+}
+
+interface AudioProcessJob {
+  id: string;
+  status: AudioJobStatus;
+  filename: string;
+  sourceName: string;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  result?: AudioProcessSuccess;
+  error?: string;
+  message?: string;
+  statusCode?: number;
+  transcription?: AudioProcessSuccess['transcription'];
+}
+
 const streamSessions = new Map<string, StreamSession>();
 const STREAM_SESSION_TTL_MS = 30 * 60 * 1000;
 
@@ -677,6 +1210,8 @@ export async function registerRoutes(
   }
 
   const rateMap = new Map<string, RateState>();
+  const audioJobs = new Map<string, AudioProcessJob>();
+  const AUDIO_JOB_TTL_MS = 24 * 60 * 60 * 1000;
 
   // Сессионные токены с TTL. Без TTL — утечка памяти от мёртвых сессий.
   const AUTH_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 часа
@@ -708,6 +1243,12 @@ export async function registerRoutes(
     }
     for (const [sid, sess] of streamSessions) {
       if (now - sess.createdAt > STREAM_SESSION_TTL_MS) streamSessions.delete(sid);
+    }
+    for (const [jobId, job] of audioJobs) {
+      const updatedAt = Date.parse(job.updatedAt);
+      if (Number.isFinite(updatedAt) && now - updatedAt > AUDIO_JOB_TTL_MS) {
+        audioJobs.delete(jobId);
+      }
     }
   }, 60 * 60 * 1000);
   cleanupInterval.unref?.();
@@ -857,6 +1398,9 @@ export async function registerRoutes(
     if (!config.whisper.serverUrl) {
       return reply.status(503).send({ error: 'Streaming unavailable: Whisper HTTP server not configured' });
     }
+    if (!(await whisperService.healthCheck())) {
+      return reply.status(503).send({ error: 'Streaming unavailable: Whisper HTTP server is not reachable' });
+    }
     const sessionId = randomUUID();
     streamSessions.set(sessionId, { id: sessionId, jobs: [], createdAt: Date.now() });
     return { sessionId };
@@ -920,7 +1464,7 @@ export async function registerRoutes(
         'session chunks merged'
       );
 
-      const structured = await llmService.structureText(fullText);
+      const structured = await structureTextWithRetry(llmService, fullText);
       const t2 = Date.now();
 
       const usefulness = assessDocumentUsefulness(structured.document);
@@ -947,11 +1491,7 @@ export async function registerRoutes(
         transcription: { text: fullText, language: 'ru' },
         document: structured.document,
         processingTime: t2 - t0,
-        warnings: [...new Set(qualityWarnings.map((w) =>
-          w.code === 'important_number_missing'
-            ? `important_number_missing:${w.evidence || 'value'}`
-            : w.code
-        ))],
+        warnings: warningCodes(qualityWarnings),
         qualityWarnings,
       };
     } catch (error) {
@@ -965,9 +1505,11 @@ export async function registerRoutes(
   // ─────────────────────────────────────────────────────────────────────────────
 
   fastify.get('/api/health', async () => {
-    const [llmReady, whisperReady] = await Promise.all([
-      llmService.healthCheck(),
-      whisperService.healthCheck(),
+    const healthTimeoutMs = Number.parseInt(process.env.HEALTH_CHECK_TIMEOUT_MS || '3000', 10);
+    const [llmReady, whisperReady, ttsReady] = await Promise.all([
+      withTimeout(llmService.healthCheck(), healthTimeoutMs, false),
+      withTimeout(whisperService.healthCheck(), healthTimeoutMs, false),
+      ttsService.isEnabled ? withTimeout(ttsService.healthCheck(), healthTimeoutMs, false) : Promise.resolve(false),
     ]);
 
     return {
@@ -976,6 +1518,7 @@ export async function registerRoutes(
       services: {
         whisper: whisperReady ? 'ready' : 'unavailable',
         llm: llmReady ? 'ready' : 'unavailable',
+        tts: ttsService.isEnabled ? (ttsReady ? 'ready' : 'unavailable') : 'disabled',
       },
     };
   });
@@ -987,7 +1530,8 @@ export async function registerRoutes(
       return reply.status(400).send({ error: 'No file uploaded' });
     }
 
-    const sourceName = toSafeUploadFilename(data.filename);
+    const originalName = data.filename || 'audio';
+    const sourceName = toSafeUploadFilename(originalName);
     const filename = `${Date.now()}_${sourceName}`;
     const filepath = resolveUploadPath(config.uploadDir, filename);
 
@@ -1033,8 +1577,8 @@ export async function registerRoutes(
       };
     } catch (error) {
       console.error('Transcription error:', error);
-      return reply.status(500).send({
-        error: 'Transcription failed',
+      return reply.status(503).send({
+        error: 'Сервис распознавания речи недоступен',
         message: error instanceof Error ? error.message : 'Unknown error',
       });
     }
@@ -1049,7 +1593,7 @@ export async function registerRoutes(
     }
 
     try {
-      const result = await llmService.structureText(text);
+      const result = await structureTextWithRetry(llmService, text);
       // PHI-дамп (raw + JSON документа) пишется только при STRUCTURE_LOG_DUMP=true.
       // По умолчанию выключен: содержимое жалоб/анамнеза/диагноза — медданные.
       if (process.env.STRUCTURE_LOG_DUMP === 'true') {
@@ -1095,9 +1639,7 @@ export async function registerRoutes(
       return {
         success: true,
         ...result,
-        warnings: [...new Set(qualityWarnings.map((warning) => warning.code === 'important_number_missing'
-          ? `important_number_missing:${warning.evidence || 'value'}`
-          : warning.code))],
+        warnings: warningCodes(qualityWarnings),
         qualityWarnings,
       };
     } catch (error) {
@@ -1270,26 +1812,54 @@ export async function registerRoutes(
     }
   });
 
-  fastify.post('/api/process', async (request: FastifyRequest, reply: FastifyReply) => {
-    const data = await request.file();
+  const audioProcessError = (
+    statusCode: number,
+    payload: AudioProcessFailurePayload,
+  ): AudioProcessHttpError => {
+    const error = new Error(payload.message || payload.error) as AudioProcessHttpError;
+    error.statusCode = statusCode;
+    error.payload = payload;
+    return error;
+  };
 
-    if (!data) {
-      return reply.status(400).send({ error: 'No file uploaded' });
-    }
-
-    const sourceName = toSafeUploadFilename(data.filename);
-    const filename = `${Date.now()}_${sourceName}`;
-    const filepath = resolveUploadPath(config.uploadDir, filename);
-
+  const processSavedAudioFile = async (
+    filepath: string,
+    filename: string,
+    originalName: string,
+    sourceName: string,
+    t0: number,
+    t1: number,
+    onStatus?: (status: AudioJobStatus) => void,
+  ): Promise<AudioProcessSuccess> => {
     try {
-      const t0 = Date.now();
-      await pipeline(data.file, createWriteStream(filepath));
-      const t1 = Date.now();
-
+      onStatus?.('transcribing');
       const transcription = await whisperService.transcribeFile(filepath, filename);
       const t2 = Date.now();
 
-      const structured = await llmService.structureText(transcription.text);
+      onStatus?.('structuring');
+      let structured: Awaited<ReturnType<LLMService['structureText']>>;
+      try {
+        structured = await structureTextWithRetry(llmService, transcription.text);
+      } catch (structureError) {
+        const message = structureError instanceof Error ? structureError.message : 'Unknown error';
+        fastify.log.error(
+          { sourceName, transcriptionChars: transcription.text.length },
+          `process structure failed after successful transcription: ${message}`,
+        );
+        throw audioProcessError(isRetryableLlmError(structureError) ? 503 : 422, {
+          success: false,
+          error: 'structure_failed_after_transcription',
+          message,
+          transcription: {
+            text: transcription.text,
+            duration: transcription.duration,
+            language: transcription.language,
+          },
+        });
+      }
+
+      const sourceEnrichment = enrichDocumentFromSourceName(structured.document, originalName);
+      const document = sourceEnrichment.document;
       const t3 = Date.now();
 
       if (process.env.STRUCTURE_LOG_DUMP === 'true') {
@@ -1304,7 +1874,7 @@ export async function registerRoutes(
             transcription.text,
             '',
             `--- LLM STRUCTURED RESULT ---`,
-            JSON.stringify(structured.document, null, 2),
+            JSON.stringify(document, null, 2),
             '',
           ].join('\n');
           await appendFile(logPath, dump, 'utf-8');
@@ -1314,28 +1884,17 @@ export async function registerRoutes(
         }
       }
 
-      fastify.log.info(
-        {
-          timings_ms: {
-            save_file: t1 - t0,
-            whisper: t2 - t1,
-            llm: t3 - t2,
-            total: t3 - t0,
-          },
-        },
-        'process timings'
-      );
+      const timingsMs = {
+        saveFile: t1 - t0,
+        whisper: t2 - t1,
+        llm: t3 - t2,
+        total: t3 - t0,
+      };
+      fastify.log.info({ timings_ms: timingsMs }, 'process timings');
 
-      try {
-        await unlink(filepath);
-      } catch {
-        // Ignore cleanup errors
-      }
-
-      // Жёсткая проверка «полезности» — синхронно с /api/structure.
-      const usefulness = assessDocumentUsefulness(structured.document);
+      const usefulness = assessDocumentUsefulness(document);
       if (usefulness.status === 'empty') {
-        request.log.warn(
+        fastify.log.warn(
           {
             emptyFields: usefulness.emptyFields,
             placeholderFields: usefulness.placeholderFields,
@@ -1343,7 +1902,7 @@ export async function registerRoutes(
           },
           'process: document_appears_empty',
         );
-        return reply.status(422).send({
+        throw audioProcessError(422, {
           success: false,
           error: 'document_appears_empty',
           reason: usefulness.reason,
@@ -1357,7 +1916,10 @@ export async function registerRoutes(
         });
       }
 
-      const qualityWarnings = collectDocumentQualityWarningDetails(transcription.text, structured.document, usefulness);
+      const qualityWarnings = [
+        ...sourceEnrichment.warnings,
+        ...collectDocumentQualityWarningDetails(transcription.text, document, usefulness),
+      ];
 
       return {
         success: true,
@@ -1366,20 +1928,151 @@ export async function registerRoutes(
           duration: transcription.duration,
           language: transcription.language,
         },
-        document: structured.document,
+        document,
         processingTime: transcription.duration + structured.processingTime,
-        warnings: [...new Set(qualityWarnings.map((warning) => warning.code === 'important_number_missing'
-          ? `important_number_missing:${warning.evidence || 'value'}`
-          : warning.code))],
+        warnings: warningCodes(qualityWarnings),
         qualityWarnings,
+        timingsMs,
       };
-    } catch (error) {
-      console.error('Processing error:', error);
-
+    } finally {
       try {
         await unlink(filepath);
       } catch {
         // Ignore cleanup errors
+      }
+    }
+  };
+
+  const markAudioJob = (job: AudioProcessJob, status: AudioJobStatus): void => {
+    job.status = status;
+    job.updatedAt = new Date().toISOString();
+    if (status === 'transcribing' && !job.startedAt) {
+      job.startedAt = job.updatedAt;
+    }
+  };
+
+  const runAudioJob = async (
+    jobId: string,
+    filepath: string,
+    filename: string,
+    originalName: string,
+    sourceName: string,
+    t0: number,
+    t1: number,
+  ): Promise<void> => {
+    const job = audioJobs.get(jobId);
+    if (!job) return;
+
+    try {
+      const result = await processSavedAudioFile(filepath, filename, originalName, sourceName, t0, t1, (status) => {
+        markAudioJob(job, status);
+      });
+      job.status = 'done';
+      job.result = result;
+      job.transcription = result.transcription;
+      job.finishedAt = new Date().toISOString();
+      job.updatedAt = job.finishedAt;
+    } catch (error) {
+      const httpError = error as Partial<AudioProcessHttpError>;
+      const payload = httpError.payload;
+      job.status = 'failed';
+      job.statusCode = typeof httpError.statusCode === 'number' ? httpError.statusCode : 500;
+      job.error = payload?.error || 'Processing failed';
+      job.message = payload?.message || (error instanceof Error ? error.message : 'Unknown error');
+      job.transcription = payload?.transcription;
+      job.finishedAt = new Date().toISOString();
+      job.updatedAt = job.finishedAt;
+      fastify.log.error({ jobId, sourceName, statusCode: job.statusCode }, `audio job failed: ${job.message}`);
+    }
+  };
+
+  fastify.post('/api/jobs/audio', async (request: FastifyRequest, reply: FastifyReply) => {
+    const data = await request.file();
+
+    if (!data) {
+      return reply.status(400).send({ error: 'No file uploaded' });
+    }
+
+    const originalName = data.filename || 'audio';
+    const sourceName = toSafeUploadFilename(originalName);
+    const filename = `${Date.now()}_${sourceName}`;
+    const filepath = resolveUploadPath(config.uploadDir, filename);
+    const t0 = Date.now();
+
+    try {
+      await pipeline(data.file, createWriteStream(filepath));
+      const t1 = Date.now();
+      const nowIso = new Date().toISOString();
+      const jobId = randomUUID();
+      const job: AudioProcessJob = {
+        id: jobId,
+        status: 'queued',
+        filename,
+        sourceName,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      audioJobs.set(jobId, job);
+      void runAudioJob(jobId, filepath, filename, originalName, sourceName, t0, t1);
+
+      return reply.status(202).send({
+        success: true,
+        jobId,
+        status: job.status,
+        statusUrl: `/api/jobs/${jobId}`,
+      });
+    } catch (error) {
+      try {
+        await unlink(filepath);
+      } catch {
+        // Ignore cleanup errors
+      }
+      fastify.log.error({ sourceName }, `audio job upload failed: ${error}`);
+      return reply.status(500).send({
+        error: 'Audio job upload failed',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  });
+
+  fastify.get('/api/jobs/:id', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    const job = audioJobs.get(id);
+    if (!job) {
+      return reply.status(404).send({ error: 'Job not found or expired' });
+    }
+    return job;
+  });
+
+  fastify.delete('/api/jobs/:id', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    const deleted = audioJobs.delete(id);
+    return reply.status(deleted ? 200 : 404).send(deleted ? { success: true } : { error: 'Job not found or expired' });
+  });
+
+  fastify.post('/api/process', async (request: FastifyRequest, reply: FastifyReply) => {
+    const data = await request.file();
+
+    if (!data) {
+      return reply.status(400).send({ error: 'No file uploaded' });
+    }
+
+    const originalName = data.filename || 'audio';
+    const sourceName = toSafeUploadFilename(originalName);
+    const filename = `${Date.now()}_${sourceName}`;
+    const filepath = resolveUploadPath(config.uploadDir, filename);
+
+    try {
+      const t0 = Date.now();
+      await pipeline(data.file, createWriteStream(filepath));
+      const t1 = Date.now();
+      return await processSavedAudioFile(filepath, filename, originalName, sourceName, t0, t1);
+    } catch (error) {
+      console.error('Processing error:', error);
+
+      const httpError = error as Partial<AudioProcessHttpError>;
+      if (httpError.payload && typeof httpError.statusCode === 'number') {
+        return reply.status(httpError.statusCode).send(httpError.payload);
       }
 
       return reply.status(500).send({
@@ -1429,9 +2122,11 @@ export async function registerRoutes(
         'document extracted',
       );
 
-      const document = extraction.extractionMethod === 'vision'
-        ? documentFromExactSourceText(extraction.text)
-        : (await llmService.structureText(extraction.text)).document;
+      const protocolDocument = documentFromConsultationProtocolText(extraction.text);
+      const document = protocolDocument ||
+        (extraction.extractionMethod === 'vision'
+          ? documentFromExactSourceText(extraction.text)
+          : (await structureTextWithRetry(llmService, extraction.text)).document);
       const t2 = Date.now();
 
       const usefulness = assessDocumentUsefulness(document);
@@ -1457,7 +2152,10 @@ export async function registerRoutes(
       );
 
       fastify.log.info(
-        { timings_ms: { extract: t1 - t0, llm: t2 - t1, total: t2 - t0 } },
+        {
+          parser: protocolDocument ? 'consultation-protocol' : extraction.extractionMethod,
+          timings_ms: { extract: t1 - t0, structure: t2 - t1, total: t2 - t0 },
+        },
         'process-document timings',
       );
 
@@ -1472,15 +2170,7 @@ export async function registerRoutes(
         },
         document,
         processingTime: t2 - t0,
-        warnings: [
-          ...new Set(
-            qualityWarnings.map((w) =>
-              w.code === 'important_number_missing'
-                ? `important_number_missing:${w.evidence || 'value'}`
-                : w.code,
-            ),
-          ),
-        ],
+        warnings: warningCodes(qualityWarnings),
         qualityWarnings,
       };
     } catch (error) {

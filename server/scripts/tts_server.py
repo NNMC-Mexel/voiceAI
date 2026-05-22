@@ -46,6 +46,13 @@ SAMPLE_RATE = int(os.environ.get("TTS_SAMPLE_RATE", "48000"))
 PORT        = int(os.environ.get("TTS_SERVER_PORT", "5500"))
 HOST        = os.environ.get("TTS_SERVER_HOST", "0.0.0.0")
 
+# Torch hub may fail on Windows profile paths with non-ASCII characters.
+# Keep cache in a project-local ASCII path unless user explicitly overrides TORCH_HOME.
+if "TORCH_HOME" not in os.environ:
+    local_torch_home = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".torch_home"))
+    os.makedirs(local_torch_home, exist_ok=True)
+    os.environ["TORCH_HOME"] = local_torch_home
+
 logger.info("Loading Silero TTS model ...")
 t_start = time.time()
 
@@ -205,7 +212,7 @@ def _synthesize_wav(text: str) -> bytes:
         full_audio = torch.cat(parts) if len(parts) > 1 else parts[0]
 
     buf = io.BytesIO()
-    sf.write(buf, full_audio.numpy(), SAMPLE_RATE, format="wav", subtype="PCM_16")
+    sf.write(buf, full_audio.detach().cpu().numpy(), SAMPLE_RATE, format="wav", subtype="PCM_16")
     buf.seek(0)
     return buf.read()
 

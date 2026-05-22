@@ -57,6 +57,7 @@ export interface AdminDoctorInfo extends DoctorInfo {
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 const API_TIMEOUT_MS = Number.parseInt(import.meta.env.VITE_API_TIMEOUT_MS || '120000', 10);
+const DOCUMENT_PROCESS_TIMEOUT_MS = Number.parseInt(import.meta.env.VITE_DOCUMENT_PROCESS_TIMEOUT_MS || '900000', 10);
 
 interface UploadResponse {
   success: boolean;
@@ -96,6 +97,37 @@ interface ProcessResponse {
   processingTime: number;
   warnings?: string[];
   qualityWarnings?: QualityWarning[];
+  timingsMs?: {
+    saveFile: number;
+    whisper: number;
+    llm: number;
+    total: number;
+  };
+}
+
+type AudioJobStatus = 'queued' | 'transcribing' | 'structuring' | 'done' | 'failed';
+
+interface StartAudioJobResponse {
+  success: boolean;
+  jobId: string;
+  status: AudioJobStatus;
+  statusUrl: string;
+}
+
+interface AudioJobResponse {
+  id: string;
+  status: AudioJobStatus;
+  filename: string;
+  sourceName: string;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  result?: ProcessResponse;
+  error?: string;
+  message?: string;
+  statusCode?: number;
+  transcription?: ProcessResponse['transcription'];
 }
 
 interface RecommendationsResponse {
@@ -193,6 +225,12 @@ class ApiClient {
     }
     if (!response.ok) throw new Error(data.error || `Register failed: ${response.status}`);
     return data as { success: boolean; token: string; doctor: DoctorInfo };
+  }
+
+  async getSetupStatus(): Promise<{ setupRequired: boolean }> {
+    const response = await fetch(`${this.baseUrl}/api/auth/setup-status`);
+    if (!response.ok) throw new Error(`Setup status failed: ${response.status}`);
+    return response.json() as Promise<{ setupRequired: boolean }>;
   }
 
   async getMe(): Promise<DoctorInfo | null> {
@@ -422,6 +460,24 @@ class ApiClient {
     }, 600_000);
   }
 
+  async startAudioJob(audioBlob: Blob, filename: string = 'recording.webm'): Promise<StartAudioJobResponse> {
+    const formData = new FormData();
+    formData.append('file', audioBlob, filename);
+
+    return this.request('/api/jobs/audio', {
+      method: 'POST',
+      body: formData,
+    }, 120_000);
+  }
+
+  async getAudioJob(jobId: string): Promise<AudioJobResponse> {
+    return this.request(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' }, 30_000);
+  }
+
+  async deleteAudioJob(jobId: string): Promise<{ success: boolean }> {
+    return this.request(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' }, 30_000);
+  }
+
   async processAddendum(
     audioBlob: Blob,
     document: MedicalDocument,
@@ -581,7 +637,7 @@ class ApiClient {
     return this.request('/api/process-document', {
       method: 'POST',
       body: formData,
-    }, 300_000);
+    }, DOCUMENT_PROCESS_TIMEOUT_MS);
   }
 
   // ─── Streaming session API ───────────────────────────────────────────────────

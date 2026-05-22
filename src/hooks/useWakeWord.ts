@@ -32,17 +32,20 @@ declare global {
 
 // Cooldown after action to prevent re-triggering from buffered results
 const ACTION_COOLDOWN_MS = 3000;
+const MAX_NOT_ALLOWED_RETRIES = 5;
 
 interface UseWakeWordOptions {
   enabled: boolean;
   isRecording: boolean;
   onWakeWord: () => void;
   onStopWord: () => void;
+  onTranscript?: (text: string, isFinal: boolean) => void;
 }
 
-export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: UseWakeWordOptions) {
+export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord, onTranscript }: UseWakeWordOptions) {
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
   const restartTimeoutRef = useRef<number | null>(null);
+  const createAndStartRef = useRef<() => void>(() => undefined);
   const enabledRef = useRef(enabled);
   const lastActionTimeRef = useRef(0);
   // Flag: stop already fired this recording session, don't fire again
@@ -64,10 +67,12 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
 
   const onWakeWordRef = useRef(onWakeWord);
   const onStopWordRef = useRef(onStopWord);
+  const onTranscriptRef = useRef(onTranscript);
   const isRecordingRef = useRef(isRecording);
 
   useEffect(() => { onWakeWordRef.current = onWakeWord; }, [onWakeWord]);
   useEffect(() => { onStopWordRef.current = onStopWord; }, [onStopWord]);
+  useEffect(() => { onTranscriptRef.current = onTranscript; }, [onTranscript]);
   useEffect(() => {
     isRecordingRef.current = isRecording;
     if (isRecording) {
@@ -78,8 +83,8 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
   useEffect(() => { enabledRef.current = enabled; }, [enabled]);
 
   const containsStopPhrase = (text: string): boolean => {
-    return /(?<![а-яёa-z])стоп[\s\-]*нави(?![а-яёa-z])/i.test(text) ||
-      /(?<![а-яёa-z])stop[\s\-]*navi(?![а-яёa-z])/i.test(text);
+    return /(?<![а-яёa-z])стоп[\s-]*нави(?![а-яёa-z])/i.test(text) ||
+      /(?<![а-яёa-z])stop[\s-]*navi(?![а-яёa-z])/i.test(text);
   };
 
   const containsWakePhrase = (text: string): boolean => {
@@ -121,43 +126,46 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
         const isFinal = result.isFinal;
+        const bestAlternative = result[0];
+        if (!bestAlternative) continue;
 
-        for (let j = 0; j < result.length; j++) {
-          const transcript = result[j].transcript.toLowerCase().trim();
-          if (!transcript) continue;
+        const rawTranscript = bestAlternative.transcript.trim();
+        const transcript = rawTranscript.toLowerCase();
+        if (!rawTranscript) continue;
 
-          if (isRecordingRef.current) {
-            // RECORDING state: detect stop phrase on interim OR final — fire only once
-            if (stopFiredRef.current) continue;
+        if (isRecordingRef.current) {
+          // RECORDING state: detect stop phrase on interim OR final — fire only once
+          if (stopFiredRef.current) continue;
 
-            if (containsStopPhrase(transcript)) {
-              stopFiredRef.current = true;
-              lastActionTimeRef.current = Date.now();
-              console.log('[WakeWord] Stop phrase detected:', transcript, isFinal ? '(final)' : '(interim)');
-              onStopWordRef.current();
-              return;
-            }
-          } else {
-            // IDLE state: detect wake phrase
-            // Skip if transcript contains a stop phrase (to avoid "стоп нави" → "нави" match)
-            if (containsStopPhrase(transcript)) continue;
-
-            if (!containsWakePhrase(transcript)) continue;
-
-            // Accept INTERIM results for faster response, but deduplicate:
-            // don't fire again if this transcript is same/subset of what already fired
-            const alreadyFired = lastWakeTranscriptRef.current &&
-              transcript.includes(lastWakeTranscriptRef.current);
-            if (alreadyFired) continue;
-
-            // On final result — always fire (clears interim dedup)
-            // On interim — fire immediately but record transcript to avoid double-fire
-            lastWakeTranscriptRef.current = isFinal ? '' : transcript;
+          if (containsStopPhrase(transcript)) {
+            stopFiredRef.current = true;
             lastActionTimeRef.current = Date.now();
-            console.log('[WakeWord] Wake phrase detected:', transcript, isFinal ? '(final)' : '(interim)');
-            onWakeWordRef.current();
+            console.log('[WakeWord] Stop phrase detected:', transcript, isFinal ? '(final)' : '(interim)');
+            onStopWordRef.current();
             return;
           }
+
+          onTranscriptRef.current?.(rawTranscript, isFinal);
+        } else {
+          // IDLE state: detect wake phrase
+          // Skip if transcript contains a stop phrase (to avoid "стоп нави" → "нави" match)
+          if (containsStopPhrase(transcript)) continue;
+
+          if (!containsWakePhrase(transcript)) continue;
+
+          // Accept INTERIM results for faster response, but deduplicate:
+          // don't fire again if this transcript is same/subset of what already fired
+          const alreadyFired = lastWakeTranscriptRef.current &&
+            transcript.includes(lastWakeTranscriptRef.current);
+          if (alreadyFired) continue;
+
+          // On final result — always fire (clears interim dedup)
+          // On interim — fire immediately but record transcript to avoid double-fire
+          lastWakeTranscriptRef.current = isFinal ? '' : transcript;
+          lastActionTimeRef.current = Date.now();
+          console.log('[WakeWord] Wake phrase detected:', transcript, isFinal ? '(final)' : '(interim)');
+          onWakeWordRef.current();
+          return;
         }
       }
     };
@@ -167,6 +175,13 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
 
       if (event.error === 'not-allowed') {
         notAllowedCountRef.current++;
+        if (notAllowedCountRef.current >= MAX_NOT_ALLOWED_RETRIES) {
+          permissionDeniedRef.current = true;
+          pendingRestartDelayRef.current = 300;
+          setIsListening(false);
+          console.warn('[WakeWord] microphone permission denied; wake word disabled until it is enabled again');
+          return;
+        }
         // Exponential backoff: 300ms → 600 → 1200 → 2400 → max 10s
         // Never permanently disabled — mic may be transitioning from MediaRecorder
         const delay = Math.min(300 * Math.pow(2, notAllowedCountRef.current - 1), 10000);
@@ -190,7 +205,7 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
         pendingRestartDelayRef.current = 300; // reset for next session
         restartTimeoutRef.current = window.setTimeout(() => {
           if (enabledRef.current && !permissionDeniedRef.current) {
-            createAndStart();
+            createAndStartRef.current();
           }
         }, delay);
       }
@@ -204,6 +219,10 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
       // Already started — ignore
     }
   }, [isSupported]);
+
+  useEffect(() => {
+    createAndStartRef.current = createAndStart;
+  }, [createAndStart]);
 
   const stop = useCallback(() => {
     if (restartTimeoutRef.current) {
@@ -244,7 +263,11 @@ export function useWakeWord({ enabled, isRecording, onWakeWord, onStopWord }: Us
       pendingRestartDelayRef.current = 300;
       createAndStart();
     } else {
-      stop();
+      const timer = window.setTimeout(() => stop(), 0);
+      return () => {
+        window.clearTimeout(timer);
+        stop();
+      };
     }
     return () => stop();
   }, [enabled, isSupported, createAndStart, stop]);

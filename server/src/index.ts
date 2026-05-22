@@ -75,7 +75,9 @@ async function main() {
 
   await fastify.register(multipart, {
     limits: {
-      fileSize: 100 * 1024 * 1024,
+      // Лимит размера аудио снят по требованию (ранее 100 МБ).
+      // НЕ удалять ключ: дефолт @fastify/multipart = 1 МБ, что жёстче.
+      fileSize: Infinity,
     },
   });
 

@@ -478,7 +478,17 @@ def transcribe_chunked(audio_path: str, language: str, beam_size: int,
         # с естественными повторами («давление 140, давление 140»)
         repetition_penalty=1.3,
         condition_on_previous_text=is_short,
-        temperature=0,
+        # TEMPERATURE FALLBACK — главный анти-галлюцинационный механизм Whisper.
+        # Раньше тут было temperature=0 (каскад выключен) → схлопнувшийся в петлю
+        # или бред сегмент так и оставался в тексте; cleanWhisperHallucinations
+        # вычищал это регэкспами постфактум. Groq/openai-whisper по умолчанию
+        # гоняют каскад: t=0 → если compression_ratio>2.4 (петля/повтор) ИЛИ
+        # avg_logprob<-1.0 (низкая уверенность), сегмент ПЕРЕраспознаётся при
+        # t=0.2, 0.4, … пока не пройдёт пороги. Это и есть «чистота Groq».
+        # Цена — скорость: плохие сегменты считаются 2–6 раз (хорошие — один раз).
+        temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+        compression_ratio_threshold=2.4,  # порог петли/повтора → триггер каскада
+        log_prob_threshold=-1.0,           # порог низкой уверенности → триггер каскада
         no_speech_threshold=0.6,
         word_timestamps=True,
     )

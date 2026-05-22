@@ -91,3 +91,27 @@ export const dietTemplates: DietTemplate[] = [
       'Диета №11 — при ЖДА.\nДиета, богатая продуктами, содержащими железо: говядина, телятина, индейка, рыба. Печень (1 раз в неделю). Дополнительно гречка, бобовые, шпинат. Употреблять продукты с витамином С (овощи, ягоды, гранат) для улучшения всасывания железа. Не сочетать продукты, богатые железом, с чаем, кофе и молочными продуктами (интервал не менее 1–2 часов).',
   },
 ];
+
+export function findDietTemplate(text: string): DietTemplate | undefined {
+  const trimmed = text.trim().replace(/[.,;:!?\s]+$/g, '').toLowerCase();
+
+  for (const t of dietTemplates) {
+    if (trimmed === t.id || trimmed === t.shortName.toLowerCase()) {
+      return t;
+    }
+  }
+
+  const match = trimmed.match(/(?:диет\S*|стол)\s*(?:№\s*|номер\s*)?(\d+\s*[абвг]?)/iu);
+  if (match) {
+    const num = match[1].replace(/\s+/g, '').toLowerCase();
+    return dietTemplates.find((t) => t.id === num || t.shortName.toLowerCase() === num);
+  }
+
+  const bareMatch = trimmed.match(/^(?:№\s*|номер\s*)?(\d+\s*[абвг]?)$/iu);
+  if (bareMatch) {
+    const num = bareMatch[1].replace(/\s+/g, '').toLowerCase();
+    return dietTemplates.find((t) => t.id === num || t.shortName.toLowerCase() === num);
+  }
+
+  return undefined;
+}

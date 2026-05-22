@@ -1828,6 +1828,15 @@ const WAKE_WORD_CLEANUP: ReplacementRule[] = [
 ];
 
 const ALL_RULES: ReplacementRule[] = [
+  regexRule(/\bСину\s+пред(?:\s*|про)?должать/giu, 'Синупрет продолжать'),
+  regexRule(/\bСину\s*прет/giu, 'Синупрет'),
+  regexRule(/\bот\s+РИВЕН\b/giu, 'Отривин'),
+  regexRule(/\bНЕОД[ЭЕ]КС\b/giu, 'Неодекс'),
+  regexRule(/\bПрайцут\b/giu, 'Проетцу'),
+  regexRule(/\bот\s+ларинголога\b/giu, 'отоларинголога'),
+  regexRule(/\bфис[.,]?\s*рром/giu, 'физ. раствором'),
+  regexRule(/\bТАПХРДН\b/giu, 'таб. 3 раза в день 7 дней'),
+  regexRule(/\bКАПХР[ТДЫ]+Н\b/giu, 'кап. 3 раза в день 7 дней'),
   ...DICTATION_STRUCTURE_CLEANUP,
   ...WAKE_WORD_CLEANUP,
   ...LATIN_CARDIOLOGY_ABBREVIATIONS,

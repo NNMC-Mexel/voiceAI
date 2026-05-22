@@ -1,18 +1,25 @@
-﻿import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+﻿import { lazy, Suspense, useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import type { VoiceRecorderStreamOptions } from './hooks/useVoiceRecorder';
-import type { AppStep, MedicalDocument } from './types';
+import type { AppStep, MedicalDocument, QualityWarning } from './types';
 import { emptyDocument } from './types';
 import { LoginScreen } from './components/LoginScreen';
 import { RecordingScreen } from './components/RecordingScreen';
 import { ProcessingScreen } from './components/ProcessingScreen';
+import type { ProcessingPhase } from './components/ProcessingScreen';
 import { EditingScreen } from './components/EditingScreen';
-import { PreviewScreen } from './components/PreviewScreen';
 import { PatientListScreen } from './components/PatientListScreen';
 import { PatientScreen } from './components/PatientScreen';
 import { SyncUploadScreen } from './components/SyncUploadScreen';
 import { SettingsScreen } from './components/SettingsScreen';
 import { apiClient } from './api/client';
 import type { DoctorInfo, PatientSummary } from './api/client';
+
+type MedicalDocumentTextField = Exclude<keyof MedicalDocument, 'patient' | 'riskAssessment'>;
+type QualityWarningInput = QualityWarning | string;
+
+const PreviewScreen = lazy(() =>
+  import('./components/PreviewScreen').then((module) => ({ default: module.PreviewScreen }))
+);
 
 function filenameForBlob(blob: Blob, baseName: string): string {
   const type = blob.type.toLowerCase();
@@ -26,6 +33,27 @@ const SESSION_STEP_KEY = 'voicemed_step';
 const SESSION_DOC_KEY = 'voicemed_document';
 const SESSION_RAW_TEXT_KEY = 'voicemed_raw_text';
 const SESSION_WARNINGS_KEY = 'voicemed_quality_warnings';
+const AUDIO_JOB_POLL_INTERVAL_MS = 2_000;
+const AUDIO_JOB_TIMEOUT_MS = 15 * 60 * 1000;
+const MERGE_TEXT_FIELDS: MedicalDocumentTextField[] = [
+  'complaints',
+  'anamnesis',
+  'outpatientExams',
+  'clinicalCourse',
+  'allergyHistory',
+  'objectiveStatus',
+  'neurologicalStatus',
+  'diagnosis',
+  'finalDiagnosis',
+  'conclusion',
+  'doctorNotes',
+  'recommendations',
+  'manualCheck',
+];
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function normalizePatientName(name: string): string {
   return name.trim().replace(/\s+/g, ' ').toLowerCase();
@@ -36,6 +64,89 @@ function normalizePatientGender(gender: string): string {
   if (value.startsWith('м')) return 'male';
   if (value.startsWith('ж')) return 'female';
   return gender.trim();
+}
+
+function normalizeTextBlock(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function appendUniqueBlock(current: string | undefined, incoming: string | undefined): string {
+  const prev = (current || '').trim();
+  const next = (incoming || '').trim();
+  if (!next) return prev;
+  if (!prev) return next;
+
+  const normalizedPrev = normalizeTextBlock(prev);
+  const normalizedNext = normalizeTextBlock(next);
+  if (normalizedPrev === normalizedNext || normalizedPrev.includes(normalizedNext)) return prev;
+  if (normalizedNext.includes(normalizedPrev) && normalizedPrev.length > 20) return next;
+  return `${prev}\n\n${next}`;
+}
+
+function mergeSupplementDocument(base: MedicalDocument, supplement: MedicalDocument): MedicalDocument {
+  const next: MedicalDocument = {
+    ...base,
+    patient: { ...base.patient },
+    riskAssessment: { ...base.riskAssessment },
+  };
+
+  for (const key of ['fullName', 'age', 'gender', 'complaintDate', 'birthDate'] as const) {
+    const value = supplement.patient[key]?.trim();
+    if (value && !next.patient[key]?.trim()) next.patient[key] = value;
+  }
+
+  for (const key of ['fallInLast3Months', 'dizzinessOrWeakness', 'needsEscort', 'painScore'] as const) {
+    const value = supplement.riskAssessment[key]?.trim();
+    if (value && !next.riskAssessment[key]?.trim()) next.riskAssessment[key] = value;
+  }
+
+  for (const key of MERGE_TEXT_FIELDS) {
+    next[key] = appendUniqueBlock(next[key], supplement[key]);
+  }
+
+  return next;
+}
+
+function appendRawSource(current: string, label: string, text: string): string {
+  const clean = text.trim();
+  if (!clean) return current;
+  const header = `--- ${label} ---`;
+  return current.trim()
+    ? `${current.trim()}\n\n${header}\n${clean}`
+    : clean;
+}
+
+function formatDocumentProcessingError(err: unknown): string {
+  const message = err instanceof Error ? err.message : 'Ошибка обработки документа';
+  if (/таймаут|timeout|aborted/i.test(message)) {
+    return 'Обработка документа заняла слишком много времени. Попробуйте текстовый PDF/Word или загрузите скан как отдельное фото.';
+  }
+  return message;
+}
+
+function normalizeQualityWarnings(warnings: QualityWarningInput[] | undefined): QualityWarning[] {
+  if (!Array.isArray(warnings)) return [];
+  return warnings
+    .map((warning): QualityWarning | null => {
+      if (typeof warning !== 'string') return warning;
+      const [code, evidence] = warning.split(':');
+      return {
+        code: (code || 'possibleLostLabValue') as QualityWarning['code'],
+        severity: code === 'important_number_missing' ? 'critical' : 'warning',
+        message: warning,
+        evidence,
+      };
+    })
+    .filter((warning): warning is QualityWarning => Boolean(warning));
+}
+
+function mergeQualityWarnings(current: QualityWarning[], incoming: QualityWarningInput[] | undefined): QualityWarning[] {
+  const map = new Map<string, QualityWarning>();
+  for (const warning of [...current, ...normalizeQualityWarnings(incoming)]) {
+    const key = `${warning.code}:${warning.field || ''}:${warning.evidence || ''}:${warning.message}`;
+    if (!map.has(key)) map.set(key, warning);
+  }
+  return Array.from(map.values());
 }
 
 function inferBirthDateFromAge(age: string, referenceDate: string): string {
@@ -82,19 +193,23 @@ function App() {
       return '';
     }
   });
-  const [qualityWarnings, setQualityWarnings] = useState<string[]>(() => {
+  const [qualityWarnings, setQualityWarnings] = useState<QualityWarning[]>(() => {
     try {
       const saved = sessionStorage.getItem(SESSION_WARNINGS_KEY);
-      return saved ? (JSON.parse(saved) as string[]) : [];
+      return normalizeQualityWarnings(saved ? (JSON.parse(saved) as QualityWarningInput[]) : []);
     } catch {
       return [];
     }
   });
+  const [processingPhase, setProcessingPhase] = useState<ProcessingPhase>('uploading');
+  const [processingDetail, setProcessingDetail] = useState('');
   const [isRestructuring, setIsRestructuring] = useState(false);
   const audioBlobRef = useRef<Blob | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const pendingChunksRef = useRef<Promise<void>[]>([]);
   const batchCountRef = useRef(0);
+  const browserFinalTranscriptRef = useRef<string[]>([]);
+  const browserInterimTranscriptRef = useRef('');
 
   useEffect(() => {
     try {
@@ -166,12 +281,44 @@ function App() {
   const handleRecordingStart = useCallback(() => {
     pendingChunksRef.current = [];
     batchCountRef.current = 0;
+    browserFinalTranscriptRef.current = [];
+    browserInterimTranscriptRef.current = '';
     apiClient.startSession().then(({ sessionId }) => {
       sessionIdRef.current = sessionId;
     }).catch((err) => {
       console.warn('[session] failed to start, will use legacy flow:', err);
       sessionIdRef.current = null;
     });
+  }, []);
+
+  const handleBrowserTranscript = useCallback((text: string, isFinal: boolean) => {
+    const clean = text.trim();
+    if (!clean) return;
+
+    if (!isFinal) {
+      browserInterimTranscriptRef.current = clean;
+      return;
+    }
+
+    browserInterimTranscriptRef.current = '';
+    const finalParts = browserFinalTranscriptRef.current;
+    const last = finalParts[finalParts.length - 1] || '';
+    if (clean === last || last.includes(clean)) return;
+
+    if (last && clean.includes(last)) {
+      finalParts[finalParts.length - 1] = clean;
+    } else {
+      finalParts.push(clean);
+    }
+  }, []);
+
+  const getBrowserTranscript = useCallback((): string => {
+    const finalText = browserFinalTranscriptRef.current.join(' ').trim();
+    const interimText = browserInterimTranscriptRef.current.trim();
+    if (!interimText) return finalText;
+    if (!finalText) return interimText;
+    if (finalText.includes(interimText)) return finalText;
+    return `${finalText} ${interimText}`.trim();
   }, []);
 
   const handleBatch = useCallback((blob: Blob, _mimeType: string, batchIndex: number) => {
@@ -201,10 +348,10 @@ function App() {
     onBatch: handleBatch,
   }), [handleBatch]);
 
-  const applyProcessResult = useCallback((transcriptionText: string, doc: MedicalDocument, warnings: string[]) => {
+  const applyProcessResult = useCallback((transcriptionText: string, doc: MedicalDocument, warnings: QualityWarningInput[]) => {
     const today = new Date().toISOString().slice(0, 10);
     setRawTranscription(transcriptionText);
-    setQualityWarnings(warnings);
+    setQualityWarnings(normalizeQualityWarnings(warnings));
     setDocument({
       ...doc,
       patient: {
@@ -217,32 +364,123 @@ function App() {
 
   const legacyProcess = useCallback(async (blob: Blob) => {
     const filename = filenameForBlob(blob, 'recording');
+    let audioJobLogOpen = false;
 
-    const upload = await apiClient.uploadAudio(blob, filename);
+    try {
+      setProcessingPhase('uploading');
+      setProcessingDetail('Загружаем запись и создаем задачу обработки.');
+      console.group('%c[AUDIO JOB] Асинхронная обработка', 'color: #4caf50; font-weight: bold; font-size: 13px');
+      audioJobLogOpen = true;
+      const started = await apiClient.startAudioJob(blob, filename);
+      console.log('Job:', started.jobId, started.statusUrl);
+      setProcessingPhase('queued');
+      setProcessingDetail('Задача принята сервером, ожидаем старт обработки.');
 
-    console.group('%c[WHISPER] Транскрипция', 'color: #00bcd4; font-weight: bold; font-size: 13px');
-    console.log('Файл:', upload.filename);
-    const transcription = await apiClient.transcribe(upload.filename);
-    console.log('Язык:', transcription.language);
-    console.log('Длительность:', transcription.duration, 'с');
-    console.log('%cТекст Whisper:\n' + transcription.text, 'color: #00bcd4; white-space: pre-wrap');
-    console.groupEnd();
+      const deadline = Date.now() + AUDIO_JOB_TIMEOUT_MS;
+      let lastStatus = started.status;
+
+      while (Date.now() < deadline) {
+        const job = await apiClient.getAudioJob(started.jobId);
+        if (job.status !== lastStatus) {
+          lastStatus = job.status;
+          console.log('Статус:', job.status);
+          if (job.status === 'queued') {
+            setProcessingPhase('queued');
+            setProcessingDetail('Задача находится в очереди обработки.');
+          } else if (job.status === 'transcribing') {
+            setProcessingPhase('transcribing');
+            setProcessingDetail('Whisper распознает речь из аудио.');
+          } else if (job.status === 'structuring') {
+            setProcessingPhase('structuring');
+            setProcessingDetail('LLM распределяет распознанный текст по разделам.');
+          }
+        }
+
+        if (job.status === 'done' && job.result) {
+          setProcessingPhase('finalizing');
+          setProcessingDetail('Документ готов, открываем редактор.');
+          console.log('Текст транскрипции:', job.result.transcription.text);
+          console.log('Документ:', job.result.document);
+          console.groupEnd();
+          audioJobLogOpen = false;
+          applyProcessResult(
+            job.result.transcription.text,
+            job.result.document,
+            job.result.qualityWarnings || job.result.warnings || [],
+          );
+          return;
+        }
+
+        if (job.status === 'failed') {
+          console.groupEnd();
+          audioJobLogOpen = false;
+          if (job.transcription?.text) {
+            setRawTranscription(job.transcription.text);
+          }
+          throw new Error(job.message || job.error || 'Audio job failed');
+        }
+
+        await delay(AUDIO_JOB_POLL_INTERVAL_MS);
+      }
+
+      console.groupEnd();
+      audioJobLogOpen = false;
+      throw new Error('Audio job timeout');
+    } catch (jobErr) {
+      if (audioJobLogOpen) {
+        console.groupEnd();
+      }
+      setProcessingPhase('fallback');
+      setProcessingDetail('Основной поток не завершился, запускаем резервный маршрут.');
+      console.warn('[audio-job] failed, falling back to upload/transcribe/structure:', jobErr);
+    }
+
+    let transcriptionText = '';
+
+    try {
+      setProcessingPhase('uploading');
+      setProcessingDetail('Загружаем запись на сервер распознавания.');
+      const upload = await apiClient.uploadAudio(blob, filename);
+
+      console.group('%c[WHISPER] Транскрипция', 'color: #00bcd4; font-weight: bold; font-size: 13px');
+      console.log('Файл:', upload.filename);
+      setProcessingPhase('transcribing');
+      setProcessingDetail('Whisper распознает речь из аудио.');
+      const transcription = await apiClient.transcribe(upload.filename);
+      console.log('Язык:', transcription.language);
+      console.log('Длительность:', transcription.duration, 'с');
+      console.log('%cТекст Whisper:\n' + transcription.text, 'color: #00bcd4; white-space: pre-wrap');
+      console.groupEnd();
+      transcriptionText = transcription.text;
+    } catch (transcriptionErr) {
+      console.warn('[transcription] server transcription failed:', transcriptionErr);
+      const browserTranscript = getBrowserTranscript();
+      if (!browserTranscript) throw transcriptionErr;
+      console.warn('[transcription] using browser SpeechRecognition fallback');
+      transcriptionText = browserTranscript;
+    }
 
     console.group('%c[LLM] Структурирование', 'color: #ff9800; font-weight: bold; font-size: 13px');
-    const structured = await apiClient.structureText(transcription.text);
+    setProcessingPhase('structuring');
+    setProcessingDetail('LLM распределяет распознанный текст по разделам.');
+    const structured = await apiClient.structureText(transcriptionText);
     console.log('Время обработки:', structured.processingTime, 'мс');
     console.log('%cДокумент от LLM:', 'color: #ff9800; font-weight: bold');
     console.log(structured.document);
     console.groupEnd();
 
     if (!structured.success || !structured.document) throw new Error('Processing failed');
-    applyProcessResult(transcription.text, structured.document, structured.warnings || []);
-  }, [applyProcessResult]);
+    setProcessingPhase('finalizing');
+    setProcessingDetail('Документ готов, открываем редактор.');
+    applyProcessResult(transcriptionText, structured.document, structured.qualityWarnings || structured.warnings || []);
+  }, [applyProcessResult, getBrowserTranscript]);
 
   const handleRecordingComplete = useCallback(async (blob: Blob) => {
     audioBlobRef.current = blob;
     setStep('processing');
     setError(null);
+    setProcessingPhase('uploading');
+    setProcessingDetail('Подготавливаем запись к обработке.');
 
     const sessionId = sessionIdRef.current;
     sessionIdRef.current = null;
@@ -252,17 +490,23 @@ function App() {
     if (sessionId && hadBatches) {
       try {
         // Ждём завершения всех HTTP-запросов отправки чанков
+        setProcessingPhase('queued');
+        setProcessingDetail('Завершаем потоковую сессию и собираем фрагменты распознавания.');
         await Promise.allSettled(pendingChunksRef.current);
         pendingChunksRef.current = [];
 
         console.group('%c[SESSION] Финализация', 'color: #4caf50; font-weight: bold; font-size: 13px');
+        setProcessingPhase('structuring');
+        setProcessingDetail('LLM структурирует текст из потоковой сессии.');
         const result = await apiClient.finishSession(sessionId);
         console.log('Текст транскрипции:', result.transcription.text);
         console.log('Документ:', result.document);
         console.groupEnd();
 
         if (result.success && result.document) {
-          applyProcessResult(result.transcription.text, result.document, result.warnings || []);
+          setProcessingPhase('finalizing');
+          setProcessingDetail('Документ готов, открываем редактор.');
+          applyProcessResult(result.transcription.text, result.document, result.qualityWarnings || result.warnings || []);
         } else {
           throw new Error('Session processing failed');
         }
@@ -314,7 +558,7 @@ function App() {
         throw new Error('Повторное структурирование не вернуло документ');
       }
       applyStructuredDocument(structured.document);
-      setQualityWarnings(structured.warnings || []);
+      setQualityWarnings(normalizeQualityWarnings(structured.qualityWarnings || structured.warnings || []));
     } catch (err) {
       console.error('Restructure error:', err);
       setError(err instanceof Error ? err.message : 'Ошибка повторного структурирования');
@@ -334,14 +578,20 @@ function App() {
   const handleBackToRecording = useCallback(() => {
     setStep('recording');
     setError(null);
+    setProcessingPhase('uploading');
+    setProcessingDetail('');
   }, []);
 
   const handleDocumentComplete = useCallback(async (file: File) => {
     setStep('processing');
     setError(null);
+    setProcessingPhase('document');
+    setProcessingDetail('Извлекаем текст из загруженного документа.');
     try {
       const result = await apiClient.processDocument(file);
       if (result.success && result.document) {
+        setProcessingPhase('finalizing');
+        setProcessingDetail('Документ готов, открываем редактор.');
         const documentPatientName = normalizePatientName(result.document.patient.fullName || '');
         if (
           activePatient &&
@@ -350,7 +600,7 @@ function App() {
         ) {
           setActivePatient(null);
         }
-        applyProcessResult(result.transcription.text, result.document, result.warnings || []);
+        applyProcessResult(result.transcription.text, result.document, result.qualityWarnings || result.warnings || []);
         if (result.transcription.warning) {
           console.warn('[document]', result.transcription.warning);
         }
@@ -359,10 +609,39 @@ function App() {
       }
     } catch (err) {
       console.error('Document processing error:', err);
-      setError(err instanceof Error ? err.message : 'Ошибка обработки документа');
+      setError(formatDocumentProcessingError(err));
       setStep('recording');
     }
   }, [activePatient, applyProcessResult]);
+
+  const handleDocumentSupplement = useCallback(async (file: File): Promise<string> => {
+    setError(null);
+    let result: Awaited<ReturnType<typeof apiClient.processDocument>>;
+    try {
+      result = await apiClient.processDocument(file);
+    } catch (err) {
+      throw new Error(formatDocumentProcessingError(err));
+    }
+    if (!result.success || !result.document) {
+      throw new Error('Document processing failed');
+    }
+
+    const supplementPatientName = normalizePatientName(result.document.patient.fullName || '');
+    const currentPatientName = normalizePatientName(document.patient.fullName || activePatient?.fullName || '');
+    if (supplementPatientName && currentPatientName && supplementPatientName !== currentPatientName) {
+      throw new Error('Файл похож на документ другого пациента. Проверьте ФИО перед добавлением.');
+    }
+
+    setDocument((prev) => mergeSupplementDocument(prev, result.document));
+    setRawTranscription((prev) => appendRawSource(prev, `Документ: ${file.name}`, result.transcription.text || ''));
+    setQualityWarnings((prev) => mergeQualityWarnings(prev, result.qualityWarnings || result.warnings || []));
+
+    if (result.transcription.warning) {
+      console.warn('[document supplement]', result.transcription.warning);
+    }
+
+    return result.transcription.text || '';
+  }, [activePatient?.fullName, document.patient.fullName]);
 
   const handleNewDocument = useCallback(() => {
     setDocument(emptyDocument);
@@ -370,7 +649,11 @@ function App() {
     setQualityWarnings([]);
     setActivePatient(null);
     audioBlobRef.current = null;
+    browserFinalTranscriptRef.current = [];
+    browserInterimTranscriptRef.current = '';
     setError(null);
+    setProcessingPhase('uploading');
+    setProcessingDetail('');
     setStep('recording');
     try {
       sessionStorage.removeItem(SESSION_STEP_KEY);
@@ -514,6 +797,7 @@ function App() {
         <RecordingScreen
           onRecordingComplete={handleRecordingComplete}
           onRecordingStart={handleRecordingStart}
+          onRecordingTranscript={handleBrowserTranscript}
           streamOptions={streamOptions}
           onDocumentUpload={handleDocumentComplete}
           activePatient={activePatient}
@@ -527,7 +811,7 @@ function App() {
         />
       )}
 
-      {step === 'processing' && <ProcessingScreen />}
+      {step === 'processing' && <ProcessingScreen phase={processingPhase} detail={processingDetail} />}
 
       {step === 'editing' && (
         <EditingScreen
@@ -543,16 +827,19 @@ function App() {
           onSaveToPatient={handleSaveToPatient}
           onCreatePatientFromDocument={handleCreatePatientAndSaveVisit}
           onOpenPatients={doctor ? handleOpenPatients : undefined}
+          onDocumentSupplementUpload={handleDocumentSupplement}
         />
       )}
 
       {step === 'preview' && (
-        <PreviewScreen
-          document={document}
-          audioBlob={audioBlobRef.current}
-          onEdit={handleEdit}
-          onNewDocument={handleNewDocument}
-        />
+        <Suspense fallback={<div className="min-h-screen flex items-center justify-center"><p className="text-text-muted">Загрузка предпросмотра...</p></div>}>
+          <PreviewScreen
+            document={document}
+            audioBlob={audioBlobRef.current}
+            onEdit={handleEdit}
+            onNewDocument={handleNewDocument}
+          />
+        </Suspense>
       )}
     </div>
   );

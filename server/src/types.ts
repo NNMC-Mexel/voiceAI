@@ -55,6 +55,11 @@ export type QualityWarningCode =
   | 'suspiciousExamRescue'
   | 'sectionRoutingIssue'
   | 'drugListMayBeMerged'
+  | 'lowDocumentCoverage'
+  | 'criticalFieldMissing'
+  | 'patient_identity_missing'
+  | 'unsupportedRecommendation'
+  | 'patientNameFromFilename'
   | 'important_number_missing'
   | 'max_bp_value_missing';
 
@@ -95,9 +100,15 @@ export interface WhisperConfig {
   language: string;
   device: 'cuda' | 'cpu';
   serverUrl?: string; // Если задан — используется persistent HTTP whisper-сервер
+  remoteOnly?: boolean; // Если true — используем только WHISPER_SERVER_URL, без Groq/local fallback
   beamSize: number;   // Передаётся в payload; 1 = greedy, 5 = beam search.
                       // Фиксирует конфигурацию между клиентом и сервером —
                       // без этого Python-сервер уходит в свой env-дефолт.
+  groq?: {            // Если задан GROQ_API_KEY — Groq hosted Whisper (OpenAI-совместимый)
+    apiKey: string;   // используется ПЕРВЫМ, с fallback на serverUrl/local при ошибке.
+    model: string;    // whisper-large-v3 | whisper-large-v3-turbo
+    baseUrl: string;  // https://api.groq.com/openai/v1
+  };
 }
 
 export type LLMProviderKind = 'llama' | 'ollama' | 'anthropic';

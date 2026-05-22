@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, LogOut, Plus, Shield, User, KeyRound, RotateCcw, Ban } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type { AdminDoctorInfo, DoctorInfo } from '../api/client';
@@ -39,7 +39,7 @@ export function SettingsScreen({ doctor, onBack, onLogout, onDoctorUpdate }: Set
     role: 'doctor' as DoctorInfo['role'],
   });
 
-  const loadDoctors = async () => {
+  const loadDoctors = useCallback(async () => {
     if (doctor.role !== 'admin') return;
     setLoadingDoctors(true);
     setAdminError('');
@@ -51,11 +51,11 @@ export function SettingsScreen({ doctor, onBack, onLogout, onDoctorUpdate }: Set
     } finally {
       setLoadingDoctors(false);
     }
-  };
+  }, [doctor.role]);
 
   useEffect(() => {
     void loadDoctors();
-  }, [doctor.role]);
+  }, [loadDoctors]);
 
   const saveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
