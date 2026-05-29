@@ -8,7 +8,7 @@ Usage: python test_batch.py <audio_dir_or_file> [audio_dir_or_file2 ...]
 import sys, json, os, time, urllib.request, io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
-NODE_SERVER = os.environ.get("NODE_SERVER_URL", "http://localhost:3001")
+NODE_SERVER = os.environ.get("NODE_SERVER_URL", "http://localhost:1337")
 AUTH_PASSWORD = "meddok2026"
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "temp")
 

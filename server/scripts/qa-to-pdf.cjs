@@ -13,7 +13,7 @@ const ReactPDF = require('@react-pdf/renderer');
 const { Document, Page, Text, View, StyleSheet, Font } = ReactPDF;
 const e = React.createElement;
 
-const SERVER = process.env.SERVER_URL || 'http://localhost:3001';
+const SERVER = process.env.SERVER_URL || 'http://localhost:1337';
 const AUTH_PASS = process.env.AUTH_PASS || 'meddok2026';
 
 // --- Шрифты (Arial c кириллицей из src/assets/fonts) -----------------------

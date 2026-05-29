@@ -156,7 +156,7 @@ export interface ServerConfig {
 }
 
 export const defaultConfig: ServerConfig = {
-  port: 3001,
+  port: 1337,
   host: '0.0.0.0',
   uploadDir: './uploads',
   dbPath: './data/meddok.db',

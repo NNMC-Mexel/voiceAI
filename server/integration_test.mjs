@@ -2,7 +2,7 @@ import { readFileSync } from 'fs';
 import assert from 'node:assert/strict';
 import { findExamTemplate, parseExamValuesFromText, parseExamDate, formatExamLine } from './dist/data/examTemplates.js';
 
-const BASE = 'http://localhost:3001';
+const BASE = 'http://localhost:1337';
 const TOKEN = '02770628-d246-4de6-b9ce-e1cdf6a48c52';
 const AUDIO_PATH = 'c:/Project/voicemed/sounds/WhatsApp Audio 2026-03-05 at 11.02.19.ogg';
 
