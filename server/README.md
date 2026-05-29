@@ -59,27 +59,27 @@ npm start
 
 #### Полная обработка аудио
 ```bash
-curl -X POST http://localhost:3001/api/process \
+curl -X POST http://localhost:1337/api/process \
   -F "file=@recording.webm"
 ```
 
 #### Только распознавание речи
 ```bash
 # 1. Загрузить файл
-curl -X POST http://localhost:3001/api/upload \
+curl -X POST http://localhost:1337/api/upload \
   -F "file=@recording.webm"
 
 # Response: { "filename": "1234567890_recording.webm" }
 
 # 2. Распознать
-curl -X POST http://localhost:3001/api/transcribe \
+curl -X POST http://localhost:1337/api/transcribe \
   -H "Content-Type: application/json" \
   -d '{"filename": "1234567890_recording.webm"}'
 ```
 
 #### Только структурирование
 ```bash
-curl -X POST http://localhost:3001/api/structure \
+curl -X POST http://localhost:1337/api/structure \
   -H "Content-Type: application/json" \
   -d '{"text": "Пациент Иванов, 45 лет, жалобы на головную боль..."}'
 ```
@@ -90,7 +90,7 @@ curl -X POST http://localhost:3001/api/structure \
 
 ```env
 # Server
-PORT=3001
+PORT=1337
 HOST=0.0.0.0
 
 # Whisper

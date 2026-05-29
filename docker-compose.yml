@@ -6,9 +6,9 @@ services:
       context: ./server
       dockerfile: Dockerfile
     ports:
-      - "3001:3001"
+      - "1337:1337"
     environment:
-      - PORT=3001
+      - PORT=1337
       - HOST=0.0.0.0
       - CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
       - RATE_LIMIT_WINDOW_MS=60000
@@ -82,7 +82,7 @@ services:
     ports:
       - "5173:5173"
     environment:
-      - VITE_API_URL=http://localhost:3001
+      - VITE_API_URL=http://localhost:1337
       - VITE_API_TIMEOUT_MS=120000
     volumes:
       - ./src:/app/src

@@ -21,7 +21,7 @@ function loadEnvFile(file) {
 
 loadEnvFile(path.resolve('server', '.env'));
 
-const SERVER = (process.env.SERVER_URL || 'http://127.0.0.1:3001').replace(/\/+$/, '');
+const SERVER = (process.env.SERVER_URL || 'http://127.0.0.1:1337').replace(/\/+$/, '');
 const OUT_DIR = process.env.QA_OUT_DIR || path.resolve('temp', 'qa-live-dictation');
 const LIMIT = Number.parseInt(process.env.QA_LIMIT || '0', 10);
 const TIMEOUT_MS = Number.parseInt(process.env.QA_TIMEOUT_MS || `${2 * 60 * 1000}`, 10);

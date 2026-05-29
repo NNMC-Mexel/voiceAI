@@ -19,7 +19,7 @@ import base64
 import urllib.request
 
 WHISPER_SERVER = os.environ.get("WHISPER_SERVER_URL", "http://192.168.41.161:9000")
-NODE_SERVER = os.environ.get("NODE_SERVER_URL", "http://localhost:3001")
+NODE_SERVER = os.environ.get("NODE_SERVER_URL", "http://localhost:1337")
 AUTH_PASSWORD = "meddok2026"
 
 CHUNK_THRESHOLD = 40

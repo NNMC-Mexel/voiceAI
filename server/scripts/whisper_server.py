@@ -41,6 +41,12 @@ import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -141,7 +147,7 @@ def get_audio_duration(audio_path: str) -> float:
     result = subprocess.run(
         ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
          "-of", "json", audio_path],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
     )
     try:
         data = json.loads(result.stdout)
@@ -156,7 +162,7 @@ def get_audio_duration(audio_path: str) -> float:
         ["ffprobe", "-v", "error", "-select_streams", "a:0",
          "-show_entries", "stream=duration", "-of",
          "default=noprint_wrappers=1:nokey=1", audio_path],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
     )
     try:
         val = result.stdout.strip()
@@ -168,7 +174,7 @@ def get_audio_duration(audio_path: str) -> float:
     # Last resort: full decode to measure duration
     result = subprocess.run(
         ["ffmpeg", "-i", audio_path, "-f", "null", "-"],
-        capture_output=True, text=True, timeout=300,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
     )
     m = re.search(r"time=(\d+):(\d+):([\d.]+)", result.stderr)
     if m:
@@ -185,7 +191,7 @@ def detect_silences(audio_path: str, noise_db: int = -30, min_silence_sec: float
         ["ffmpeg", "-i", audio_path, "-af",
          f"silencedetect=noise={noise_db}dB:d={min_silence_sec}",
          "-f", "null", "-"],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
     )
     silences = []
     current: dict = {}

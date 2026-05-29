@@ -180,7 +180,7 @@ tar -xzf medical-voice-app-full.tar.gz
 Создай файл `C:\MedDok\medical-voice-app\server\.env`:
 
 ```env
-PORT=3001
+PORT=1337
 HOST=0.0.0.0
 UPLOAD_DIR=./uploads
 
@@ -318,7 +318,7 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 - [ ] llama.cpp скачан/собран
 - [ ] Модель Qwen скачана (~19GB)
 - [ ] LLM сервер запускается (порт 8080)
-- [ ] Backend запускается (порт 3001)
+- [ ] Backend запускается (порт 1337)
 - [ ] Frontend запускается (порт 5173)
 - [ ] Приложение работает! 🎉
 

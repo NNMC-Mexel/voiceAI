@@ -4,7 +4,7 @@ const path = require('path');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const MANIFEST_PATH = path.join(__dirname, 'qa-corpus.json');
-const SERVER = process.env.SERVER_URL || 'http://localhost:3001';
+const SERVER = process.env.SERVER_URL || 'http://localhost:1337';
 const AUTH_PASS = process.env.AUTH_PASS || 'meddok2026';
 
 const TEXT_FIELDS = [

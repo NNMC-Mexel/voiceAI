@@ -38,8 +38,8 @@ RUN mkdir -p uploads temp models
 
 # Environment
 ENV NODE_ENV=production
-ENV PORT=3001
+ENV PORT=1337
 
-EXPOSE 3001
+EXPOSE 1337
 
 CMD ["node", "dist/index.js"]

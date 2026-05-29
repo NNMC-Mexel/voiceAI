@@ -6,7 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const SERVER = process.env.SERVER_URL || 'http://localhost:3001';
+const SERVER = process.env.SERVER_URL || 'http://localhost:1337';
 const AUTH_PASS = process.env.AUTH_PASS || 'meddok2026';
 
 async function main() {

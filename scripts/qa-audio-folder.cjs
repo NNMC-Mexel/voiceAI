@@ -4,7 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const ROOT = process.env.QA_AUDIO_ROOT || 'C:\\Users\\Айдар\\OneDrive\\Рабочий стол\\ВЫПИСКИ';
-const SERVER = (process.env.SERVER_URL || 'http://127.0.0.1:3001').replace(/\/+$/, '');
+const SERVER = (process.env.SERVER_URL || 'http://127.0.0.1:1337').replace(/\/+$/, '');
 const OUT_DIR = process.env.QA_OUT_DIR || path.resolve('temp', 'qa-audio-folder');
 const LIMIT = Number.parseInt(process.env.QA_LIMIT || '0', 10);
 const SKIP = Number.parseInt(process.env.QA_SKIP || '0', 10);
