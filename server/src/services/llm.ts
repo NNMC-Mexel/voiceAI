@@ -23,6 +23,13 @@ interface OllamaChatResponse {
   message?: {
     content?: string;
   };
+  choices?: Array<{
+    finish_reason?: string;
+    message?: {
+      content?: string;
+    };
+    text?: string;
+  }>;
   done?: boolean;
   done_reason?: string;
 }
@@ -788,13 +795,16 @@ ${normalized}`;
         }
 
         const data = (await response.json()) as OllamaChatResponse;
-        const content = data.message?.content ?? '';
+        const firstChoice = data.choices?.[0];
+        const content = data.message?.content ?? firstChoice?.message?.content ?? firstChoice?.text ?? '';
         if (!content.trim()) {
           return new Response(
             JSON.stringify({
-              error: 'Ollama returned an empty message.content',
+              error: 'LLM returned an empty chat content',
               done: data.done,
               done_reason: data.done_reason,
+              finish_reason: firstChoice?.finish_reason,
+              response_keys: Object.keys(data),
             }),
             {
               status: 502,
@@ -807,8 +817,8 @@ ${normalized}`;
         return new Response(
           JSON.stringify({
             content,
-            stop_type: data.done ? 'eos' : data.done_reason,
-            stopped_eos: data.done === true,
+            stop_type: data.done ? 'eos' : (data.done_reason ?? firstChoice?.finish_reason),
+            stopped_eos: data.done === true || firstChoice?.finish_reason === 'stop',
           }),
           {
             status: response.status,

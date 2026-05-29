@@ -11,6 +11,7 @@ const SKIP = Number.parseInt(process.env.QA_SKIP || '0', 10);
 const START_AFTER = process.env.QA_START_AFTER || '';
 const ONLY = process.env.QA_ONLY || '';
 const LIST_FILE = process.env.QA_LIST_FILE || '';
+const RESUME = process.env.QA_RESUME === 'true';
 const USE_JOBS = process.env.QA_USE_JOBS === 'true';
 const JOB_POLL_MS = Number.parseInt(process.env.QA_JOB_POLL_MS || '2000', 10);
 const JOB_TIMEOUT_MS = Number.parseInt(process.env.QA_JOB_TIMEOUT_MS || `${15 * 60 * 1000}`, 10);
@@ -90,7 +91,7 @@ function normalize(s) {
   return String(s || '')
     .toLowerCase()
     .replace(/ё/g, 'е')
-    .replace(/[^a-zа-я0-9\s]/giu, ' ')
+    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -405,6 +406,15 @@ function writeReports(results) {
   fs.writeFileSync(path.join(OUT_DIR, 'report.md'), md, 'utf-8');
 }
 
+function loadExistingResults() {
+  const jsonlPath = path.join(OUT_DIR, 'results.jsonl');
+  if (!RESUME || !fs.existsSync(jsonlPath)) return [];
+  return fs.readFileSync(jsonlPath, 'utf8')
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line.replace(/^\uFEFF/, '')));
+}
+
 async function main() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const token = process.env.AUTH_TOKEN || signJwt({
@@ -435,11 +445,20 @@ async function main() {
   console.log(`[qa] server=${SERVER}`);
   console.log(`[qa] out=${OUT_DIR}`);
   console.log(`[qa] files=${files.length}`);
+  console.log(`[qa] resume=${RESUME}`);
 
-  const results = [];
+  const results = loadExistingResults();
+  const done = new Set(results.map((r) => r.relativePath));
+  if (results.length) {
+    console.log(`[qa] loaded existing results=${results.length}`);
+  }
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     const label = rel(file);
+    if (done.has(label)) {
+      console.log(`\n[${i + 1}/${files.length}] SKIP existing ${label}`);
+      continue;
+    }
     console.log(`\n[${i + 1}/${files.length}] ${label}`);
     try {
       const result = await processOne(file, token, i + 1, files.length);
