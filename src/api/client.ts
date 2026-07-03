@@ -45,12 +45,36 @@ export interface DoctorInfo {
   name: string;
   email: string;
   specialty: string;
+  departmentId: number | null;
   role: 'admin' | 'doctor';
 }
 
 export interface AdminDoctorInfo extends DoctorInfo {
   isActive: boolean;
   createdAt: string;
+}
+
+export interface SpecialtyInfo {
+  id: number;
+  name: string;
+  code: string;
+  isActive: boolean;
+  createdAt: string;
+}
+
+export interface ProtocolTemplateInfo {
+  id: number;
+  specialtyId: number | null;
+  name: string;
+  modality: string;
+  bodyPart: string;
+  sourceFilename: string;
+  sourcePath: string;
+  contentText: string;
+  aliases: string[];
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -278,6 +302,7 @@ class ApiClient {
     email: string;
     password: string;
     specialty?: string;
+    departmentId?: number | null;
     role: 'admin' | 'doctor';
   }): Promise<{ success: boolean; doctor: AdminDoctorInfo }> {
     return this.request('/api/admin/doctors', {
@@ -289,7 +314,7 @@ class ApiClient {
 
   async updateAdminDoctor(
     id: number,
-    data: { name?: string; specialty?: string; role?: 'admin' | 'doctor'; isActive?: boolean },
+    data: { name?: string; specialty?: string; departmentId?: number | null; role?: 'admin' | 'doctor'; isActive?: boolean },
   ): Promise<{ success: boolean; doctor: AdminDoctorInfo }> {
     return this.request(`/api/admin/doctors/${id}`, {
       method: 'PATCH',
@@ -300,6 +325,71 @@ class ApiClient {
 
   async deleteAdminDoctor(id: number): Promise<{ success: boolean }> {
     return this.request(`/api/admin/doctors/${id}`, { method: 'DELETE' });
+  }
+
+  async updateAdminDoctorPassword(id: number, newPassword: string): Promise<{ success: boolean }> {
+    return this.request(`/api/admin/doctors/${id}/password`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newPassword }),
+    });
+  }
+
+  async getSpecialties(): Promise<{ specialties: SpecialtyInfo[] }> {
+    return this.request('/api/specialties');
+  }
+
+  async createSpecialty(name: string, code?: string): Promise<{ success: boolean; specialty: SpecialtyInfo }> {
+    return this.request('/api/admin/specialties', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, code }),
+    });
+  }
+
+  async getProtocolTemplates(opts?: { specialtyId?: number; admin?: boolean }): Promise<{ templates: ProtocolTemplateInfo[] }> {
+    const params = new URLSearchParams();
+    if (opts?.specialtyId) params.set('specialtyId', String(opts.specialtyId));
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return this.request(`${opts?.admin ? '/api/admin/protocol-templates' : '/api/protocol-templates'}${qs}`);
+  }
+
+  async importProtocolTemplates(folderPath: string, specialtyName = 'Лучевая диагностика'): Promise<{
+    success: boolean;
+    folderPath: string;
+    specialty: SpecialtyInfo;
+    imported: Array<{ id: number; name: string; filename: string }>;
+    skipped: Array<{ filename: string; reason: string }>;
+  }> {
+    return this.request('/api/admin/protocol-templates/import-folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folderPath, specialtyName }),
+    }, 120_000);
+  }
+
+  async updateProtocolTemplate(
+    id: number,
+    data: Partial<Pick<ProtocolTemplateInfo, 'name' | 'modality' | 'bodyPart' | 'contentText' | 'isActive' | 'specialtyId' | 'aliases'>>,
+  ): Promise<{ success: boolean; template: ProtocolTemplateInfo }> {
+    return this.request(`/api/admin/protocol-templates/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  }
+
+  async fillProtocolTemplate(templateId: number, text: string): Promise<{
+    success: boolean;
+    template: ProtocolTemplateInfo;
+    rawText: string;
+    filledText: string;
+  }> {
+    return this.request('/api/protocols/fill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ templateId, text }),
+    }, 300_000);
   }
 
   async updateProfile(data: { name?: string; specialty?: string }): Promise<{ success: boolean; doctor: DoctorInfo }> {

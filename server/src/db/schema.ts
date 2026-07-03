@@ -1,14 +1,38 @@
 import { sqliteTable, integer, text } from 'drizzle-orm/sqlite-core';
 
+export const specialties = sqliteTable('specialties', {
+  id:        integer('id').primaryKey({ autoIncrement: true }),
+  name:      text('name').notNull().unique(),
+  code:      text('code').notNull().default(''),
+  isActive:  integer('is_active', { mode: 'boolean' }).notNull().default(true),
+  createdAt: text('created_at').notNull(),
+});
+
 export const doctors = sqliteTable('doctors', {
   id:           integer('id').primaryKey({ autoIncrement: true }),
   name:         text('name').notNull(),
   email:        text('email').notNull().unique(),
   passwordHash: text('password_hash').notNull(),
   specialty:    text('specialty').notNull().default(''),
+  departmentId: integer('department_id').references(() => specialties.id),
   role:         text('role', { enum: ['admin', 'doctor'] }).notNull().default('doctor'),
   isActive:     integer('is_active', { mode: 'boolean' }).notNull().default(true),
   createdAt:    text('created_at').notNull(),
+});
+
+export const protocolTemplates = sqliteTable('protocol_templates', {
+  id:             integer('id').primaryKey({ autoIncrement: true }),
+  specialtyId:    integer('specialty_id').references(() => specialties.id),
+  name:           text('name').notNull(),
+  modality:       text('modality').notNull().default(''),
+  bodyPart:       text('body_part').notNull().default(''),
+  sourceFilename: text('source_filename').notNull().default(''),
+  sourcePath:     text('source_path').notNull().default(''),
+  contentText:    text('content_text').notNull(),
+  aliasesJson:    text('aliases_json').notNull().default('[]'),
+  isActive:       integer('is_active', { mode: 'boolean' }).notNull().default(true),
+  createdAt:      text('created_at').notNull(),
+  updatedAt:      text('updated_at').notNull(),
 });
 
 export const patients = sqliteTable('patients', {
@@ -50,10 +74,14 @@ export const syncSessions = sqliteTable('sync_sessions', {
 
 export type SyncSession = typeof syncSessions.$inferSelect;
 
-export type Doctor  = typeof doctors.$inferSelect;
-export type Patient = typeof patients.$inferSelect;
-export type Visit   = typeof visits.$inferSelect;
+export type Doctor           = typeof doctors.$inferSelect;
+export type Specialty        = typeof specialties.$inferSelect;
+export type ProtocolTemplate = typeof protocolTemplates.$inferSelect;
+export type Patient          = typeof patients.$inferSelect;
+export type Visit            = typeof visits.$inferSelect;
 
-export type NewDoctor  = typeof doctors.$inferInsert;
-export type NewPatient = typeof patients.$inferInsert;
-export type NewVisit   = typeof visits.$inferInsert;
+export type NewDoctor           = typeof doctors.$inferInsert;
+export type NewSpecialty        = typeof specialties.$inferInsert;
+export type NewProtocolTemplate = typeof protocolTemplates.$inferInsert;
+export type NewPatient          = typeof patients.$inferInsert;
+export type NewVisit            = typeof visits.$inferInsert;

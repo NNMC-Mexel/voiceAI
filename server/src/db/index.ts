@@ -27,10 +27,36 @@ export function initDb(dbPath: string): AppDb {
       email         TEXT    NOT NULL UNIQUE,
       password_hash TEXT    NOT NULL,
       specialty     TEXT    NOT NULL DEFAULT '',
+      department_id INTEGER REFERENCES specialties(id) ON DELETE SET NULL,
       role          TEXT    NOT NULL DEFAULT 'doctor',
       is_active     INTEGER NOT NULL DEFAULT 1,
       created_at    TEXT    NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS specialties (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT    NOT NULL UNIQUE,
+      code        TEXT    NOT NULL DEFAULT '',
+      is_active   INTEGER NOT NULL DEFAULT 1,
+      created_at  TEXT    NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS protocol_templates (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      specialty_id    INTEGER REFERENCES specialties(id) ON DELETE SET NULL,
+      name            TEXT    NOT NULL,
+      modality        TEXT    NOT NULL DEFAULT '',
+      body_part       TEXT    NOT NULL DEFAULT '',
+      source_filename TEXT    NOT NULL DEFAULT '',
+      source_path     TEXT    NOT NULL DEFAULT '',
+      content_text    TEXT    NOT NULL,
+      aliases_json    TEXT    NOT NULL DEFAULT '[]',
+      is_active       INTEGER NOT NULL DEFAULT 1,
+      created_at      TEXT    NOT NULL,
+      updated_at      TEXT    NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_protocol_templates_specialty ON protocol_templates(specialty_id, is_active);
+    CREATE INDEX IF NOT EXISTS idx_protocol_templates_name ON protocol_templates(name COLLATE NOCASE);
 
     CREATE TABLE IF NOT EXISTS patients (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,11 +102,23 @@ export function initDb(dbPath: string): AppDb {
 
   try { sqlite.exec("ALTER TABLE doctors ADD COLUMN role TEXT NOT NULL DEFAULT 'doctor'"); } catch { /* already exists */ }
   try { sqlite.exec('ALTER TABLE doctors ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1'); } catch { /* already exists */ }
+  try { sqlite.exec('ALTER TABLE doctors ADD COLUMN department_id INTEGER REFERENCES specialties(id) ON DELETE SET NULL'); } catch { /* already exists */ }
+  try { sqlite.exec("ALTER TABLE protocol_templates ADD COLUMN modality TEXT NOT NULL DEFAULT ''"); } catch { /* already exists */ }
+  try { sqlite.exec("ALTER TABLE protocol_templates ADD COLUMN body_part TEXT NOT NULL DEFAULT ''"); } catch { /* already exists */ }
+  try { sqlite.exec("ALTER TABLE protocol_templates ADD COLUMN aliases_json TEXT NOT NULL DEFAULT '[]'"); } catch { /* already exists */ }
   sqlite.exec(`
     UPDATE doctors
     SET role = 'admin'
     WHERE id = (SELECT MIN(id) FROM doctors)
       AND NOT EXISTS (SELECT 1 FROM doctors WHERE role = 'admin');
+
+    INSERT INTO specialties (name, code, is_active, created_at)
+    SELECT 'Терапия', 'therapy', 1, datetime('now')
+    WHERE NOT EXISTS (SELECT 1 FROM specialties WHERE name = 'Терапия');
+
+    INSERT INTO specialties (name, code, is_active, created_at)
+    SELECT 'Лучевая диагностика', 'radiology', 1, datetime('now')
+    WHERE NOT EXISTS (SELECT 1 FROM specialties WHERE name = 'Лучевая диагностика');
   `);
 
   _db = drizzle(sqlite, { schema });

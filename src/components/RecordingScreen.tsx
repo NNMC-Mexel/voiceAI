@@ -1,5 +1,5 @@
 ﻿import { useState, useEffect, useRef, useCallback } from 'react';
-import { Mic, Pause, Play, Square, AlertCircle, CheckCircle, RotateCcw, Upload, FileText, Camera, Users, Smartphone, Bell, Settings, X as XIcon } from 'lucide-react';
+import { Mic, Pause, Play, Square, AlertCircle, CheckCircle, RotateCcw, Upload, FileText, Camera, Users, Smartphone, Bell, Settings, Shield, X as XIcon } from 'lucide-react';
 import type { PatientSummary } from '../api/client';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import type { VoiceRecorderStreamOptions } from '../hooks/useVoiceRecorder';
@@ -22,6 +22,8 @@ interface RecordingScreenProps {
   activePatient?: PatientSummary | null;
   onOpenPatients?: () => void;
   onOpenSettings?: () => void;
+  onOpenAdmin?: () => void;
+  onOpenProtocols?: () => void;
   onSyncUpload?: () => void;
   pendingSyncs?: PendingSync[];
   onClaimSync?: (syncId: string) => void;
@@ -39,7 +41,7 @@ function formatExternalErrorMessage(message: string): string {
 export function RecordingScreen({
   onRecordingComplete, onRecordingStart, streamOptions, onDocumentUpload,
   onRecordingTranscript,
-  activePatient, onOpenPatients, onOpenSettings, onSyncUpload,
+  activePatient, onOpenPatients, onOpenSettings, onOpenAdmin, onOpenProtocols, onSyncUpload,
   pendingSyncs = [], onClaimSync, onDismissSync,
   error: externalError,
 }: RecordingScreenProps) {
@@ -213,7 +215,7 @@ export function RecordingScreen({
   return (
     <div className="min-h-screen flex flex-col">
       {/* Top bar */}
-      {(activePatient || onOpenPatients || onOpenSettings || onSyncUpload || pendingSyncs.length > 0) && (
+      {(activePatient || onOpenPatients || onOpenSettings || onOpenAdmin || onOpenProtocols || onSyncUpload || pendingSyncs.length > 0) && (
         <div className="bg-white border-b border-slate-200 px-4 py-2.5 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2 min-w-0">
             {activePatient && (
@@ -243,6 +245,16 @@ export function RecordingScreen({
             {onOpenPatients && (
               <button onClick={onOpenPatients} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap">
                 <Users className="w-4 h-4" /> Пациенты
+              </button>
+            )}
+            {onOpenProtocols && (
+              <button onClick={onOpenProtocols} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap">
+                <FileText className="w-4 h-4" /> Протоколы
+              </button>
+            )}
+            {onOpenAdmin && (
+              <button onClick={onOpenAdmin} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap">
+                <Shield className="w-4 h-4" /> Админка
               </button>
             )}
             {onOpenSettings && (

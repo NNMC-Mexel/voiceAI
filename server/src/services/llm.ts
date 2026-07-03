@@ -515,6 +515,60 @@ Answer in Russian and use bullet points.`;
     return this.stripThinkingBlocks(data.content);
   }
 
+  async fillProtocolTemplate(templateText: string, dictationText: string): Promise<string> {
+    const cleanTemplate = templateText.trim();
+    const cleanDictation = dictationText.trim();
+    if (!cleanTemplate) throw new Error('Protocol template is empty');
+    if (!cleanDictation) return cleanTemplate;
+
+    const systemPrompt = `Ты медицинский ассистент для врачей лучевой и функциональной диагностики.
+Правила:
+1) Отвечай только на русском.
+2) Верни только готовый текст протокола, без пояснений и markdown.
+3) Сохраняй структуру, заголовки и стиль исходного шаблона.
+4) Заполняй протокол только фактами из диктовки.
+5) Не выдумывай размеры, признаки, диагнозы и заключение.
+6) Если врач не продиктовал значение для поля, оставь исходный текст шаблона или пустое место как в шаблоне.
+7) Если диктовка противоречит шаблону, приоритет у диктовки.`;
+
+    const userPrompt = `ИСХОДНЫЙ ШАБЛОН ПРОТОКОЛА:
+${cleanTemplate}
+
+ДИКТОВКА ВРАЧА:
+${cleanDictation}
+
+Сформируй заполненный протокол.`;
+
+    if (this.anthropic) {
+      return this.anthropic.completeText({
+        systemPrompt,
+        userPrompt,
+        maxTokens: 4096,
+        temperature: 0.1,
+        operation: 'fillProtocolTemplate',
+      });
+    }
+
+    const response = await this.fetchWithTimeout(`${this.config.serverUrl}/completion`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: this.buildCompletionBody({
+        prompt: `<|im_start|>system\n/no_think\n${systemPrompt}<|im_end|>\n<|im_start|>user\n${userPrompt}<|im_end|>\n<|im_start|>assistant\n`,
+        n_predict: 4096,
+        temperature: 0.1,
+        stop: ['<|im_end|>'],
+        stream: false,
+      }),
+    });
+
+    if (!response.ok) {
+      await this.throwLlmError(response, 'fillProtocolTemplate');
+    }
+
+    const data = (await response.json()) as LlamaCompletionResponse;
+    return this.stripThinkingBlocks(data.content).trim();
+  }
+
   async chat(
     question: string,
     history: Array<{ role: 'user' | 'assistant'; text: string }> = [],
