@@ -40,6 +40,16 @@ export interface VisitDetail {
   document: MedicalDocument | null;
 }
 
+export interface HealthStatus {
+  status: 'ok' | 'degraded';
+  timestamp: string;
+  services: {
+    whisper: 'ready' | 'unavailable';
+    llm: 'ready' | 'unavailable';
+    tts: 'ready' | 'unavailable' | 'disabled';
+  };
+}
+
 export interface DoctorInfo {
   id: number;
   name: string;
@@ -486,7 +496,7 @@ class ApiClient {
     throw lastError instanceof Error ? lastError : new Error('Request failed');
   }
 
-  async healthCheck(): Promise<{ status: string; timestamp: string }> {
+  async healthCheck(): Promise<HealthStatus> {
     return this.request('/api/health');
   }
 

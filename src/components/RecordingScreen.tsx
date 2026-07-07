@@ -4,6 +4,7 @@ import type { PatientSummary } from '../api/client';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import type { VoiceRecorderStreamOptions } from '../hooks/useVoiceRecorder';
 import { useWakeWord } from '../hooks/useWakeWord';
+import { useServiceHealth } from '../hooks/useServiceHealth';
 import { WaveformVisualizer } from './WaveformVisualizer';
 
 
@@ -59,6 +60,14 @@ export function RecordingScreen({
 
   const [error, setError] = useState<string | null>(null);
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
+  // Pre-flight: статус ASR/LLM. Предупреждаем ДО записи, чтобы врач не
+  // надиктовал приём впустую при лежащем сервисе (запись не блокируем —
+  // health-check может дать ложный минус, а аудио сохраняется на сервере).
+  const { health, backendDown, refresh: refreshHealth } = useServiceHealth();
+  const degradedServices: string[] = [];
+  if (health?.services.whisper === 'unavailable') degradedServices.push('распознавание речи');
+  if (health?.services.llm === 'unavailable') degradedServices.push('ИИ-структурирование');
+  const showHealthWarning = (backendDown || degradedServices.length > 0) && !isRecording && !audioBlob;
   const autoSubmitRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const docInputRef = useRef<HTMLInputElement>(null);
@@ -308,6 +317,30 @@ export function RecordingScreen({
         </div>
 
         <div className="glass-card rounded-2xl sm:rounded-3xl p-5 sm:p-8 slide-up" style={{ animationDelay: '0.1s' }}>
+          {showHealthWarning && (
+            <div className="flex items-start gap-3 p-4 bg-amber-50 border border-amber-300 rounded-xl mb-6">
+              <AlertCircle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <p className="text-amber-800 text-sm font-semibold">
+                  {backendDown
+                    ? 'Сервер недоступен'
+                    : `Сервис временно недоступен: ${degradedServices.join(', ')}`}
+                </p>
+                <p className="text-amber-700 text-sm mt-0.5">
+                  {backendDown
+                    ? 'Проверьте, что backend запущен. Запись сейчас не будет обработана.'
+                    : 'Запись можно начать, но обработка завершится ошибкой, пока сервис не восстановится.'}
+                </p>
+              </div>
+              <button
+                onClick={refreshHealth}
+                className="text-sm text-amber-700 hover:text-amber-900 font-medium whitespace-nowrap underline underline-offset-2"
+              >
+                Проверить снова
+              </button>
+            </div>
+          )}
+
           {hasPermission === false && (
             <div className="flex items-center gap-3 p-4 bg-red-50 border border-red-200 rounded-xl mb-6">
               <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
