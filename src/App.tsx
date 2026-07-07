@@ -11,6 +11,8 @@ import { PatientListScreen } from './components/PatientListScreen';
 import { PatientScreen } from './components/PatientScreen';
 import { SyncUploadScreen } from './components/SyncUploadScreen';
 import { SettingsScreen } from './components/SettingsScreen';
+import { AdminPanelScreen } from './components/AdminPanelScreen';
+import { ProtocolWorkspaceScreen } from './components/ProtocolWorkspaceScreen';
 import { apiClient } from './api/client';
 import type { DoctorInfo, PatientSummary } from './api/client';
 
@@ -167,7 +169,7 @@ function App() {
   const [step, setStep] = useState<AppStep>(() => {
     try {
       const saved = sessionStorage.getItem(SESSION_STEP_KEY) as AppStep | null;
-      return saved && ['recording', 'processing', 'editing', 'preview'].includes(saved) ? saved : 'recording';
+      return saved && ['recording', 'processing', 'editing', 'preview', 'patients', 'patient', 'sync-upload', 'settings', 'admin', 'protocols'].includes(saved) ? saved : 'recording';
     } catch {
       return 'recording';
     }
@@ -263,6 +265,12 @@ function App() {
     window.addEventListener('auth:logout', onLogout);
     return () => window.removeEventListener('auth:logout', onLogout);
   }, []);
+
+  useEffect(() => {
+    if (step === 'admin' && doctor?.role !== 'admin') {
+      setStep('recording');
+    }
+  }, [doctor?.role, step]);
 
   // Polling pending syncs (каждые 10 сек когда авторизован)
   useEffect(() => {
@@ -688,6 +696,8 @@ function App() {
 
   const handleOpenPatients = useCallback(() => setStep('patients'), []);
   const handleOpenSettings = useCallback(() => setStep('settings'), []);
+  const handleOpenAdmin = useCallback(() => setStep('admin'), []);
+  const handleOpenProtocols = useCallback(() => setStep('protocols'), []);
 
   const handleLogout = useCallback(async () => {
     await apiClient.logout();
@@ -793,6 +803,20 @@ function App() {
         />
       )}
 
+      {step === 'admin' && doctor?.role === 'admin' && (
+        <AdminPanelScreen
+          doctor={doctor}
+          onBack={() => setStep('recording')}
+        />
+      )}
+
+      {step === 'protocols' && doctor && (
+        <ProtocolWorkspaceScreen
+          doctor={doctor}
+          onBack={() => setStep('recording')}
+        />
+      )}
+
       {step === 'recording' && (
         <RecordingScreen
           onRecordingComplete={handleRecordingComplete}
@@ -803,6 +827,8 @@ function App() {
           activePatient={activePatient}
           onOpenPatients={doctor ? handleOpenPatients : undefined}
           onOpenSettings={doctor ? handleOpenSettings : undefined}
+          onOpenAdmin={doctor?.role === 'admin' ? handleOpenAdmin : undefined}
+          onOpenProtocols={doctor ? handleOpenProtocols : undefined}
           onSyncUpload={doctor ? () => setStep('sync-upload') : undefined}
           pendingSyncs={pendingSyncs}
           onClaimSync={handleClaimSync}

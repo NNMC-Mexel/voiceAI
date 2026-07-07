@@ -522,6 +522,60 @@ Answer in Russian and use bullet points.`;
     return this.stripThinkingBlocks(data.content);
   }
 
+  async fillProtocolTemplate(templateText: string, dictationText: string): Promise<string> {
+    const cleanTemplate = templateText.trim();
+    const cleanDictation = dictationText.trim();
+    if (!cleanTemplate) throw new Error('Protocol template is empty');
+    if (!cleanDictation) return cleanTemplate;
+
+    const systemPrompt = `Ты медицинский ассистент для врачей лучевой и функциональной диагностики.
+Правила:
+1) Отвечай только на русском.
+2) Верни только готовый текст протокола, без пояснений и markdown.
+3) Сохраняй структуру, заголовки и стиль исходного шаблона.
+4) Заполняй протокол только фактами из диктовки.
+5) Не выдумывай размеры, признаки, диагнозы и заключение.
+6) Если врач не продиктовал значение для поля, оставь исходный текст шаблона или пустое место как в шаблоне.
+7) Если диктовка противоречит шаблону, приоритет у диктовки.`;
+
+    const userPrompt = `ИСХОДНЫЙ ШАБЛОН ПРОТОКОЛА:
+${cleanTemplate}
+
+ДИКТОВКА ВРАЧА:
+${cleanDictation}
+
+Сформируй заполненный протокол.`;
+
+    if (this.anthropic) {
+      return this.anthropic.completeText({
+        systemPrompt,
+        userPrompt,
+        maxTokens: 4096,
+        temperature: 0.1,
+        operation: 'fillProtocolTemplate',
+      });
+    }
+
+    const response = await this.fetchWithTimeout(`${this.config.serverUrl}/completion`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: this.buildCompletionBody({
+        prompt: `<|im_start|>system\n/no_think\n${systemPrompt}<|im_end|>\n<|im_start|>user\n${userPrompt}<|im_end|>\n<|im_start|>assistant\n`,
+        n_predict: 4096,
+        temperature: 0.1,
+        stop: ['<|im_end|>'],
+        stream: false,
+      }),
+    });
+
+    if (!response.ok) {
+      await this.throwLlmError(response, 'fillProtocolTemplate');
+    }
+
+    const data = (await response.json()) as LlamaCompletionResponse;
+    return this.stripThinkingBlocks(data.content).trim();
+  }
+
   async chat(
     question: string,
     history: Array<{ role: 'user' | 'assistant'; text: string }> = [],
@@ -889,7 +943,7 @@ ${normalized}`;
 ═══════════════════════════════════════════════════════
 ГЛАВНЫЕ ПРАВИЛА (нарушение = ошибка):
 ═══════════════════════════════════════════════════════
-A) ПЕРЕНОСИ ДИКТОВКУ ДОСЛОВНО. Ты инструмент структурирования, а НЕ редактор. Запрещено: сокращать, пересказывать, обобщать, выкидывать "неважное". Если врач произнёс фразу — она должна попасть в JSON.
+A) ПЕРЕНОСИ ДИКТОВКУ ДОСЛОВНО. Ты инструмент структурирования, а НЕ редактор. Запрещено: сокращать, пересказывать, обобщать, выкидывать "неважное". Если врач произнёс фразу — она должна попасть в JSON. «Дословно» относится к ФАКТАМ (симптомы, дозы, названия, значения) — поверхностная нормализация формы (раздел «ФОРМАТИРОВАНИЕ И КОРРЕКТУРА») при этом ОБЯЗАТЕЛЬНА.
 Б) ФИКСИРОВАННЫЙ ПОРЯДОК БЛОКОВ. Врач диктует разделы в строгой последовательности:
    1. Жалобы (complaints)
    2. Анамнез заболевания (anamnesis)
@@ -965,6 +1019,11 @@ ${labRef}
 ФОРМАТИРОВАНИЕ И КОРРЕКТУРА:
 ═══════════════════════════════════════════════════════
 • Исправляй грамматику, пунктуацию, опечатки распознавания. Пробел после знаков препинания, заглавная после точки, никакой двойной пунктуации.
+• Каждое текстовое поле начинается с заглавной буквы и заканчивается точкой.
+• ЧИСЛИТЕЛЬНЫЕ ПРОПИСЬЮ → ЦИФРАМИ везде: «двадцать пять лет» → «25 лет», «по одной таблетке два раза в день» → «по 1 таблетке 2 раза в день», «сто сорок на девяносто» → «140/90».
+• ФИО пациента — каждое слово с заглавной буквы: «мухамедин айдарлибе» → «Мухамедин Айдарлибе». Распознанное ФИО не «исправляй» на похожее имя — только регистр.
+• АНАТОМИЧЕСКИЙ ПОРЯДОК СЛОВ: сторона перед органом — «коленный правый сустав» → «правый коленный сустав», «локтевой левый» → «левый локтевой». Это нормализация формы, НЕ изменение факта.
+• Разговорные обороты диктовки приводи к клиническому стилю БЕЗ добавления фактов: «жалобы на коленный правый сустав» → «Жалобы на правый коленный сустав» (симптом «боль» НЕ дописывай, если врач его не произнёс).
 • Убирай слова-паразиты (ну, вот, значит, эээ), голосовые команды («точка», «запятая», «скобка открывается»).
 • "мм рт.ст." сокращённо. ИМТ вместо "индекс массы тела", АД вместо "артериальное давление".
 • Десятичные через запятую ("34 и 2" → "34,2"). Вес в кг, рост в см.
@@ -3693,6 +3752,11 @@ JSON:`;
       .trim();
 
     const docTextRaw = [
+      // Поля пациента: ФИО/возраст/пол уходят в структуру, а НЕ в текстовые поля.
+      // Без них P5 считает предложение «Пациент <ФИО> … жалобы …» непокрытым и
+      // роутит весь разговорный кусок целиком в complaints (баг с дублированием
+      // сырого транскрипта в поле «Жалобы»).
+      doc.patient?.fullName, doc.patient?.age, doc.patient?.gender,
       doc.complaints, doc.anamnesis, doc.outpatientExams, doc.clinicalCourse,
       doc.allergyHistory, doc.objectiveStatus, doc.neurologicalStatus,
       doc.diagnosis, doc.finalDiagnosis, doc.conclusion, doc.doctorNotes,
@@ -3700,8 +3764,9 @@ JSON:`;
       // Подсказки покрытия от P1/P2 — фрагменты, которые уже растащены в conclusion
       // в виде отдельных пунктов, но исходное предложение целиком в полях не лежит.
       ...(coverageHints ? Array.from(coverageHints) : []),
-    ].join(' ');
+    ].filter(Boolean).join(' ');
     const normDoc = normalize(docTextRaw);
+    const docTokens = new Set(normDoc.split(' ').filter(Boolean));
 
     const sentences = rawText
       .split(/(?<=[.!?])\s+/)
@@ -3717,6 +3782,11 @@ JSON:`;
       const midStart = Math.max(0, Math.floor(ns.length / 2) - 8);
       const fp2 = ns.substring(midStart, midStart + 15);
       if (fp2.length >= 12 && normDoc.includes(fp2)) continue;
+      // Token-coverage: предложение могло быть КОРРЕКТНО растащено LLM по разным
+      // полям (имя → patient, жалоба → complaints, история → anamnesis). Тогда
+      // дословного отпечатка нет, но почти все значимые слова уже присутствуют в
+      // документе — это НЕ потеря контента, и роутить его обратно нельзя.
+      if (this.sentenceTokenCoverage(ns, docTokens) >= 0.7) continue;
       missing.push(s);
     }
 
@@ -3761,6 +3831,39 @@ JSON:`;
       }
       console.log(`  [P5 ROUTED → ${target}] ${routedText.substring(0, 80)}`);
     }
+  }
+
+  /**
+   * Структурные маркеры и числительные словами, которых в нормализованных полях
+   * документа обычно НЕТ (имя/возраст/пол хранятся отдельно, числа пишутся
+   * цифрами). Их исключение из token-coverage не даёт покрытию ложно занижаться
+   * и защищает от ошибочного P5-роутинга уже разложенного предложения.
+   */
+  private static readonly P5_COVERAGE_STOPWORDS = new Set<string>([
+    'пациент', 'пациента', 'пациентка', 'пациентки', 'больной', 'больная',
+    'возраст', 'лет', 'год', 'года', 'годов',
+    'жалобы', 'жалоба', 'жалуется', 'беспокоит', 'беспокоят',
+    'мужчина', 'женщина', 'мужской', 'женский', 'пол',
+    'ноль', 'один', 'одна', 'два', 'две', 'три', 'четыре', 'пять', 'шесть',
+    'семь', 'восемь', 'девять', 'десять', 'одиннадцать', 'двенадцать',
+    'тринадцать', 'четырнадцать', 'пятнадцать', 'шестнадцать', 'семнадцать',
+    'восемнадцать', 'девятнадцать', 'двадцать', 'тридцать', 'сорок',
+    'пятьдесят', 'шестьдесят', 'семьдесят', 'восемьдесят', 'девяносто',
+    'сто', 'двести', 'триста', 'тысяча',
+  ]);
+
+  /**
+   * Доля значимых слов предложения, уже присутствующих в полях документа
+   * (token-coverage). Служебные маркеры и числительные словами исключаются —
+   * см. P5_COVERAGE_STOPWORDS. Возвращает 1, если значимых слов нет.
+   */
+  private sentenceTokenCoverage(normalizedSentence: string, docTokens: Set<string>): number {
+    const significant = normalizedSentence
+      .split(' ')
+      .filter((t) => t.length >= 4 && !LLMService.P5_COVERAGE_STOPWORDS.has(t));
+    if (significant.length === 0) return 1;
+    const covered = significant.filter((t) => docTokens.has(t)).length;
+    return covered / significant.length;
   }
 
   private cleanRecoveredSentenceForTarget(target: keyof MedicalDocument, sentence: string): string {

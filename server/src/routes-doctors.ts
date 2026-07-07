@@ -9,8 +9,12 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import bcrypt from 'bcryptjs';
 import { eq, like, desc, and, lt } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
+import { existsSync } from 'fs';
+import { readdir, stat } from 'fs/promises';
+import path from 'path';
+import mammoth from 'mammoth';
 import type { AppDb } from './db/index.js';
-import { doctors, patients, visits, syncSessions } from './db/schema.js';
+import { doctors, patients, visits, syncSessions, specialties, protocolTemplates } from './db/schema.js';
 import { DocumentExtractorService } from './services/document-extractor.js';
 import { LLMService } from './services/llm.js';
 import { documentFromConsultationProtocolText, documentFromExactSourceText, toSafeUploadFilename } from './routes.js';
@@ -33,11 +37,81 @@ function parseRole(v: unknown): DoctorRole | null {
 }
 
 const SYNC_TTL_HOURS = 2;
+const DEFAULT_TEMPLATE_SOURCE_DIR = 'C:\\Users\\AI\\Downloads\\ШАБЛОН ПРОТОКОЛ СТАЦИОНАР (1)\\ПРОТОКОЛ СТАЦИОНАР';
 
 function syncExpiresAt(): string {
   const d = new Date();
   d.setHours(d.getHours() + SYNC_TTL_HOURS);
   return d.toISOString();
+}
+
+function normalizeTemplateName(filename: string): string {
+  return path.basename(filename, path.extname(filename))
+    .replace(/\s+—\s+копия(?:\s+\(\d+\))?/giu, '')
+    .replace(/\s+-\s+копия(?:\s+\(\d+\))?/giu, '')
+    .replace(/\s*\(\d+\)\s*$/u, '')
+    .replace(/\.+$/u, '')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+function inferTemplateModality(filename: string, contentText: string): string {
+  const text = `${filename}\n${contentText}`.toLowerCase();
+  if (/(?:\bкт\b|мскт|компьютерн\S+\s+томограф)/iu.test(text)) return 'КТ';
+  if (/(?:\bмрт\b|магнитно-резонансн\S+\s+томограф)/iu.test(text)) return 'МРТ';
+  if (/(?:эхокг|эхо\s*кг|эхокардиограф|узи сердца)/iu.test(text)) return 'ЭхоКГ';
+  if (/(?:узи|ультразвуков)/iu.test(text)) return 'УЗИ';
+  return '';
+}
+
+function inferTemplateBodyPart(filename: string): string {
+  const name = normalizeTemplateName(filename).toLowerCase();
+  const known: Array<[RegExp, string]> = [
+    [/обп|брюшн/iu, 'Органы брюшной полости'],
+    [/поч/iu, 'Почки'],
+    [/щитов/iu, 'Щитовидная железа'],
+    [/молоч|грудн/iu, 'Молочные железы'],
+    [/вен|сосуд|портальн|аорт/iu, 'Сосуды'],
+    [/плеч|коленн|сустав/iu, 'Суставы'],
+    [/мочев|трузи|прост/iu, 'Мочеполовая система'],
+    [/мошон/iu, 'Мошонка'],
+    [/плеврал/iu, 'Плевральная полость'],
+    [/лимф/iu, 'Лимфоузлы'],
+    [/эхокг|сердц/iu, 'Сердце'],
+    [/грыж/iu, 'Грыжа'],
+  ];
+  return known.find(([pattern]) => pattern.test(name))?.[1] || normalizeTemplateName(filename);
+}
+
+function makeTemplateAliases(filename: string, name: string, modality: string, bodyPart: string): string[] {
+  const values = new Set<string>();
+  for (const value of [name, bodyPart, filename, `${modality} ${bodyPart}`]) {
+    const clean = value.toLowerCase().replace(/\.[a-z0-9]+$/iu, '').replace(/\s+/gu, ' ').trim();
+    if (clean) values.add(clean);
+  }
+  return Array.from(values);
+}
+
+function publicTemplate(template: typeof protocolTemplates.$inferSelect) {
+  let aliases: string[] = [];
+  try {
+    const parsed = JSON.parse(template.aliasesJson || '[]');
+    aliases = Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
+  } catch { /* ignore */ }
+  return {
+    id: template.id,
+    specialtyId: template.specialtyId,
+    name: template.name,
+    modality: template.modality,
+    bodyPart: template.bodyPart,
+    sourceFilename: template.sourceFilename,
+    sourcePath: template.sourcePath,
+    contentText: template.contentText,
+    aliases,
+    isActive: template.isActive,
+    createdAt: template.createdAt,
+    updatedAt: template.updatedAt,
+  };
 }
 
 export async function registerDoctorRoutes(
@@ -66,6 +140,7 @@ export async function registerDoctorRoutes(
       email: doctors.email,
       role: doctors.role,
       isActive: doctors.isActive,
+      departmentId: doctors.departmentId,
     }).from(doctors).where(eq(doctors.id, request.user.doctorId)).get();
 
     if (!doctor) {
@@ -144,7 +219,7 @@ export async function registerDoctorRoutes(
     return {
       success: true,
       token,
-      doctor: { id: doctor.id, name: doctor.name, email: doctor.email, specialty: doctor.specialty, role: doctor.role },
+      doctor: { id: doctor.id, name: doctor.name, email: doctor.email, specialty: doctor.specialty, departmentId: doctor.departmentId, role: doctor.role },
     };
   });
 
@@ -190,7 +265,7 @@ export async function registerDoctorRoutes(
     return {
       success: true,
       token,
-      doctor: { id: doctor.id, name: doctor.name, email: doctor.email, specialty: doctor.specialty, role: doctor.role },
+      doctor: { id: doctor.id, name: doctor.name, email: doctor.email, specialty: doctor.specialty, departmentId: doctor.departmentId, role: doctor.role },
     };
   });
 
@@ -202,6 +277,7 @@ export async function registerDoctorRoutes(
       name: doctors.name,
       email: doctors.email,
       specialty: doctors.specialty,
+      departmentId: doctors.departmentId,
       role: doctors.role,
       isActive: doctors.isActive,
     }).from(doctors).where(eq(doctors.id, doctorId)).get();
@@ -246,6 +322,7 @@ export async function registerDoctorRoutes(
         name: doctors.name,
         email: doctors.email,
         specialty: doctors.specialty,
+        departmentId: doctors.departmentId,
         role: doctors.role,
         isActive: doctors.isActive,
         createdAt: doctors.createdAt,
@@ -270,6 +347,7 @@ export async function registerDoctorRoutes(
       const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
       const password = typeof body.password === 'string' ? body.password : '';
       const specialty = typeof body.specialty === 'string' ? body.specialty.trim() : '';
+      const departmentId = typeof body.departmentId === 'number' ? body.departmentId : null;
       const role = parseRole(body.role) ?? 'doctor';
 
       if (!name || !email || !password) {
@@ -290,6 +368,7 @@ export async function registerDoctorRoutes(
         email,
         passwordHash,
         specialty,
+        departmentId,
         role,
         isActive: true,
         createdAt: now(),
@@ -298,6 +377,7 @@ export async function registerDoctorRoutes(
         name: doctors.name,
         email: doctors.email,
         specialty: doctors.specialty,
+        departmentId: doctors.departmentId,
         role: doctors.role,
         isActive: doctors.isActive,
         createdAt: doctors.createdAt,
@@ -325,6 +405,17 @@ export async function registerDoctorRoutes(
       const updates: Partial<typeof doctors.$inferInsert> = {};
       if (typeof body.name === 'string') updates.name = body.name.trim();
       if (typeof body.specialty === 'string') updates.specialty = body.specialty.trim();
+      if (body.departmentId !== undefined) {
+        if (body.departmentId === null) {
+          updates.departmentId = null;
+        } else if (typeof body.departmentId === 'number' && Number.isInteger(body.departmentId)) {
+          const department = db.select({ id: specialties.id }).from(specialties).where(eq(specialties.id, body.departmentId)).get();
+          if (!department) return reply.status(400).send({ error: 'Отдел не найден' });
+          updates.departmentId = body.departmentId;
+        } else {
+          return reply.status(400).send({ error: 'Invalid departmentId' });
+        }
+      }
       if (body.role !== undefined) {
         const role = parseRole(body.role);
         if (!role) return reply.status(400).send({ error: 'Invalid role' });
@@ -360,6 +451,7 @@ export async function registerDoctorRoutes(
             name: doctors.name,
             email: doctors.email,
             specialty: doctors.specialty,
+            departmentId: doctors.departmentId,
             role: doctors.role,
             isActive: doctors.isActive,
             createdAt: doctors.createdAt,
@@ -369,12 +461,294 @@ export async function registerDoctorRoutes(
             name: doctors.name,
             email: doctors.email,
             specialty: doctors.specialty,
+            departmentId: doctors.departmentId,
             role: doctors.role,
             isActive: doctors.isActive,
             createdAt: doctors.createdAt,
           }).from(doctors).where(eq(doctors.id, doctorId)).all();
 
       return { success: true, doctor };
+    },
+  );
+
+  fastify.put(
+    '/api/admin/doctors/:id/password',
+    { preValidation: [requireActiveDoctor] },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      if (request.user.role !== 'admin') {
+        return reply.status(403).send({ error: 'Требуются права администратора' });
+      }
+
+      const { id } = request.params as { id: string };
+      const doctorId = parseInt(id, 10);
+      if (!Number.isInteger(doctorId)) return reply.status(400).send({ error: 'Invalid doctor id' });
+
+      const body = request.body;
+      if (!isRecord(body)) return reply.status(400).send({ error: 'Invalid body' });
+
+      const newPassword = typeof body.newPassword === 'string' ? body.newPassword : '';
+      if (!newPassword) {
+        return reply.status(400).send({ error: 'newPassword обязателен' });
+      }
+      if (newPassword.length < 8) {
+        return reply.status(400).send({ error: 'Пароль должен быть не менее 8 символов' });
+      }
+
+      const existing = db.select({ id: doctors.id }).from(doctors).where(eq(doctors.id, doctorId)).get();
+      if (!existing) return reply.status(404).send({ error: 'Врач не найден' });
+
+      const passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+      db.update(doctors).set({ passwordHash }).where(eq(doctors.id, doctorId)).run();
+      return { success: true };
+    },
+  );
+
+  fastify.get(
+    '/api/specialties',
+    { preValidation: [requireActiveDoctor] },
+    async () => {
+      const list = db.select().from(specialties)
+        .where(eq(specialties.isActive, true))
+        .orderBy(specialties.name)
+        .all();
+      return { specialties: list };
+    },
+  );
+
+  fastify.post(
+    '/api/admin/specialties',
+    { preValidation: [requireActiveDoctor] },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      if (request.user.role !== 'admin') {
+        return reply.status(403).send({ error: 'Требуются права администратора' });
+      }
+      const body = request.body;
+      if (!isRecord(body)) return reply.status(400).send({ error: 'Invalid body' });
+
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      const code = typeof body.code === 'string' ? body.code.trim() : '';
+      if (!name) return reply.status(400).send({ error: 'name обязателен' });
+
+      const existing = db.select().from(specialties).where(eq(specialties.name, name)).get();
+      if (existing) return { success: true, specialty: existing };
+
+      const [specialty] = db.insert(specialties).values({
+        name,
+        code,
+        isActive: true,
+        createdAt: now(),
+      }).returning().all();
+      return { success: true, specialty };
+    },
+  );
+
+  fastify.get(
+    '/api/protocol-templates',
+    { preValidation: [requireActiveDoctor] },
+    async (request: FastifyRequest) => {
+      const query = request.query as Record<string, string | undefined>;
+      const specialtyId = Number.parseInt(query.specialtyId || '', 10);
+      const currentDoctor = db.select({
+        role: doctors.role,
+        departmentId: doctors.departmentId,
+      }).from(doctors).where(eq(doctors.id, request.user.doctorId)).get();
+      const allTemplates = db.select().from(protocolTemplates)
+        .where(eq(protocolTemplates.isActive, true))
+        .orderBy(protocolTemplates.name)
+        .all();
+      const allowedDepartmentId = currentDoctor?.role === 'admin'
+        ? (Number.isInteger(specialtyId) ? specialtyId : null)
+        : currentDoctor?.departmentId;
+      const filtered = allowedDepartmentId
+        ? allTemplates.filter((template) => template.specialtyId === allowedDepartmentId)
+        : currentDoctor?.role === 'admin'
+          ? allTemplates
+          : [];
+      return { templates: filtered.map(publicTemplate) };
+    },
+  );
+
+  fastify.get(
+    '/api/admin/protocol-templates',
+    { preValidation: [requireActiveDoctor] },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      if (request.user.role !== 'admin') {
+        return reply.status(403).send({ error: 'Требуются права администратора' });
+      }
+      const list = db.select().from(protocolTemplates).orderBy(desc(protocolTemplates.updatedAt)).all();
+      return { templates: list.map(publicTemplate) };
+    },
+  );
+
+  fastify.post(
+    '/api/admin/protocol-templates/import-folder',
+    { preValidation: [requireActiveDoctor] },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      if (request.user.role !== 'admin') {
+        return reply.status(403).send({ error: 'Требуются права администратора' });
+      }
+      const body = request.body;
+      if (!isRecord(body)) return reply.status(400).send({ error: 'Invalid body' });
+
+      const folderPath = typeof body.folderPath === 'string' && body.folderPath.trim()
+        ? body.folderPath.trim()
+        : process.env.PROTOCOL_TEMPLATE_SOURCE_DIR || DEFAULT_TEMPLATE_SOURCE_DIR;
+      if (!existsSync(folderPath)) {
+        return reply.status(400).send({ error: `Папка не найдена: ${folderPath}` });
+      }
+
+      const specialtyName = typeof body.specialtyName === 'string' && body.specialtyName.trim()
+        ? body.specialtyName.trim()
+        : 'Лучевая диагностика';
+      let specialty = db.select().from(specialties).where(eq(specialties.name, specialtyName)).get();
+      if (!specialty) {
+        [specialty] = db.insert(specialties).values({
+          name: specialtyName,
+          code: specialtyName.toLowerCase().replace(/\s+/gu, '_'),
+          isActive: true,
+          createdAt: now(),
+        }).returning().all();
+      }
+
+      const entries = await readdir(folderPath);
+      const imported: Array<{ id: number; name: string; filename: string }> = [];
+      const skipped: Array<{ filename: string; reason: string }> = [];
+
+      for (const filename of entries) {
+        if (filename.startsWith('~$')) {
+          skipped.push({ filename, reason: 'временный файл Word' });
+          continue;
+        }
+        const ext = path.extname(filename).toLowerCase();
+        if (ext !== '.docx') {
+          skipped.push({ filename, reason: ext === '.doc' ? 'старый .doc, нужен .docx' : 'неподдерживаемый формат' });
+          continue;
+        }
+
+        const filePath = path.join(folderPath, filename);
+        const info = await stat(filePath);
+        if (!info.isFile()) continue;
+
+        try {
+          const extracted = await mammoth.extractRawText({ path: filePath });
+          const contentText = extracted.value.trim();
+          if (!contentText) {
+            skipped.push({ filename, reason: 'не удалось извлечь текст' });
+            continue;
+          }
+
+          const name = normalizeTemplateName(filename);
+          const modality = inferTemplateModality(filename, contentText);
+          const bodyPart = inferTemplateBodyPart(filename);
+          const aliasesJson = JSON.stringify(makeTemplateAliases(filename, name, modality, bodyPart));
+          const ts = now();
+          const existing = db.select().from(protocolTemplates).where(eq(protocolTemplates.sourcePath, filePath)).get();
+
+          const values = {
+            specialtyId: specialty.id,
+            name,
+            modality,
+            bodyPart,
+            sourceFilename: filename,
+            sourcePath: filePath,
+            contentText,
+            aliasesJson,
+            isActive: true,
+            updatedAt: ts,
+          };
+
+          const [template] = existing
+            ? db.update(protocolTemplates).set(values).where(eq(protocolTemplates.id, existing.id)).returning().all()
+            : db.insert(protocolTemplates).values({ ...values, createdAt: ts }).returning().all();
+
+          imported.push({ id: template.id, name: template.name, filename });
+        } catch (err) {
+          skipped.push({ filename, reason: err instanceof Error ? err.message : 'ошибка чтения файла' });
+        }
+      }
+
+      return {
+        success: true,
+        folderPath,
+        specialty,
+        imported,
+        skipped,
+      };
+    },
+  );
+
+  fastify.patch(
+    '/api/admin/protocol-templates/:id',
+    { preValidation: [requireActiveDoctor] },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      if (request.user.role !== 'admin') {
+        return reply.status(403).send({ error: 'Требуются права администратора' });
+      }
+      const { id } = request.params as { id: string };
+      const templateId = Number.parseInt(id, 10);
+      if (!Number.isInteger(templateId)) return reply.status(400).send({ error: 'Invalid template id' });
+      const body = request.body;
+      if (!isRecord(body)) return reply.status(400).send({ error: 'Invalid body' });
+
+      const updates: Partial<typeof protocolTemplates.$inferInsert> = { updatedAt: now() };
+      if (typeof body.name === 'string') updates.name = body.name.trim();
+      if (typeof body.modality === 'string') updates.modality = body.modality.trim();
+      if (typeof body.bodyPart === 'string') updates.bodyPart = body.bodyPart.trim();
+      if (typeof body.contentText === 'string') updates.contentText = body.contentText.trim();
+      if (typeof body.isActive === 'boolean') updates.isActive = body.isActive;
+      if (typeof body.specialtyId === 'number') updates.specialtyId = body.specialtyId;
+      if (Array.isArray(body.aliases)) {
+        updates.aliasesJson = JSON.stringify(body.aliases.filter((x): x is string => typeof x === 'string'));
+      }
+
+      const [template] = db.update(protocolTemplates).set(updates)
+        .where(eq(protocolTemplates.id, templateId))
+        .returning()
+        .all();
+      if (!template) return reply.status(404).send({ error: 'Шаблон не найден' });
+      return { success: true, template: publicTemplate(template) };
+    },
+  );
+
+  fastify.post(
+    '/api/protocols/fill',
+    { preValidation: [requireActiveDoctor] },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const body = request.body;
+      if (!isRecord(body)) return reply.status(400).send({ error: 'Invalid body' });
+      const templateId = typeof body.templateId === 'number' ? body.templateId : Number.parseInt(String(body.templateId || ''), 10);
+      const text = typeof body.text === 'string' ? body.text.trim() : '';
+      if (!Number.isInteger(templateId)) return reply.status(400).send({ error: 'templateId обязателен' });
+      if (!text) return reply.status(400).send({ error: 'text обязателен' });
+
+      const template = db.select().from(protocolTemplates)
+        .where(and(eq(protocolTemplates.id, templateId), eq(protocolTemplates.isActive, true)))
+        .get();
+      if (!template) return reply.status(404).send({ error: 'Шаблон не найден' });
+      if (request.user.role !== 'admin') {
+        const currentDoctor = db.select({ departmentId: doctors.departmentId })
+          .from(doctors)
+          .where(eq(doctors.id, request.user.doctorId))
+          .get();
+        if (!currentDoctor?.departmentId || template.specialtyId !== currentDoctor.departmentId) {
+          return reply.status(403).send({ error: 'Шаблон недоступен для отдела врача' });
+        }
+      }
+
+      try {
+        const filledText = llmService
+          ? await llmService.fillProtocolTemplate(template.contentText, text)
+          : `${template.contentText}\n\nДиктовка:\n${text}`;
+        return {
+          success: true,
+          template: publicTemplate(template),
+          rawText: text,
+          filledText,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Ошибка заполнения протокола';
+        return reply.status(500).send({ error: message });
+      }
     },
   );
 
@@ -428,6 +802,7 @@ export async function registerDoctorRoutes(
             name: doctors.name,
             email: doctors.email,
             specialty: doctors.specialty,
+            departmentId: doctors.departmentId,
             role: doctors.role,
           }).all()
         : db.select({
@@ -435,6 +810,7 @@ export async function registerDoctorRoutes(
             name: doctors.name,
             email: doctors.email,
             specialty: doctors.specialty,
+            departmentId: doctors.departmentId,
             role: doctors.role,
           }).from(doctors).where(eq(doctors.id, request.user.doctorId)).all();
 

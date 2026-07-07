@@ -1,9 +1,10 @@
 ﻿import { useState, useEffect, useRef, useCallback } from 'react';
-import { Mic, Pause, Play, Square, AlertCircle, CheckCircle, RotateCcw, Upload, FileText, Camera, Users, Smartphone, Bell, Settings, X as XIcon } from 'lucide-react';
+import { Mic, Pause, Play, Square, AlertCircle, CheckCircle, RotateCcw, Upload, FileText, Camera, Users, Smartphone, Bell, Settings, Shield, X as XIcon } from 'lucide-react';
 import type { PatientSummary } from '../api/client';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import type { VoiceRecorderStreamOptions } from '../hooks/useVoiceRecorder';
 import { useWakeWord } from '../hooks/useWakeWord';
+import { useServiceHealth } from '../hooks/useServiceHealth';
 import { WaveformVisualizer } from './WaveformVisualizer';
 
 
@@ -22,6 +23,8 @@ interface RecordingScreenProps {
   activePatient?: PatientSummary | null;
   onOpenPatients?: () => void;
   onOpenSettings?: () => void;
+  onOpenAdmin?: () => void;
+  onOpenProtocols?: () => void;
   onSyncUpload?: () => void;
   pendingSyncs?: PendingSync[];
   onClaimSync?: (syncId: string) => void;
@@ -39,7 +42,7 @@ function formatExternalErrorMessage(message: string): string {
 export function RecordingScreen({
   onRecordingComplete, onRecordingStart, streamOptions, onDocumentUpload,
   onRecordingTranscript,
-  activePatient, onOpenPatients, onOpenSettings, onSyncUpload,
+  activePatient, onOpenPatients, onOpenSettings, onOpenAdmin, onOpenProtocols, onSyncUpload,
   pendingSyncs = [], onClaimSync, onDismissSync,
   error: externalError,
 }: RecordingScreenProps) {
@@ -57,6 +60,14 @@ export function RecordingScreen({
 
   const [error, setError] = useState<string | null>(null);
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
+  // Pre-flight: статус ASR/LLM. Предупреждаем ДО записи, чтобы врач не
+  // надиктовал приём впустую при лежащем сервисе (запись не блокируем —
+  // health-check может дать ложный минус, а аудио сохраняется на сервере).
+  const { health, backendDown, refresh: refreshHealth } = useServiceHealth();
+  const degradedServices: string[] = [];
+  if (health?.services.whisper === 'unavailable') degradedServices.push('распознавание речи');
+  if (health?.services.llm === 'unavailable') degradedServices.push('ИИ-структурирование');
+  const showHealthWarning = (backendDown || degradedServices.length > 0) && !isRecording && !audioBlob;
   const autoSubmitRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const docInputRef = useRef<HTMLInputElement>(null);
@@ -213,7 +224,7 @@ export function RecordingScreen({
   return (
     <div className="min-h-screen flex flex-col">
       {/* Top bar */}
-      {(activePatient || onOpenPatients || onOpenSettings || onSyncUpload || pendingSyncs.length > 0) && (
+      {(activePatient || onOpenPatients || onOpenSettings || onOpenAdmin || onOpenProtocols || onSyncUpload || pendingSyncs.length > 0) && (
         <div className="bg-white border-b border-slate-200 px-4 py-2.5 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2 min-w-0">
             {activePatient && (
@@ -243,6 +254,16 @@ export function RecordingScreen({
             {onOpenPatients && (
               <button onClick={onOpenPatients} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap">
                 <Users className="w-4 h-4" /> Пациенты
+              </button>
+            )}
+            {onOpenProtocols && (
+              <button onClick={onOpenProtocols} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap">
+                <FileText className="w-4 h-4" /> Протоколы
+              </button>
+            )}
+            {onOpenAdmin && (
+              <button onClick={onOpenAdmin} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap">
+                <Shield className="w-4 h-4" /> Админка
               </button>
             )}
             {onOpenSettings && (
@@ -296,6 +317,30 @@ export function RecordingScreen({
         </div>
 
         <div className="glass-card rounded-2xl sm:rounded-3xl p-5 sm:p-8 slide-up" style={{ animationDelay: '0.1s' }}>
+          {showHealthWarning && (
+            <div className="flex items-start gap-3 p-4 bg-amber-50 border border-amber-300 rounded-xl mb-6">
+              <AlertCircle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <p className="text-amber-800 text-sm font-semibold">
+                  {backendDown
+                    ? 'Сервер недоступен'
+                    : `Сервис временно недоступен: ${degradedServices.join(', ')}`}
+                </p>
+                <p className="text-amber-700 text-sm mt-0.5">
+                  {backendDown
+                    ? 'Проверьте, что backend запущен. Запись сейчас не будет обработана.'
+                    : 'Запись можно начать, но обработка завершится ошибкой, пока сервис не восстановится.'}
+                </p>
+              </div>
+              <button
+                onClick={refreshHealth}
+                className="text-sm text-amber-700 hover:text-amber-900 font-medium whitespace-nowrap underline underline-offset-2"
+              >
+                Проверить снова
+              </button>
+            </div>
+          )}
+
           {hasPermission === false && (
             <div className="flex items-center gap-3 p-4 bg-red-50 border border-red-200 rounded-xl mb-6">
               <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
