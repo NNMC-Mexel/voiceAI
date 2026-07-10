@@ -52,7 +52,7 @@ export interface QualityWarning {
   evidence?: string;
 }
 
-export type AppStep = 'recording' | 'processing' | 'editing' | 'preview' | 'patients' | 'patient' | 'sync-upload' | 'settings' | 'admin' | 'protocols';
+export type AppStep = 'recording' | 'processing' | 'editing' | 'preview' | 'patients' | 'patient' | 'sync-upload' | 'settings' | 'admin' | 'protocols' | 'radiology';
 
 export interface RecordingState {
   isRecording: boolean;

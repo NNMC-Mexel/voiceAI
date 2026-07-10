@@ -12,6 +12,7 @@ import { DocumentExtractorService } from './services/document-extractor.js';
 import type { AppDb } from './db/index.js';
 import { doctors } from './db/schema.js';
 import { registerDoctorRoutes } from './routes-doctors.js';
+import { registerRadiologyRoutes } from './routes-radiology.js';
 import { eq } from 'drizzle-orm';
 import {
   getUserCorrections,
@@ -1208,6 +1209,9 @@ export async function registerRoutes(
   if (db) {
     await registerDoctorRoutes(fastify, db, documentExtractor, llmService);
   }
+
+  // Маршруты движка лучевой диагностики (structured reporting, без БД/LLM)
+  registerRadiologyRoutes(fastify);
 
   const rateMap = new Map<string, RateState>();
   const audioJobs = new Map<string, AudioProcessJob>();
