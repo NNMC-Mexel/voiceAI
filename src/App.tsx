@@ -13,6 +13,7 @@ import { SyncUploadScreen } from './components/SyncUploadScreen';
 import { SettingsScreen } from './components/SettingsScreen';
 import { AdminPanelScreen } from './components/AdminPanelScreen';
 import { ProtocolWorkspaceScreen } from './components/ProtocolWorkspaceScreen';
+import { RadiologyWorkspaceScreen } from './components/RadiologyWorkspaceScreen';
 import { apiClient } from './api/client';
 import type { DoctorInfo, PatientSummary } from './api/client';
 
@@ -160,6 +161,11 @@ function inferBirthDateFromAge(age: string, referenceDate: string): string {
   return `${ref.getFullYear() - years}-01-01`;
 }
 
+// Врач лучевой диагностики — стартовый экран для него это выбор шаблона.
+function isRadiologyDoctor(d: DoctorInfo | null): boolean {
+  return !!d && /лучев|радиолог|рентген|кт|мрт|узи/i.test(d.specialty);
+}
+
 function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [doctor, setDoctor] = useState<DoctorInfo | null>(null);
@@ -169,7 +175,7 @@ function App() {
   const [step, setStep] = useState<AppStep>(() => {
     try {
       const saved = sessionStorage.getItem(SESSION_STEP_KEY) as AppStep | null;
-      return saved && ['recording', 'processing', 'editing', 'preview', 'patients', 'patient', 'sync-upload', 'settings', 'admin', 'protocols'].includes(saved) ? saved : 'recording';
+      return saved && ['recording', 'processing', 'editing', 'preview', 'patients', 'patient', 'sync-upload', 'settings', 'admin', 'protocols', 'radiology'].includes(saved) ? saved : 'recording';
     } catch {
       return 'recording';
     }
@@ -178,6 +184,7 @@ function App() {
   const handleLoginDoctor = useCallback((d: DoctorInfo) => {
     setDoctor(d);
     setAuthenticated(true);
+    if (isRadiologyDoctor(d)) setStep('radiology');
   }, []);
   const [document, setDocument] = useState<MedicalDocument>(() => {
     try {
@@ -251,7 +258,11 @@ function App() {
       setAuthenticated(ok);
       if (ok && !doctor) {
         const me = await apiClient.getMe();
-        if (me) setDoctor(me);
+        if (me) {
+          setDoctor(me);
+          // Врач лучевой — на его стартовый экран, если не выбран другой раздел.
+          if (isRadiologyDoctor(me)) setStep((s) => (s === 'recording' ? 'radiology' : s));
+        }
       }
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -698,6 +709,10 @@ function App() {
   const handleOpenSettings = useCallback(() => setStep('settings'), []);
   const handleOpenAdmin = useCallback(() => setStep('admin'), []);
   const handleOpenProtocols = useCallback(() => setStep('protocols'), []);
+  const handleOpenRadiology = useCallback(() => setStep('radiology'), []);
+  // «Домашний» экран врача: лучевая — на выбор шаблона, остальные — на запись.
+  const homeStep: AppStep = isRadiologyDoctor(doctor) ? 'radiology' : 'recording';
+  const goHome = useCallback(() => setStep(homeStep), [homeStep]);
 
   const handleLogout = useCallback(async () => {
     await apiClient.logout();
@@ -797,7 +812,7 @@ function App() {
       {step === 'settings' && doctor && (
         <SettingsScreen
           doctor={doctor}
-          onBack={() => setStep('recording')}
+          onBack={goHome}
           onLogout={handleLogout}
           onDoctorUpdate={setDoctor}
         />
@@ -806,7 +821,7 @@ function App() {
       {step === 'admin' && doctor?.role === 'admin' && (
         <AdminPanelScreen
           doctor={doctor}
-          onBack={() => setStep('recording')}
+          onBack={goHome}
         />
       )}
 
@@ -814,6 +829,16 @@ function App() {
         <ProtocolWorkspaceScreen
           doctor={doctor}
           onBack={() => setStep('recording')}
+        />
+      )}
+
+      {step === 'radiology' && doctor && (
+        <RadiologyWorkspaceScreen
+          doctor={doctor}
+          onOpenSettings={handleOpenSettings}
+          onOpenAdmin={doctor.role === 'admin' ? handleOpenAdmin : undefined}
+          onOpenTherapy={doctor.role === 'admin' ? () => setStep('recording') : undefined}
+          onLogout={handleLogout}
         />
       )}
 
@@ -829,6 +854,7 @@ function App() {
           onOpenSettings={doctor ? handleOpenSettings : undefined}
           onOpenAdmin={doctor?.role === 'admin' ? handleOpenAdmin : undefined}
           onOpenProtocols={doctor ? handleOpenProtocols : undefined}
+          onOpenRadiology={isRadiologyDoctor(doctor) || doctor?.role === 'admin' ? handleOpenRadiology : undefined}
           onSyncUpload={doctor ? () => setStep('sync-upload') : undefined}
           pendingSyncs={pendingSyncs}
           onClaimSync={handleClaimSync}

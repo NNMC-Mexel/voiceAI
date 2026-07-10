@@ -87,6 +87,40 @@ export interface ProtocolTemplateInfo {
   updatedAt: string;
 }
 
+// ─── Лучевая диагностика (fill-in движок) ────────────────────────────────────
+export interface RadiologyTemplateSummary {
+  id: string;
+  name: string;
+  modality: string;
+  title: string;
+}
+
+export interface RadiologyDocBlock {
+  id: string;
+  label: string;
+  text: string;
+}
+
+export interface RadiologyReport {
+  title: string;
+  blocks: RadiologyDocBlock[];
+  text: string;
+  conclusion: string;
+}
+
+export interface RadiologyApplied {
+  command: string;
+  ok: boolean;
+  action: string;
+  blockId?: string;
+}
+
+export interface RadiologyBlockHint {
+  blockId: string;
+  label: string;
+  examples: string[];
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
@@ -274,6 +308,25 @@ class ApiClient {
     } catch {
       return null;
     }
+  }
+
+  // ─── Лучевая: список шаблонов и сборка протокола из команд ──────────────────
+  async getRadiologyTemplates(): Promise<RadiologyTemplateSummary[]> {
+    const result = await this.request<{ templates: RadiologyTemplateSummary[] }>('/api/radiology/doc-templates');
+    return result.templates;
+  }
+
+  async buildRadiologyDoc(templateId: string, commands: string[]): Promise<{ report: RadiologyReport; applied: RadiologyApplied[] }> {
+    return this.request<{ report: RadiologyReport; applied: RadiologyApplied[] }>('/api/radiology/doc-build', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ templateId, commands }),
+    });
+  }
+
+  async getRadiologyHints(templateId: string): Promise<RadiologyBlockHint[]> {
+    const result = await this.request<{ hints: RadiologyBlockHint[] }>(`/api/radiology/doc-templates/${templateId}/hints`);
+    return result.hints;
   }
 
   async checkAuth(): Promise<boolean> {
