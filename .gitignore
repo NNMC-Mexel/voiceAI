@@ -11,6 +11,8 @@ node_modules
 dist
 dist-ssr
 *.local
+__pycache__/
+*.py[cod]
 
 # Editor directories and files
 .vscode/*
@@ -29,8 +31,11 @@ dist-ssr
 # Environment files
 .env
 *.env.local
+.env.bak.*
 
 # Runtime dirs (создаются на сервере)
 uploads/
 temp/
 server/data/
+data/radiology/
+models/

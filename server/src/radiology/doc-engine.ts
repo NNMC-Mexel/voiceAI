@@ -1,7 +1,12 @@
 // Движок fill-in: команда врача → правка значений/свитчей/дописок → готовый документ.
 // Детерминистичен, без LLM. Переиспользует парсинг чисел из numbers.ts.
 
-import { extractNumbers, hasPhrase, normalizeCommand } from './numbers.js';
+import {
+  assignNumbersToKeywordGroups,
+  extractNumbers,
+  hasPhrase,
+  normalizeCommand,
+} from './numbers.js';
 import type {
   BlockNode, DocBlock, DocNode, DocState, DocTemplate, SlotDef, SlotValues,
 } from './doc-model.js';
@@ -22,20 +27,16 @@ export interface DocReport {
 
 const APPEND_TRIGGERS = ['добавь', 'добавить', 'дополнительно', 'примечание', 'также'];
 
-// стем-совпадение: keyword — стем, precededBy — словоформа
-function matchesKeyword(precededBy: string, keywords: string[]): boolean {
-  return keywords.some((k) => {
-    const kn = k.toLowerCase().replace(/ё/g, 'е');
-    return precededBy === kn || precededBy.startsWith(kn);
-  });
-}
-
 function fmt(values: number[], slot: SlotDef): string {
   const one = (n: number): string => {
     const s = slot.decimals !== undefined ? n.toFixed(slot.decimals) : String(n);
     return s.replace('.', ',');
   };
-  return values.map(one).join(slot.join ?? ' ');
+  const parts = values.map(one);
+  // Продиктовали не все размеры («12 на 6» вместо трёх) — недостающие остаются пустыми.
+  const arity = slot.arity ?? 1;
+  while (parts.length < arity) parts.push('__');
+  return parts.join(slot.join ?? ' ');
 }
 
 function collectSlots(nodes: BlockNode[]): SlotDef[] {
@@ -95,7 +96,9 @@ export class DocEngine {
       return { ok: true, action: 'append', blockId: target.id };
     }
 
-    if (!block) return { ok: false, action: 'unknown', detail: 'не распознан блок/значение' };
+    if (!block) {
+      return { ok: false, action: 'unknown', detail: 'не понял, к какому органу относится — начните с названия (например: «печень плотность 60»)' };
+    }
     this.lastBlock = block.id;
 
     const nums = extractNumbers(this.stripSegments(n));
@@ -118,7 +121,10 @@ export class DocEngine {
     const filled = this.fillSlots(collectSlots(block.nodes).filter((s) => !this.inSwitch(block, s)), nums, block, n);
     if (filled) return { ok: true, action: 'slot', blockId: block.id };
     this.history.pop(); // ничего не изменилось — снимаем лишний снапшот
-    return { ok: false, action: 'unknown', blockId: block.id, detail: 'значение не распознано' };
+    const detail = nums.length
+      ? `не понял, какое это значение для блока «${block.label}» — назовите параметр (например: «холедох 6»)`
+      : `для блока «${block.label}» не названо ни значения, ни отклонения`;
+    return { ok: false, action: 'unknown', blockId: block.id, detail };
   }
 
   private inSwitch(block: DocBlock, slot: SlotDef): boolean {
@@ -135,20 +141,26 @@ export class DocEngine {
     let any = false;
     const used = new Set<number>();
     // сначала скалярные слоты по ключевому слову
-    for (const s of slots) {
-      if ((s.arity ?? 1) > 1) continue;
-      const idx = nums.findIndex((tk, i) => !used.has(i) && matchesKeyword(tk.precededBy, s.keywords));
-      if (idx >= 0) { this.state.slots[s.name] = [nums[idx].value]; used.add(idx); any = true; }
+    const scalar = slots.filter((slot) => (slot.arity ?? 1) <= 1);
+    const assignments = assignNumbersToKeywordGroups(nums, scalar.map((slot) => slot.keywords), used);
+    for (let slotIndex = 0; slotIndex < scalar.length; slotIndex++) {
+      const numberIndex = assignments[slotIndex];
+      if (numberIndex === undefined) continue;
+      this.state.slots[scalar[slotIndex].name] = [nums[numberIndex].value];
+      used.add(numberIndex);
+      any = true;
     }
-    // затем dims-слот: первые arity незанятых чисел, если блок адресован якорем/ключом
+    // затем dims-слот: до arity незанятых чисел, если блок адресован якорем/ключом.
+    // Принимаем и неполный набор («селезёнка 120 на 130») — недостающее покажем как «__».
     for (const s of slots) {
       const arity = s.arity ?? 1;
       if (arity <= 1) continue;
       const anchored = block.anchors.some((a) => hasPhrase(n, a)) || s.keywords.some((k) => hasPhrase(n, k));
       const free = nums.map((_tk, i) => i).filter((i) => !used.has(i));
-      if (anchored && free.length >= arity) {
-        this.state.slots[s.name] = free.slice(0, arity).map((i) => nums[i].value);
-        for (const i of free.slice(0, arity)) used.add(i);
+      if (anchored && free.length >= 1) {
+        const take = free.slice(0, arity);
+        this.state.slots[s.name] = take.map((i) => nums[i].value);
+        for (const i of take) used.add(i);
         any = true;
       }
     }

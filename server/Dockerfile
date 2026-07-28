@@ -18,15 +18,11 @@ FROM node:22-slim
 
 WORKDIR /app
 
-# Install runtime dependencies
+# The production API is an orchestrator. ASR runs only in the pinned GigaAM
+# service; no Python/Whisper fallback is installed in this image.
 RUN apt-get update && apt-get install -y \
-    python3 \
-    python3-pip \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
-
-# Install faster-whisper for STT
-RUN pip3 install faster-whisper --break-system-packages
 
 # Copy built files
 COPY --from=builder /app/dist ./dist

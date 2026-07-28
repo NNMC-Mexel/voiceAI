@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "experiment": "ct-abdomen-v3-ctc-pilot",
+  "upstream": {
+    "repository": "https://github.com/salute-developers/GigaAM",
+    "commit": "559d88d6b72541412743929f633a6ae7c9950b85",
+    "baseModel": "v3_ctc",
+    "baseModelMd5": "73413e7be9c6a5935827bfab5c0dd678"
+  },
+  "data": {
+    "officialManifestColumns": ["path", "duration", "transcription"],
+    "rawText": true,
+    "minDurationSeconds": 2,
+    "maxDurationSeconds": 20,
+    "realTrainTargetHours": [10, 20],
+    "validationTargetHours": [2, 3],
+    "frozenPilotTestMinimumHours": 2,
+    "minimumDoctors": 3,
+    "syntheticTrainRowMaximum": 0.2,
+    "generalReplayRowTarget": [0.2, 0.3],
+    "ttsAllowedInValidationOrTest": false
+  },
+  "training": {
+    "epochs": 3,
+    "learningRates": [0.00001, 0.00002, 0.00005],
+    "activationCheckpointing": true,
+    "specAugment": true,
+    "seed": 42,
+    "upstreamCheckpointMonitor": "val_wer (ordinary WER)",
+    "saveTopK": 8,
+    "selectionMetric": "posthoc_validation_medical_wer"
+  },
+  "promotionGates": {
+    "medicalWerRelativeImprovementMinimum": 0.25,
+    "overallWerAbsoluteRegressionMaximum": 0.01,
+    "criticalEntityRecallMinimum": 0.98,
+    "numberUnitNegationLateralityAccuracyMinimum": 0.99,
+    "unsupportedCriticalFactsMaximum": 0,
+    "p95RealtimeFactorMaximum": 0.5
+  }
+}

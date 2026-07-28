@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+node_modules
+dist
+coverage
+data
+uploads
+temp
+models
+scripts/__pycache__
+scripts/_*
+**/*.pyc
+**/*.pyo
+**/*.log
+**/.DS_Store

@@ -101,6 +101,13 @@ export interface RadiologyDocBlock {
   text: string;
 }
 
+export interface RadiologyTemplatePreview {
+  templateId: string;
+  title: string;
+  blocks: Array<RadiologyDocBlock & { origin: 'template_default' }>;
+  text: string;
+}
+
 export interface RadiologyReport {
   title: string;
   blocks: RadiologyDocBlock[];
@@ -113,6 +120,7 @@ export interface RadiologyApplied {
   ok: boolean;
   action: string;
   blockId?: string;
+  detail?: string;
 }
 
 export interface RadiologyBlockHint {
@@ -121,11 +129,333 @@ export interface RadiologyBlockHint {
   examples: string[];
 }
 
+export type RadiologyTranscriptionSource =
+  | 'gigaam'
+  | 'whisper'
+  | 'browser'
+  | 'manual'
+  | 'unknown';
+
+export interface RadiologyWordTiming {
+  text: string;
+  startMs: number;
+  endMs: number;
+  confidence: number | null;
+  chunkIndex?: number;
+}
+
+export interface RadiologyEvidenceSpan {
+  transcript: 'raw' | 'normalized';
+  start: number;
+  end: number;
+  text: string;
+}
+
+export interface RadiologyArtifactSection {
+  id: string;
+  label: string;
+  text: string;
+  source: 'dictated' | 'normal' | 'conclusion' | 'unmatched';
+  evidence: RadiologyEvidenceSpan[];
+  origin?:
+    | 'verbatim'
+    | 'explicit-normal-template'
+    | 'missing-template-default'
+    | 'dictated-conclusion'
+    | 'extractive-conclusion'
+    | 'unmatched';
+  assignmentMethod?: 'anchor' | 'rule' | 'llm' | 'unmatched' | 'template' | 'mixed';
+}
+
+export interface RadiologySafetyFinding<T = unknown> {
+  status: 'passed' | 'failed' | 'not_run';
+  details?: T;
+}
+
+export interface RadiologyTranscriptEvidenceSpan {
+  start: number;
+  end: number;
+  text: string;
+  source: 'transcript';
+}
+
+export interface RadiologyDictationReport {
+  title: string;
+  blocks: Array<{
+    id: string;
+    label: string;
+    text: string;
+    source: 'dictated' | 'normal' | 'conclusion';
+    evidence: RadiologyTranscriptEvidenceSpan[];
+    provenanceStatus: 'linked' | 'template' | 'unverified';
+    normalReason?: 'missing' | 'explicit';
+    origin?: 'transcript' | 'template_default' | 'generated_extract';
+    assignmentMethod?: 'anchor' | 'rule' | 'llm' | 'unmatched' | 'mixed';
+  }>;
+  fullText: string;
+  unmatched: string;
+  unmatchedSpans: RadiologyTranscriptEvidenceSpan[];
+  generateConclusion: boolean;
+  numberCheck: {
+    matched: number[];
+    addedByModel: number[];
+    lost: number[];
+    ok: boolean;
+  };
+  safety: {
+    ok: boolean;
+    requiresReview: boolean;
+    issues: Array<{
+      code: string;
+      severity: 'critical' | 'warning';
+      message: string;
+    }>;
+  };
+  provenance: {
+    sections: Record<string, RadiologyTranscriptEvidenceSpan[]>;
+    unmatched: RadiologyTranscriptEvidenceSpan[];
+  };
+  sections: RadiologyArtifactSection[];
+  conclusion: {
+    text: string;
+    mode: 'dictated' | 'extractive';
+    evidence: RadiologyEvidenceSpan[];
+  } | null;
+  evidenceBackedText: string;
+  evidenceSha256: string;
+  templateDefaults: Array<{ id: string; label: string; text: string }>;
+}
+
+export interface RadiologyComponentVersion {
+  name: string;
+  version: string;
+  checksum?: string;
+  configSha256?: string;
+}
+
+export interface RadiologyASRContextBiasMetadata {
+  scope: string | null;
+  active: boolean;
+  terms: number;
+}
+
+export interface RadiologyASRHashMetadata {
+  audioSha256?: string;
+  normalizedAudioSha256?: string;
+  rawTextSha256: string;
+  outputTextSha256?: string;
+  finalTextSha256?: string;
+  normalizedTextSha256: string;
+}
+
+export interface RadiologyArtifactTranscriptionChunk {
+  index: number;
+  rawText: string;
+  rawTextSha256: string;
+  normalizedText: string;
+  normalizedTextSha256: string;
+  rawAvailable: boolean;
+  language: string;
+  source: RadiologyTranscriptionSource;
+  words: RadiologyWordTiming[];
+  longform?: {
+    mode: 'vad' | 'emission_stitch' | 'text_fallback' | 'single';
+    degraded: boolean;
+    vad?: RadiologyComponentVersion | null;
+    seams?: Array<{
+      startMs: number;
+      endMs: number;
+      conflict: boolean;
+      critical: boolean;
+      leftText?: string;
+      rightText?: string;
+    }>;
+  };
+  provenance: {
+    schemaVersion: string;
+    runtimeId: string;
+    acousticDecoder: string | null;
+    ctcDecoder: unknown | null;
+    contextBias: RadiologyASRContextBiasMetadata;
+    hashes: RadiologyASRHashMetadata;
+    verification: {
+      schema: boolean;
+      runtime: boolean;
+      checkpoint: boolean;
+      hashes: boolean;
+    };
+  };
+}
+
+export interface RadiologyTranscriptionArtifact {
+  schemaVersion: 2;
+  legacySchemaVersion?: 1;
+  kind: 'radiology-transcription';
+  sessionId: string;
+  ownerDoctorId: string | null;
+  templateId: string;
+  createdAt: string;
+  completedAt: string;
+  source: {
+    type: RadiologyTranscriptionSource;
+    audioSha256: string | null;
+  };
+  audio: {
+    sha256: string | null;
+    hashKind: 'none' | 'sha256-bytes' | 'sha256-index-length-prefixed-chunks-v1';
+    bytes: number;
+    mimeType?: string;
+    stored: boolean;
+    chunks: Array<{
+      index: number;
+      sha256: string;
+      bytes: number;
+      stored: boolean;
+    }>;
+  };
+  rawTranscript: {
+    text: string;
+    sha256: string;
+    language: string;
+    words: RadiologyWordTiming[];
+    rawAvailable: boolean;
+  };
+  normalizedTranscript: {
+    text: string;
+    sha256: string;
+  };
+  normalization: {
+    text: string;
+    sha256: string;
+    version: string;
+    transformations: Array<{
+      kind: string;
+      source: { start: number; end: number; text: string };
+      normalized: { start: number; end: number; text: string };
+    }>;
+    issues: Array<{
+      id: string;
+      code: string;
+      severity: 'critical' | 'warning';
+      message: string;
+      source?: { start: number; end: number; text: string };
+      normalized?: { start: number; end: number; text: string };
+      values?: number[];
+    }>;
+  };
+  asrChunks: RadiologyArtifactTranscriptionChunk[];
+  longform: {
+    degraded: boolean;
+    seamConflicts: Array<{
+      chunkIndex: number;
+      startMs: number;
+      endMs: number;
+      critical: boolean;
+      leftText?: string;
+      rightText?: string;
+    }>;
+  };
+  sections: RadiologyArtifactSection[];
+  routing: {
+    atoms: Array<{
+      id: string;
+      start: number;
+      end: number;
+      text: string;
+      candidateSectionIds: string[];
+      anchorRuleIds: string[];
+    }>;
+    assignments: Array<{
+      atomId: string;
+      sectionId: string | null;
+      method: 'anchor' | 'rule' | 'llm' | 'unmatched';
+    }>;
+    unmatchedAtomIds: string[];
+  };
+  unmatchedText: string;
+  report: RadiologyDictationReport | null;
+  reportSha256: string | null;
+  safety: {
+    status: 'passed' | 'failed' | 'incomplete';
+    stages: Array<{
+      stage: 'raw_to_normalized' | 'normalized_to_report' | 'verbatim_to_final_report';
+      status: 'passed' | 'failed' | 'incomplete';
+      sourceSha256: string | null;
+      outputSha256: string | null;
+      issues: Array<{
+        code: string;
+        severity: 'critical' | 'warning';
+        message: string;
+      }>;
+    }>;
+    numbers: RadiologySafetyFinding;
+    units: RadiologySafetyFinding;
+    negations: RadiologySafetyFinding;
+    laterality: RadiologySafetyFinding;
+    contrast: RadiologySafetyFinding;
+    criticalFacts: RadiologySafetyFinding;
+    requiresReview: boolean;
+    approvalBlocked: boolean;
+    issues: Array<{
+      code: string;
+      severity: 'critical' | 'warning';
+      message: string;
+    }>;
+  };
+  model: {
+    asr: RadiologyComponentVersion;
+    vad: RadiologyComponentVersion | null;
+    decoder: RadiologyComponentVersion;
+    languageModel: RadiologyComponentVersion | null;
+    contextVocabulary: RadiologyComponentVersion | null;
+    dictionary: RadiologyComponentVersion;
+    normalizer: RadiologyComponentVersion;
+    template: RadiologyComponentVersion;
+    router: RadiologyComponentVersion;
+    prompt: RadiologyComponentVersion;
+    structurer: RadiologyComponentVersion;
+    llm: RadiologyComponentVersion | null;
+    safety: RadiologyComponentVersion;
+  };
+  components: RadiologyTranscriptionArtifact['model'];
+  training: {
+    eligible: boolean;
+    exclusionReasons: string[];
+  };
+}
+
+export interface RadiologySpanCorrection {
+  start: number;
+  end: number;
+  originalText: string;
+  correctedText: string;
+  entityType: string;
+  confidence?: number;
+  modality: string;
+  author: string;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 const API_TIMEOUT_MS = Number.parseInt(import.meta.env.VITE_API_TIMEOUT_MS || '120000', 10);
 const DOCUMENT_PROCESS_TIMEOUT_MS = Number.parseInt(import.meta.env.VITE_DOCUMENT_PROCESS_TIMEOUT_MS || '900000', 10);
+
+export class ApiRequestError extends Error {
+  readonly status: number;
+  readonly code?: string;
+
+  constructor(
+    message: string,
+    status: number,
+    code?: string,
+  ) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.status = status;
+    this.code = code;
+  }
+}
 
 interface UploadResponse {
   success: boolean;
@@ -316,6 +646,13 @@ class ApiClient {
     return result.templates;
   }
 
+  async getRadiologyTemplatePreview(templateId: string): Promise<RadiologyTemplatePreview> {
+    const result = await this.request<{ preview: RadiologyTemplatePreview }>(
+      `/api/radiology/doc-templates/${encodeURIComponent(templateId)}/preview`,
+    );
+    return result.preview;
+  }
+
   async buildRadiologyDoc(templateId: string, commands: string[]): Promise<{ report: RadiologyReport; applied: RadiologyApplied[] }> {
     return this.request<{ report: RadiologyReport; applied: RadiologyApplied[] }>('/api/radiology/doc-build', {
       method: 'POST',
@@ -327,6 +664,95 @@ class ApiClient {
   async getRadiologyHints(templateId: string): Promise<RadiologyBlockHint[]> {
     const result = await this.request<{ hints: RadiologyBlockHint[] }>(`/api/radiology/doc-templates/${templateId}/hints`);
     return result.hints;
+  }
+
+  async startRadiologySession(
+    templateId: string,
+    source: RadiologyTranscriptionSource = 'gigaam',
+    retainAudio = false,
+  ): Promise<{
+    sessionId: string;
+    mode: 'radiology';
+    templateId: string;
+    source: RadiologyTranscriptionSource;
+    retainAudio: boolean;
+    createdAt: string;
+    chunkUrl: string;
+    finishUrl: string;
+  }> {
+    return this.request('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'radiology', templateId, source, retainAudio }),
+    }, 10_000);
+  }
+
+  async sendRadiologyChunk(
+    sessionId: string,
+    audioBase64: string,
+    chunkIndex: number,
+    mimeType?: string,
+  ): Promise<{ ok: boolean; chunkIndex: number }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/chunks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        audio_base64: audioBase64,
+        chunk_index: chunkIndex,
+        ...(mimeType ? { mime_type: mimeType } : {}),
+      }),
+    }, 300_000);
+  }
+
+  async finishRadiologySession(
+    sessionId: string,
+    browserTranscript?: string,
+  ): Promise<{ success: true; artifact: RadiologyTranscriptionArtifact }> {
+    return this.request(`/api/sessions/${encodeURIComponent(sessionId)}/finish`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(browserTranscript === undefined ? {} : { browserTranscript }),
+    }, 300_000);
+  }
+
+  async getRadiologyArtifact(
+    sessionId: string,
+  ): Promise<{ artifact: RadiologyTranscriptionArtifact }> {
+    return this.request(
+      `/api/radiology/sessions/${encodeURIComponent(sessionId)}/artifact`,
+      undefined,
+      30_000,
+    );
+  }
+
+  async submitRadiologyFeedback(
+    sessionId: string,
+    feedback: {
+      idempotencyKey: string;
+      verbatimTranscript: string;
+      finalReport: string;
+      spanCorrections: RadiologySpanCorrection[];
+      normalizationResolutions?: Array<{
+        issueId: string;
+        replacementText: string;
+        resolution: 'confirmed_single' | 'confirmed_range' | 'confirmed_verbatim';
+      }>;
+      approved: boolean;
+      author?: string;
+    },
+  ): Promise<{
+    success: true;
+    feedbackId: string;
+    revision: number;
+    datasetVersion: string;
+    idempotentReplay: boolean;
+    training: { eligible: boolean; exclusionReasons: string[] };
+  }> {
+    return this.request(`/api/radiology/sessions/${encodeURIComponent(sessionId)}/feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(feedback),
+    });
   }
 
   async checkAuth(): Promise<boolean> {
@@ -505,13 +931,15 @@ class ApiClient {
             window.dispatchEvent(new Event('auth:logout'));
           }
           let errorMessage = `Request failed: ${response.status}`;
+          let errorCode: string | undefined;
           try {
             const text = await response.text();
             if (text) {
               try {
                 const err = JSON.parse(text) as { error?: unknown; message?: unknown };
-                if (err?.error) errorMessage = String(err.error);
-                else if (err?.message) errorMessage = String(err.message);
+                if (typeof err?.error === 'string') errorCode = err.error;
+                if (err?.message) errorMessage = String(err.message);
+                else if (err?.error) errorMessage = String(err.error);
               } catch {
                 errorMessage = text;
               }
@@ -521,15 +949,28 @@ class ApiClient {
           }
           // 4xx (кроме 408/429) — ошибка клиента, retry бесполезен
           const transient = response.status === 408 || response.status === 429 || response.status >= 500;
+          const requestError = new ApiRequestError(
+            errorMessage,
+            response.status,
+            errorCode,
+          );
           if (!transient || attempt === maxAttempts) {
-            throw new Error(errorMessage);
+            throw requestError;
           }
-          lastError = new Error(errorMessage);
+          lastError = requestError;
         } else {
           return (await response.json()) as T;
         }
       } catch (error) {
         lastError = error;
+        if (
+          error instanceof ApiRequestError
+          && error.status !== 408
+          && error.status !== 429
+          && error.status < 500
+        ) {
+          throw error;
+        }
         if (error instanceof Error && error.name === 'AbortError') {
           if (attempt === maxAttempts) {
             throw new Error(`Запрос превысил таймаут ${Math.round(effectiveTimeout / 1000)}с`);
