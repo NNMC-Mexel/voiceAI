@@ -1,14 +1,83 @@
 import { spawn } from 'child_process';
+import { createHash } from 'crypto';
 import { readFile, writeFile, unlink, mkdir, readdir, rm, stat } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
 import type { TranscriptionResult, WhisperConfig } from '../types.js';
 import { applyMedicalDictionary, DICTIONARY_RULE_COUNT } from './medical-dictionary.js';
+import {
+  denormalizeDetailed as denormalizeGigaAMDetailed,
+} from './gigaam-denormalize.js';
+
+interface GigaAMCtcDecoderMetadata {
+  mode?: string;
+  active?: boolean;
+  implementation?: string;
+  implementationMetadata?: Record<string, unknown>;
+  beamWidth?: number;
+  languageModel?: {
+    active?: boolean;
+    file?: string | null;
+    sha256?: string | null;
+    alpha?: number | null;
+    beta?: number | null;
+  };
+  contexts?: {
+    configured?: boolean;
+    file?: string;
+    sha256?: string | null;
+    scopes?: Record<string, number>;
+  };
+  hotwordWeight?: number | null;
+}
 
 interface WhisperServerResponse {
+  schema_version?: string;
   text: string;
+  raw_text?: string;
+  source?: 'gigaam' | 'whisper';
   language: string;
   elapsed: number;
+  method?: string;
+  runtime_id?: string;
+  model?: {
+    name?: string;
+    requested?: string;
+    decoder?: string | null;
+    acousticDecoder?: string | null;
+    ctcDecoder?: GigaAMCtcDecoderMetadata;
+    checkpoint?: {
+      expectedChecksum?: string | null;
+      verified?: boolean;
+      hashes?: Record<string, string | undefined>;
+    };
+  };
+  context_bias?: {
+    scope?: string | null;
+    active?: boolean;
+    terms?: number;
+  };
+  hashes?: {
+    audio_sha256?: string;
+    normalized_audio_sha256?: string;
+    raw_text_sha256?: string;
+    text_sha256?: string;
+    output_text_sha256?: string;
+    final_text_sha256?: string;
+  };
+  words?: Array<{
+    text?: string;
+    word?: string;
+    start?: number;
+    end?: number;
+    confidence?: number | null;
+  }>;
+  confidence?: {
+    available?: boolean;
+    avg_logprob?: number;
+    low_confidence?: boolean;
+    reason?: string;
+  };
   chunks?: number;
   chunk_details?: Array<{
     chunk: number;
@@ -22,11 +91,173 @@ interface WhisperServerResponse {
   }>;
   avg_logprob?: number;
   low_confidence?: boolean;
+  integrity?: {
+    degraded?: boolean;
+    degradation_reasons?: string[];
+    seam_conflicts?: Array<{
+      seam?: number;
+      start?: number;
+      end?: number;
+      left_text?: string;
+      right_text?: string;
+      critical?: boolean;
+      critical_classes?: string[];
+    }>;
+    critical_seam_conflict?: boolean;
+    approval_blocked?: boolean;
+    benchmark_eligible?: boolean;
+    training_eligible?: boolean;
+  };
+  configuration?: {
+    longform_mode?: string;
+    longform_strict?: boolean;
+    vad?: {
+      modelId?: string;
+      requestedRevision?: string | null;
+      snapshotRevision?: string;
+      available?: boolean;
+      loaded?: boolean;
+      localOnly?: boolean;
+      errorType?: string;
+    };
+    vad_target_seconds?: number;
+    vad_hard_max_seconds?: number;
+    vad_padding_seconds?: number;
+    fallback_chunk_seconds?: number;
+    fallback_overlap_seconds?: number;
+  };
+}
+
+interface ASRContextBiasMetadata {
+  scope: string | null;
+  active: boolean;
+  terms: number;
+}
+
+interface ASRHashMetadata {
+  audioSha256?: string;
+  normalizedAudioSha256?: string;
+  rawTextSha256?: string;
+  outputTextSha256?: string;
+  finalTextSha256?: string;
+  normalizedTextSha256: string;
+}
+
+export interface DetailedStreamingTranscription {
+  schemaVersion: string;
+  runtimeId: string;
+  checkpointVerified: boolean;
+  rawText: string;
+  normalizedText: string;
+  normalization: {
+    version: string;
+    transformations: Array<{
+      kind: string;
+      source: { start: number; end: number; text: string };
+      normalized: { start: number; end: number; text: string };
+    }>;
+    issues: Array<{
+      id: string;
+      code: string;
+      severity: 'critical' | 'warning';
+      message: string;
+      source?: { start: number; end: number; text: string };
+      normalized?: { start: number; end: number; text: string };
+      values?: number[];
+    }>;
+  };
+  rawAvailable: boolean;
+  language: string;
+  source: 'gigaam' | 'whisper' | 'unknown';
+  words: Array<{
+    text: string;
+    startMs: number;
+    endMs: number;
+    confidence: number | null;
+  }>;
+  model: {
+    asr: { name: string; version: string; checksum?: string };
+    vad: { name: string; version: string; checksum?: string } | null;
+    decoder: { name: string; version: string; checksum?: string };
+    languageModel: { name: string; version: string; checksum?: string } | null;
+    contextVocabulary: { name: string; version: string; checksum?: string } | null;
+    dictionary: { name: string; version: string };
+    normalizer: { name: string; version: string };
+  };
+  contextBias: ASRContextBiasMetadata;
+  hashes: ASRHashMetadata;
+  provenance: {
+    schemaVersion: string;
+    runtimeId: string;
+    acousticDecoder: string | null;
+    ctcDecoder: GigaAMCtcDecoderMetadata | null;
+    contextBias: ASRContextBiasMetadata;
+    hashes: ASRHashMetadata;
+    checkpointVerified: boolean;
+  };
+  longform: {
+    mode: 'vad' | 'emission_stitch' | 'text_fallback' | 'single';
+    degraded: boolean;
+    vad: { name: string; version: string; checksum?: string } | null;
+    seams: Array<{
+      startMs: number;
+      endMs: number;
+      conflict: boolean;
+      critical: boolean;
+      leftText?: string;
+      rightText?: string;
+    }>;
+  };
 }
 
 const REMOTE_CHUNK_SECONDS = Number.parseInt(process.env.WHISPER_REMOTE_CHUNK_SECONDS || '600', 10);
-const REMOTE_CHUNK_MIN_SIZE_BYTES = Number.parseInt(process.env.WHISPER_REMOTE_CHUNK_MIN_MB || '100', 10) * 1024 * 1024;
+/**
+ * A 32 MiB binary payload becomes roughly 42.7 MiB after base64 encoding.
+ * This leaves room for JSON metadata under a 48 MiB reverse-proxy/runtime
+ * request limit. Never allow configuration to raise the single-payload limit.
+ */
+export const REMOTE_SINGLE_PAYLOAD_MAX_BYTES =
+  Math.min(
+    32,
+    Math.max(1, Number.parseInt(process.env.WHISPER_REMOTE_CHUNK_MIN_MB || '32', 10) || 32),
+  ) * 1024 * 1024;
+const REMOTE_CHUNK_MIN_SIZE_BYTES = REMOTE_SINGLE_PAYLOAD_MAX_BYTES;
 const REMOTE_CHUNK_MIN_DURATION_SECONDS = Number.parseInt(process.env.WHISPER_REMOTE_CHUNK_MIN_SECONDS || '1200', 10);
+
+export interface StreamingTranscriptionContext {
+  /**
+   * Trusted canonical template id supplied by the server-side session. It is
+   * mapped to a configured decoder scope; callers cannot supply hotwords.
+   */
+  templateId?: string;
+}
+
+const APPROVED_CONTEXT_SCOPE_ENV_BY_TEMPLATE: Readonly<Record<string, string>> = {
+  CT_ABDOMEN_MIKHAILOV: 'GIGAAM_CT_ABDOMEN_CONTEXT_SCOPE',
+};
+
+function approvedContextScope(templateId: string | undefined): string | undefined {
+  if (!templateId) return undefined;
+  const envName = APPROVED_CONTEXT_SCOPE_ENV_BY_TEMPLATE[templateId];
+  if (!envName) return undefined;
+  const scope = process.env[envName]?.trim();
+  if (!scope) return undefined;
+  if (!/^[a-z0-9_.-]{1,80}$/u.test(scope)) {
+    throw new Error(`${envName} contains an invalid GigaAM context scope`);
+  }
+  return scope;
+}
+
+function sha256Text(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function decodedBase64Bytes(value: string): number {
+  const compact = value.replace(/\s+/gu, '');
+  if (!compact) return 0;
+  const padding = compact.endsWith('==') ? 2 : compact.endsWith('=') ? 1 : 0;
+  return Math.floor((compact.length * 3) / 4) - padding;
+}
 
 // КОРОТКИЙ initial_prompt — только структура консультации.
 // Whisper hard limit: 224 токена. Всё что сверху — молча обрезается с НАЧАЛА.
@@ -377,9 +608,29 @@ export class WhisperService {
   // ─── Streaming chunk transcription (base64 → text) ──────────────────────────
 
   async transcribeBase64(audioBase64: string): Promise<string> {
+    const result = await this.transcribeBase64Detailed(audioBase64);
+    return result.normalizedText;
+  }
+
+  /**
+   * Returns both the immutable model output and the post-processed text.
+   * The distinction is required for honest ASR feedback and fine-tuning.
+   */
+  async transcribeBase64Detailed(
+    audioBase64: string,
+    context: StreamingTranscriptionContext = {},
+  ): Promise<DetailedStreamingTranscription> {
     if (!this.config.serverUrl) {
       throw new Error('Whisper HTTP server not configured — streaming unavailable');
     }
+    const decodedBytes = decodedBase64Bytes(audioBase64);
+    if (decodedBytes > REMOTE_SINGLE_PAYLOAD_MAX_BYTES) {
+      throw new Error(
+        `Remote ASR audio payload is ${decodedBytes} bytes; maximum single payload is `
+        + `${REMOTE_SINGLE_PAYLOAD_MAX_BYTES} bytes. Split the recording into valid audio chunks.`,
+      );
+    }
+    const contextScope = approvedContextScope(context.templateId);
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 300_000);
@@ -392,6 +643,7 @@ export class WhisperService {
           audio_base64: audioBase64,
           language: this.config.language,
           beam_size: this.config.beamSize,
+          ...(contextScope ? { context_scope: contextScope } : {}),
         }),
         signal: controller.signal,
       });
@@ -402,8 +654,250 @@ export class WhisperService {
       }
 
       const data = (await response.json()) as WhisperServerResponse;
-      const cleaned = this.cleanWhisperHallucinations(data.text);
-      return applyMedicalDictionary(cleaned);
+      const hasExplicitRaw = typeof data.raw_text === 'string' && data.raw_text.trim().length > 0;
+      // Keep the explicit runtime output byte-for-byte so the supplied hash can
+      // be verified. `text` is only a display fallback, never raw training truth.
+      const rawText = hasExplicitRaw ? data.raw_text! : (data.text ?? '');
+      const cleaned = this.cleanWhisperHallucinations(rawText);
+      // The global dictionary contains cross-specialty replacements and is not
+      // confidence/evidence aware. Canonical radiology sessions skip it.
+      const dictionaryApplied = !context.templateId;
+      const corrected = dictionaryApplied ? applyMedicalDictionary(cleaned) : cleaned;
+      // In canonical radiology mode every transformation starts from the
+      // immutable raw ASR. Generic hallucination cleaning is intentionally not
+      // allowed to remove clinical words before the raw→normalized safety gate.
+      const normalizationInput = context.templateId ? rawText : corrected;
+      const detailedNormalization = denormalizeGigaAMDetailed(normalizationInput);
+      const normalizedText = detailedNormalization.text;
+      const normalization = {
+        version: detailedNormalization.version,
+        transformations: detailedNormalization.transformations.map((transformation) => ({
+          kind: transformation.type,
+          source: {
+            start: transformation.start,
+            end: transformation.end,
+            text: transformation.sourceText,
+          },
+          normalized: {
+            start: transformation.start,
+            end: transformation.start + transformation.normalizedText.length,
+            text: transformation.normalizedText,
+          },
+        })),
+        issues: detailedNormalization.issues.map((issue) => ({
+          id: sha256Text(JSON.stringify({
+            code: issue.code,
+            start: issue.start,
+            end: issue.end,
+            sourceText: issue.sourceText,
+            values: issue.values,
+          })).slice(0, 24),
+          code: issue.code,
+          severity: issue.severity,
+          message: issue.message,
+          source: {
+            start: issue.start,
+            end: issue.end,
+            text: issue.sourceText,
+          },
+          normalized: {
+            start: issue.start,
+            end: issue.start + issue.normalizedText.length,
+            text: issue.normalizedText,
+          },
+          values: issue.values,
+        })),
+      };
+      const runtimeVersion = data.runtime_id?.trim() || 'unknown';
+      const checkpointHashes = data.model?.checkpoint?.hashes;
+      const checkpointChecksum = checkpointHashes?.sha256 || checkpointHashes?.md5;
+      const ctcDecoder = data.model?.ctcDecoder;
+      const acousticDecoder = data.model?.acousticDecoder?.trim()
+        || data.model?.decoder?.trim()
+        || null;
+      const decoderImplementation = ctcDecoder?.implementation?.trim()
+        || acousticDecoder
+        || (ctcDecoder?.mode ? `gigaam_ctc_${ctcDecoder.mode}` : 'unknown');
+      const responseContextScope = data.context_bias?.scope?.trim() || null;
+      if (responseContextScope !== (contextScope ?? null)) {
+        throw new Error(
+          `GigaAM context scope mismatch: requested ${contextScope ?? 'none'}, `
+          + `received ${responseContextScope ?? 'none'}`,
+        );
+      }
+      const contextBias: ASRContextBiasMetadata = {
+        scope: responseContextScope,
+        active: data.context_bias?.active === true,
+        terms: Number.isSafeInteger(data.context_bias?.terms)
+          ? Number(data.context_bias?.terms)
+          : 0,
+      };
+      const decoderVersion = [
+        runtimeVersion,
+        acousticDecoder ? `acoustic=${acousticDecoder}` : '',
+        ctcDecoder?.mode ? `mode=${ctcDecoder.mode}` : '',
+        Number.isFinite(ctcDecoder?.beamWidth) ? `beam=${ctcDecoder?.beamWidth}` : '',
+        contextBias.scope ? `context=${contextBias.scope}` : '',
+        contextBias.active ? `terms=${contextBias.terms}` : '',
+      ].filter(Boolean).join(';');
+      const languageModelMetadata = ctcDecoder?.languageModel;
+      const languageModel = languageModelMetadata?.active === true
+        ? {
+            name: languageModelMetadata.file?.trim() || 'ctc-language-model',
+            version: [
+              runtimeVersion,
+              typeof languageModelMetadata.alpha === 'number'
+                ? `alpha=${languageModelMetadata.alpha}`
+                : '',
+              typeof languageModelMetadata.beta === 'number'
+                ? `beta=${languageModelMetadata.beta}`
+                : '',
+            ].filter(Boolean).join(';'),
+            ...(languageModelMetadata.sha256
+              ? { checksum: languageModelMetadata.sha256 }
+              : {}),
+          }
+        : null;
+      const normalizedTextSha256 = sha256Text(normalizedText);
+      const computedRawTextSha256 = hasExplicitRaw ? sha256Text(rawText) : undefined;
+      if (
+        data.hashes?.raw_text_sha256
+        && computedRawTextSha256
+        && data.hashes.raw_text_sha256 !== computedRawTextSha256
+      ) {
+        throw new Error('GigaAM raw_text SHA-256 does not match the explicit raw_text payload');
+      }
+      const hashes: ASRHashMetadata = {
+        ...(data.hashes?.audio_sha256 ? { audioSha256: data.hashes.audio_sha256 } : {}),
+        ...(data.hashes?.normalized_audio_sha256
+          ? { normalizedAudioSha256: data.hashes.normalized_audio_sha256 }
+          : {}),
+        ...((data.hashes?.raw_text_sha256 || computedRawTextSha256)
+          ? { rawTextSha256: data.hashes?.raw_text_sha256 || computedRawTextSha256 }
+          : {}),
+        ...((data.hashes?.output_text_sha256 || data.hashes?.text_sha256)
+          ? { outputTextSha256: data.hashes.output_text_sha256 || data.hashes.text_sha256 }
+          : { outputTextSha256: sha256Text(data.text ?? '') }),
+        ...(data.hashes?.final_text_sha256
+          ? { finalTextSha256: data.hashes.final_text_sha256 }
+          : { finalTextSha256: normalizedTextSha256 }),
+        normalizedTextSha256,
+      };
+      const source = data.source === 'gigaam'
+        ? 'gigaam'
+        : data.source === 'whisper'
+          ? 'whisper'
+          : 'unknown';
+      const words = (data.words ?? [])
+        .map((word) => {
+          const text = (word.text ?? word.word ?? '').trim();
+          const start = Number(word.start);
+          const end = Number(word.end);
+          if (!text || !Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+          return {
+            text,
+            startMs: Math.round(start * 1000),
+            endMs: Math.round(end * 1000),
+            confidence: typeof word.confidence === 'number' && Number.isFinite(word.confidence)
+              ? word.confidence
+              : null,
+          };
+        })
+        .filter((word): word is NonNullable<typeof word> => word !== null);
+      const vadConfiguration = data.configuration?.vad;
+      const vadRevision = vadConfiguration?.snapshotRevision
+        || vadConfiguration?.requestedRevision
+        || 'unknown';
+      const vad = vadConfiguration?.modelId
+        ? {
+            name: vadConfiguration.modelId,
+            version: String(vadRevision),
+            ...(/^[a-f0-9]{40,64}$/iu.test(String(vadRevision))
+              ? { checksum: String(vadRevision).toLowerCase() }
+              : {}),
+          }
+        : null;
+      const integrityAvailable = data.integrity !== undefined;
+      const method = data.method ?? '';
+      const longformMode: DetailedStreamingTranscription['longform']['mode'] =
+        method.includes('vad_')
+          ? 'vad'
+          : method.includes('stitched')
+            ? 'emission_stitch'
+            : (data.integrity?.degraded === true || !integrityAvailable)
+              ? 'text_fallback'
+              : 'single';
+      const longform: DetailedStreamingTranscription['longform'] = {
+        mode: longformMode,
+        degraded: data.integrity?.degraded === true || !integrityAvailable,
+        vad,
+        seams: (data.integrity?.seam_conflicts ?? []).map((seam) => ({
+          startMs: Math.round(Number(seam.start ?? 0) * 1000),
+          endMs: Math.round(Number(seam.end ?? seam.start ?? 0) * 1000),
+          conflict: true,
+          critical: seam.critical === true,
+          ...(seam.left_text ? { leftText: seam.left_text } : {}),
+          ...(seam.right_text ? { rightText: seam.right_text } : {}),
+        })),
+      };
+
+      return {
+        schemaVersion: data.schema_version?.trim() || 'unknown',
+        runtimeId: runtimeVersion,
+        checkpointVerified: data.model?.checkpoint?.verified === true,
+        rawText,
+        normalizedText,
+        normalization,
+        rawAvailable: hasExplicitRaw,
+        language: data.language || this.config.language,
+        source,
+        words,
+        model: {
+          asr: {
+            name: data.model?.name || data.model?.requested || 'remote-asr',
+            version: runtimeVersion,
+            ...(checkpointChecksum ? { checksum: checkpointChecksum } : {}),
+          },
+          vad,
+          decoder: {
+            name: decoderImplementation,
+            version: decoderVersion || runtimeVersion,
+            ...(ctcDecoder?.contexts?.sha256
+              ? { checksum: ctcDecoder.contexts.sha256 }
+              : {}),
+          },
+          languageModel,
+          contextVocabulary: contextBias.scope
+            ? {
+                name: contextBias.scope,
+                version: `terms=${contextBias.terms}`,
+                ...(ctcDecoder?.contexts?.sha256
+                  ? { checksum: ctcDecoder.contexts.sha256 }
+                  : {}),
+              }
+            : null,
+          dictionary: {
+            name: dictionaryApplied ? 'medical-dictionary' : 'medical-dictionary-disabled',
+            version: dictionaryApplied ? `rules-${DICTIONARY_RULE_COUNT}` : 'not-applied-radiology',
+          },
+          normalizer: {
+            name: 'gigaam-radiology-normalizer',
+            version: detailedNormalization.version,
+          },
+        },
+        contextBias,
+        hashes,
+        provenance: {
+          schemaVersion: data.schema_version?.trim() || 'unknown',
+          runtimeId: runtimeVersion,
+          acousticDecoder,
+          ctcDecoder: ctcDecoder ?? null,
+          contextBias,
+          hashes,
+          checkpointVerified: data.model?.checkpoint?.verified === true,
+        },
+        longform,
+      };
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
         throw new Error('Whisper chunk request timeout');

@@ -6,6 +6,16 @@ export interface VoiceRecorderStreamOptions {
   onBatch: (blob: Blob, mimeType: string, batchIndex: number) => void;
 }
 
+interface ActiveRecordingContext {
+  generation: number;
+  recorder: MediaRecorder;
+  stream: MediaStream;
+  chunks: Blob[];
+  trimChunks: number;
+  sentChunkCount: number;
+  batchIndex: number;
+}
+
 export function useVoiceRecorder(streamOptions?: VoiceRecorderStreamOptions) {
   const [state, setState] = useState<RecordingState>({
     isRecording: false,
@@ -13,15 +23,14 @@ export function useVoiceRecorder(streamOptions?: VoiceRecorderStreamOptions) {
     duration: 0,
     audioBlob: null,
   });
+  const [isStopping, setIsStopping] = useState(false);
 
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
+  const activeRecordingRef = useRef<ActiveRecordingContext | null>(null);
+  const recordingGenerationRef = useRef(0);
+  const startInFlightRef = useRef(false);
+  const stopInFlightRef = useRef(false);
   const timerRef = useRef<number | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const trimChunksRef = useRef(0);
   const batchTimerRef = useRef<number | null>(null);
-  const sentChunkCountRef = useRef(0);
-  const batchIndexRef = useRef(0);
   const streamOptionsRef = useRef(streamOptions);
 
   useEffect(() => {
@@ -45,12 +54,22 @@ export function useVoiceRecorder(streamOptions?: VoiceRecorderStreamOptions) {
   }, []);
 
   const startRecording = useCallback(async () => {
+    if (
+      startInFlightRef.current
+      || stopInFlightRef.current
+      || activeRecordingRef.current !== null
+    ) {
+      return false;
+    }
+    startInFlightRef.current = true;
+    const generation = ++recordingGenerationRef.current;
+    let acquiredStream: MediaStream | null = null;
     try {
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error('Микрофон недоступен в этом контексте. Используйте HTTPS или localhost.');
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
+      acquiredStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
           sampleRate: 48000,
@@ -60,48 +79,84 @@ export function useVoiceRecorder(streamOptions?: VoiceRecorderStreamOptions) {
         },
       });
 
-      streamRef.current = stream;
-      chunksRef.current = [];
+      if (generation !== recordingGenerationRef.current) {
+        acquiredStream.getTracks().forEach((track) => track.stop());
+        return false;
+      }
 
       const mimeType = pickSupportedMimeType();
       const recorderOptions: MediaRecorderOptions = {};
       if (mimeType) recorderOptions.mimeType = mimeType;
       // Повышаем битрейт для лучшего качества распознавания речи
       recorderOptions.audioBitsPerSecond = 128000;
-      const mediaRecorder = new MediaRecorder(stream, recorderOptions);
+      const mediaRecorder = new MediaRecorder(acquiredStream, recorderOptions);
+      const context: ActiveRecordingContext = {
+        generation,
+        recorder: mediaRecorder,
+        stream: acquiredStream,
+        chunks: [],
+        trimChunks: 0,
+        sentChunkCount: 0,
+        batchIndex: 0,
+      };
+      activeRecordingRef.current = context;
 
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
-          chunksRef.current.push(event.data);
+          context.chunks.push(event.data);
         }
       };
 
       mediaRecorder.onstop = () => {
         const recorderMimeType = mediaRecorder.mimeType || mimeType || 'audio/webm';
         // Trim last N chunks if requested (to cut off stop phrase from audio)
-        const trimCount = trimChunksRef.current;
-        trimChunksRef.current = 0;
-        const chunks = trimCount > 0 && chunksRef.current.length > trimCount
-          ? chunksRef.current.slice(0, -trimCount)
-          : chunksRef.current;
+        const trimCount = context.trimChunks;
+        const chunks = trimCount > 0 && context.chunks.length > trimCount
+          ? context.chunks.slice(0, -trimCount)
+          : context.chunks;
 
         // Streaming: flush оставшиеся необработанные чанки как финальный батч
         const activeStreamOptions = streamOptionsRef.current;
         if (activeStreamOptions?.onBatch) {
-          const sent = sentChunkCountRef.current;
+          const sent = context.sentChunkCount;
           if (sent < chunks.length) {
             const remaining = chunks.slice(sent);
             const finalChunks = sent === 0 ? remaining : [chunks[0], ...remaining];
             const finalBlob = new Blob(finalChunks, { type: recorderMimeType });
-            activeStreamOptions.onBatch(finalBlob, recorderMimeType, batchIndexRef.current++);
+            try {
+              activeStreamOptions.onBatch(finalBlob, recorderMimeType, context.batchIndex++);
+            } catch (error) {
+              console.error('Error flushing final audio batch:', error);
+            }
           }
         }
 
-        const audioBlob = new Blob(chunks, { type: recorderMimeType });
-        setState((prev) => ({ ...prev, audioBlob }));
+        context.stream.getTracks().forEach((track) => track.stop());
+        const isCurrent =
+          generation === recordingGenerationRef.current
+          && activeRecordingRef.current === context;
+        if (isCurrent) {
+          if (timerRef.current) {
+            clearInterval(timerRef.current);
+            timerRef.current = null;
+          }
+          if (batchTimerRef.current) {
+            clearInterval(batchTimerRef.current);
+            batchTimerRef.current = null;
+          }
+          activeRecordingRef.current = null;
+          stopInFlightRef.current = false;
+          setIsStopping(false);
+          const audioBlob = new Blob(chunks, { type: recorderMimeType });
+          setState((prev) => ({
+            ...prev,
+            isRecording: false,
+            isPaused: false,
+            audioBlob,
+          }));
+        }
       };
 
-      mediaRecorderRef.current = mediaRecorder;
       mediaRecorder.start(1000);
 
       timerRef.current = window.setInterval(updateDuration, 1000);
@@ -109,41 +164,62 @@ export function useVoiceRecorder(streamOptions?: VoiceRecorderStreamOptions) {
       // Streaming: отправляем батчи чанков во время записи
       const activeStreamOptions = streamOptionsRef.current;
       if (activeStreamOptions) {
-        sentChunkCountRef.current = 0;
-        batchIndexRef.current = 0;
         const intervalMs = activeStreamOptions.batchIntervalSeconds * 1000;
         batchTimerRef.current = window.setInterval(() => {
           const currentStreamOptions = streamOptionsRef.current;
-          if (!currentStreamOptions) return;
-          const curr = chunksRef.current.length;
-          const sent = sentChunkCountRef.current;
+          if (
+            !currentStreamOptions
+            || generation !== recordingGenerationRef.current
+            || activeRecordingRef.current !== context
+          ) return;
+          const curr = context.chunks.length;
+          const sent = context.sentChunkCount;
           // Ждём минимум 5 чанков (5 сек), чтобы webm-контейнер был валидным
           if (curr - sent < 5) return;
-          const newChunks = curr === sent ? [] : chunksRef.current.slice(sent);
+          const newChunks = curr === sent ? [] : context.chunks.slice(sent);
           if (newChunks.length === 0) return;
-          sentChunkCountRef.current = curr;
+          context.sentChunkCount = curr;
           // Батч 0 содержит header, остальные батчи префиксируем chunk[0] (webm header)
-          const batchChunks = sent === 0 ? newChunks : [chunksRef.current[0], ...newChunks];
+          const batchChunks = sent === 0 ? newChunks : [context.chunks[0], ...newChunks];
           const blob = new Blob(batchChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
-          currentStreamOptions.onBatch(blob, mediaRecorder.mimeType || 'audio/webm', batchIndexRef.current++);
+          try {
+            currentStreamOptions.onBatch(
+              blob,
+              mediaRecorder.mimeType || 'audio/webm',
+              context.batchIndex++,
+            );
+          } catch (error) {
+            console.error('Error sending audio batch:', error);
+          }
         }, intervalMs);
       }
 
+      setIsStopping(false);
       setState({
         isRecording: true,
         isPaused: false,
         duration: 0,
         audioBlob: null,
       });
+      return true;
     } catch (error) {
+      if (acquiredStream) {
+        acquiredStream.getTracks().forEach((track) => track.stop());
+      }
+      if (activeRecordingRef.current?.generation === generation) {
+        activeRecordingRef.current = null;
+      }
       console.error('Error accessing microphone:', error);
       throw new Error('Не удалось получить доступ к микрофону');
+    } finally {
+      startInFlightRef.current = false;
     }
   }, [pickSupportedMimeType, updateDuration]);
 
   const pauseRecording = useCallback(() => {
-    if (mediaRecorderRef.current && state.isRecording && !state.isPaused) {
-      mediaRecorderRef.current.pause();
+    const context = activeRecordingRef.current;
+    if (context && state.isRecording && !state.isPaused) {
+      context.recorder.pause();
       if (timerRef.current) {
         clearInterval(timerRef.current);
         timerRef.current = null;
@@ -153,40 +229,46 @@ export function useVoiceRecorder(streamOptions?: VoiceRecorderStreamOptions) {
   }, [state.isRecording, state.isPaused]);
 
   const resumeRecording = useCallback(() => {
-    if (mediaRecorderRef.current && state.isRecording && state.isPaused) {
-      mediaRecorderRef.current.resume();
+    const context = activeRecordingRef.current;
+    if (context && state.isRecording && state.isPaused) {
+      context.recorder.resume();
       timerRef.current = window.setInterval(updateDuration, 1000);
       setState((prev) => ({ ...prev, isPaused: false }));
     }
   }, [state.isRecording, state.isPaused, updateDuration]);
 
   const stopRecording = useCallback((trimSeconds = 0) => {
-    if (mediaRecorderRef.current && state.isRecording) {
+    const context = activeRecordingRef.current;
+    if (
+      context
+      && !stopInFlightRef.current
+      && context.recorder.state !== 'inactive'
+    ) {
+      stopInFlightRef.current = true;
+      setIsStopping(true);
       // Each chunk is ~1 second (start(1000)), so trimSeconds ≈ chunks to drop
-      trimChunksRef.current = trimSeconds;
+      context.trimChunks = trimSeconds;
 
       if (batchTimerRef.current) {
         clearInterval(batchTimerRef.current);
         batchTimerRef.current = null;
       }
 
-      mediaRecorderRef.current.stop();
+      context.recorder.stop();
 
       if (timerRef.current) {
         clearInterval(timerRef.current);
         timerRef.current = null;
       }
 
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
-      }
+      context.stream.getTracks().forEach((track) => track.stop());
 
       setState((prev) => ({ ...prev, isRecording: false, isPaused: false }));
     }
-  }, [state.isRecording]);
+  }, []);
 
   const resetRecording = useCallback(() => {
+    recordingGenerationRef.current += 1;
     if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
@@ -197,15 +279,23 @@ export function useVoiceRecorder(streamOptions?: VoiceRecorderStreamOptions) {
       batchTimerRef.current = null;
     }
 
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
+    const context = activeRecordingRef.current;
+    activeRecordingRef.current = null;
+    if (context) {
+      context.recorder.ondataavailable = null;
+      context.recorder.onstop = null;
+      if (context.recorder.state !== 'inactive') {
+        try {
+          context.recorder.stop();
+        } catch {
+          // Already stopping.
+        }
+      }
+      context.stream.getTracks().forEach((track) => track.stop());
     }
 
-    mediaRecorderRef.current = null;
-    chunksRef.current = [];
-    sentChunkCountRef.current = 0;
-    batchIndexRef.current = 0;
+    stopInFlightRef.current = false;
+    setIsStopping(false);
 
     setState({
       isRecording: false,
@@ -217,14 +307,26 @@ export function useVoiceRecorder(streamOptions?: VoiceRecorderStreamOptions) {
 
   useEffect(() => {
     return () => {
+      recordingGenerationRef.current += 1;
       if (timerRef.current) {
         clearInterval(timerRef.current);
       }
       if (batchTimerRef.current) {
         clearInterval(batchTimerRef.current);
       }
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
+      const context = activeRecordingRef.current;
+      activeRecordingRef.current = null;
+      if (context) {
+        context.recorder.ondataavailable = null;
+        context.recorder.onstop = null;
+        if (context.recorder.state !== 'inactive') {
+          try {
+            context.recorder.stop();
+          } catch {
+            // Already stopping.
+          }
+        }
+        context.stream.getTracks().forEach((track) => track.stop());
       }
     };
   }, []);
@@ -237,6 +339,7 @@ export function useVoiceRecorder(streamOptions?: VoiceRecorderStreamOptions) {
 
   return {
     ...state,
+    isStopping,
     formattedDuration: formatDuration(state.duration),
     startRecording,
     pauseRecording,

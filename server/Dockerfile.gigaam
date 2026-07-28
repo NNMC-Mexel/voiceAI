@@ -1,0 +1,75 @@
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG VOICEMED_SOURCE_COMMIT
+ARG VOICEMED_SOURCE_DIRTY=false
+
+RUN case "${VOICEMED_SOURCE_COMMIT}" in \
+      (*[!0-9a-f]*|"") echo "VOICEMED_SOURCE_COMMIT must be a 40-char lowercase Git SHA" >&2; exit 1 ;; \
+    esac \
+    && test "${#VOICEMED_SOURCE_COMMIT}" -eq 40 \
+    && test "${VOICEMED_SOURCE_DIRTY}" = "false"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        ffmpeg \
+        git \
+        libsndfile1 \
+        python3 \
+        python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv /opt/voicemed-gigaam
+ENV PATH="/opt/voicemed-gigaam/bin:${PATH}" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_HOME=/cache/huggingface \
+    HUGGINGFACE_HUB_CACHE=/cache/huggingface/hub \
+    GIGAAM_DOWNLOAD_ROOT=/cache/gigaam \
+    VOICEMED_SOURCE_COMMIT=${VOICEMED_SOURCE_COMMIT} \
+    VOICEMED_SOURCE_DIRTY=${VOICEMED_SOURCE_DIRTY}
+
+WORKDIR /app/server/scripts
+
+COPY scripts/requirements-gigaam.lock.txt scripts/requirements-gigaam-longform.lock.txt ./
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && python -m pip install --no-cache-dir -r requirements-gigaam-longform.lock.txt
+
+COPY scripts/gigaam_server.py scripts/gigaam-runtime.lock.json ./
+
+RUN groupadd --gid 10001 voicemed \
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin voicemed \
+    && mkdir -p /cache/gigaam /cache/huggingface \
+    && chown -R 10001:10001 /app /cache/gigaam /cache/huggingface
+
+USER 10001:10001
+
+ENV GIGAAM_MODEL=v3_ctc \
+    GIGAAM_DEVICE=cuda \
+    GIGAAM_SERVER_HOST=0.0.0.0 \
+    GIGAAM_SERVER_PORT=9002 \
+    GIGAAM_ALLOW_REMOTE_BIND=true \
+    GIGAAM_ALLOW_AUDIO_PATH=false \
+    GIGAAM_RUNTIME_LOCK=/app/server/scripts/gigaam-runtime.lock.json \
+    GIGAAM_STRICT_RUNTIME_LOCK=true \
+    GIGAAM_HASH_CHECKPOINT=true \
+    GIGAAM_LONGFORM_MODE=vad \
+    GIGAAM_LONGFORM_STRICT=true \
+    GIGAAM_VAD_MODEL_ID=pyannote/segmentation-3.0 \
+    GIGAAM_VAD_MODEL_REVISION=e66f3d3b9eb0873085418a7b813d3b369bf160bb \
+    GIGAAM_VAD_TARGET_SECONDS=20 \
+    GIGAAM_VAD_HARD_MAX_SECONDS=24 \
+    GIGAAM_VAD_PADDING_SECONDS=0.25 \
+    GIGAAM_FALLBACK_CHUNK_SECONDS=20 \
+    GIGAAM_FALLBACK_OVERLAP_SECONDS=2 \
+    GIGAAM_CTC_DECODER=greedy
+
+EXPOSE 9002
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=5 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9002/health', timeout=5)"
+
+CMD ["python", "/app/server/scripts/gigaam_server.py"]

@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   api:
     build:
@@ -8,6 +6,7 @@ services:
     ports:
       - "1337:1337"
     environment:
+      - NODE_ENV=production
       - PORT=1337
       - HOST=0.0.0.0
       - CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
@@ -16,31 +15,47 @@ services:
       - WHISPER_MODEL_PATH=/models/large-v3
       - WHISPER_LANGUAGE=ru
       - WHISPER_DEVICE=cuda
-      - WHISPER_SERVER_URL=http://whisper:9000
+      - WHISPER_SERVER_URL=http://gigaam:9002
+      - WHISPER_REMOTE_ONLY=true
+      - RADIOLOGY_DATA_DIR=/app/data/radiology
+      - RADIOLOGY_PERSIST_AUDIO=${RADIOLOGY_PERSIST_AUDIO:-false}
+      - RADIOLOGY_ALLOW_UNOWNED_SESSIONS=false
+      - RADIOLOGY_ENABLE_LEGACY_PIPELINES=false
+      - RADIOLOGY_STORAGE_RETENTION_DAYS=${RADIOLOGY_STORAGE_RETENTION_DAYS:-30}
       - LLM_SERVER_URL=http://llm:8080
-      - LLM_MODEL=qwen3-8b
+      - LLM_PROVIDER=llama
+      - LLM_MODEL=${LLM_MODEL:-deepseek-r1-distill-qwen-14b}
+      - LLM_MODEL_CHECKSUM=${LLM_MODEL_CHECKSUM:-}
+      - RADIOLOGY_LLM_STRICT_IDENTITY=true
+      - RADIOLOGY_LLM_RUNTIME_IMAGE=${LLM_CONTAINER_IMAGE:-ghcr.io/ggerganov/llama.cpp:server-cuda}
       - LLM_MAX_TOKENS=512
       - LLM_TEMPERATURE=0.1
       - LLM_TIMEOUT_MS=120000
-      - LLM_PARALLEL_SLOTS=15
+      - LLM_PARALLEL_SLOTS=${LLM_PARALLEL_SLOTS:-2}
+      - RADIOLOGY_LLM_NUM_CTX=8192
+      - RADIOLOGY_LLM_NUM_PREDICT=2048
     volumes:
       - ./uploads:/app/uploads
+      - ./data/radiology:/app/data/radiology
     depends_on:
       - llm
-      - whisper
+      - gigaam
+    networks:
+      - edge
+      - clinical_backend
 
   llm:
-    image: ghcr.io/ggerganov/llama.cpp:server-cuda
+    image: ${LLM_CONTAINER_IMAGE:-ghcr.io/ggerganov/llama.cpp:server-cuda}
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
-      - LLAMA_ARG_MODEL=/models/Qwen3-8B-Q4_K_M.gguf
-      - LLAMA_ARG_CTX_SIZE=4096
+      - LLAMA_ARG_MODEL=${LLM_MODEL_PATH:-/models/DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf}
+      - LLAMA_ARG_CTX_SIZE=8192
       - LLAMA_ARG_N_GPU_LAYERS=99
       - LLAMA_ARG_HOST=0.0.0.0
       - LLAMA_ARG_PORT=8080
-      - LLAMA_ARG_PARALLEL=15
-      - LLAMA_ARG_BATCH_SIZE=2048
+      - LLAMA_ARG_PARALLEL=${LLM_PARALLEL_SLOTS:-2}
+      - LLAMA_ARG_BATCH_SIZE=1024
       - LLAMA_ARG_FLASH_ATTN=on
     volumes:
       - ./models:/models:ro
@@ -51,13 +66,61 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    networks:
+      - clinical_backend
 
+  gigaam:
+    build:
+      context: ./server
+      dockerfile: Dockerfile.gigaam
+      args:
+        VOICEMED_SOURCE_COMMIT: ${VOICEMED_SOURCE_COMMIT:?Set the clean 40-character Git commit}
+        VOICEMED_SOURCE_DIRTY: ${VOICEMED_SOURCE_DIRTY:?Set by the validated production build wrapper}
+    ports:
+      - "127.0.0.1:9002:9002"
+    environment:
+      - GIGAAM_MODEL=v3_ctc
+      - GIGAAM_DEVICE=cuda
+      - GIGAAM_SERVER_HOST=0.0.0.0
+      - GIGAAM_SERVER_PORT=9002
+      - GIGAAM_ALLOW_REMOTE_BIND=true
+      - GIGAAM_ALLOW_AUDIO_PATH=false
+      - GIGAAM_STRICT_RUNTIME_LOCK=true
+      - GIGAAM_LONGFORM_MODE=vad
+      - GIGAAM_LONGFORM_STRICT=true
+      - GIGAAM_VAD_MODEL_ID=pyannote/segmentation-3.0
+      - GIGAAM_VAD_MODEL_REVISION=e66f3d3b9eb0873085418a7b813d3b369bf160bb
+      - GIGAAM_VAD_TARGET_SECONDS=20
+      - GIGAAM_VAD_HARD_MAX_SECONDS=24
+      - GIGAAM_VAD_PADDING_SECONDS=0.25
+      - GIGAAM_FALLBACK_CHUNK_SECONDS=20
+      - GIGAAM_FALLBACK_OVERLAP_SECONDS=2
+      - GIGAAM_CTC_DECODER=greedy
+    volumes:
+      - ./models/gigaam:/cache/gigaam
+      # Preload the exact pyannote snapshot; runtime uses local_files_only.
+      - ./models/huggingface:/cache/huggingface:ro
+      - ./models/asr:/models/asr:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - clinical_backend
+
+  # Retained only as an explicit benchmark challenger. It is not the canonical
+  # radiology ASR source and does not feed the governed training dataset.
   whisper:
+    profiles: ["challenger"]
     build:
       context: ./server
       dockerfile: Dockerfile.whisper
     ports:
-      - "9000:9000"
+      - "127.0.0.1:9000:9000"
     environment:
       - WHISPER_MODEL_PATH=/models/large-v3
       - WHISPER_DEVICE=cuda
@@ -74,6 +137,8 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    networks:
+      - clinical_backend
 
   frontend:
     build:
@@ -92,6 +157,13 @@ services:
       - ./package.json:/app/package.json
       - ./package-lock.json:/app/package-lock.json
     command: npm run dev -- --host
+    networks:
+      - edge
 
 volumes:
   uploads:
+
+networks:
+  edge:
+  clinical_backend:
+    internal: true

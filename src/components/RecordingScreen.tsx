@@ -49,6 +49,7 @@ export function RecordingScreen({
 }: RecordingScreenProps) {
   const {
     isRecording,
+    isStopping,
     isPaused,
     audioBlob,
     formattedDuration,
@@ -68,7 +69,11 @@ export function RecordingScreen({
   const degradedServices: string[] = [];
   if (health?.services.whisper === 'unavailable') degradedServices.push('распознавание речи');
   if (health?.services.llm === 'unavailable') degradedServices.push('ИИ-структурирование');
-  const showHealthWarning = (backendDown || degradedServices.length > 0) && !isRecording && !audioBlob;
+  const showHealthWarning =
+    (backendDown || degradedServices.length > 0)
+    && !isRecording
+    && !isStopping
+    && !audioBlob;
   const autoSubmitRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const docInputRef = useRef<HTMLInputElement>(null);
@@ -76,15 +81,19 @@ export function RecordingScreen({
 
   // Wake word: "Джарвис" starts recording, "стоп" stops and auto-submits
   const handleWakeWord = useCallback(() => {
-    if (isRecording || audioBlob || hasPermission === false) return;
+    if (isRecording || isStopping || audioBlob || hasPermission === false) return;
     setError(null);
     autoSubmitRef.current = true;
-    onRecordingStart?.();
-    void startRecording().catch((err) => {
-      setError(err instanceof Error ? err.message : 'Ошибка записи');
-      autoSubmitRef.current = false;
-    });
-  }, [isRecording, audioBlob, hasPermission, startRecording, onRecordingStart]);
+    void startRecording()
+      .then((started) => {
+        if (started) onRecordingStart?.();
+        else autoSubmitRef.current = false;
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : 'Ошибка записи');
+        autoSubmitRef.current = false;
+      });
+  }, [isRecording, isStopping, audioBlob, hasPermission, startRecording, onRecordingStart]);
 
   const handleStopWord = useCallback(() => {
     if (!isRecording) return;
@@ -169,6 +178,7 @@ export function RecordingScreen({
       if (isEditableTarget) return;
 
       if (hasPermission === false) return;
+      if (isStopping) return;
 
       if (isRecording) {
         if (isPaused) {
@@ -182,10 +192,13 @@ export function RecordingScreen({
       if (audioBlob) return;
 
       setError(null);
-      onRecordingStart?.();
-      void startRecording().catch((err) => {
-        setError(err instanceof Error ? err.message : 'Ошибка записи');
-      });
+      void startRecording()
+        .then((started) => {
+          if (started) onRecordingStart?.();
+        })
+        .catch((err) => {
+          setError(err instanceof Error ? err.message : 'Ошибка записи');
+        });
     };
 
     window.addEventListener('keydown', onKeyDown);
@@ -195,6 +208,7 @@ export function RecordingScreen({
     hasPermission,
     isPaused,
     isRecording,
+    isStopping,
     onRecordingStart,
     pauseRecording,
     resumeRecording,
@@ -202,10 +216,11 @@ export function RecordingScreen({
   ]);
 
   const handleStart = async () => {
+    if (isStopping) return;
     setError(null);
     try {
-      onRecordingStart?.();
-      await startRecording();
+      const started = await startRecording();
+      if (started) onRecordingStart?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка записи');
     }
@@ -248,32 +263,32 @@ export function RecordingScreen({
               </div>
             )}
             {onSyncUpload && (
-              <button onClick={onSyncUpload} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap">
+              <button disabled={isStopping} onClick={onSyncUpload} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap disabled:text-slate-300">
                 <Smartphone className="w-4 h-4" /> На ПК
               </button>
             )}
             {onOpenPatients && (
-              <button onClick={onOpenPatients} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap">
+              <button disabled={isStopping} onClick={onOpenPatients} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap disabled:text-slate-300">
                 <Users className="w-4 h-4" /> Пациенты
               </button>
             )}
             {onOpenRadiology && (
-              <button onClick={onOpenRadiology} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap">
+              <button disabled={isStopping} onClick={onOpenRadiology} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap disabled:text-slate-300">
                 <Stethoscope className="w-4 h-4" /> Лучевая
               </button>
             )}
             {onOpenProtocols && (
-              <button onClick={onOpenProtocols} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap">
+              <button disabled={isStopping} onClick={onOpenProtocols} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap disabled:text-slate-300">
                 <FileText className="w-4 h-4" /> Протоколы
               </button>
             )}
             {onOpenAdmin && (
-              <button onClick={onOpenAdmin} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap">
+              <button disabled={isStopping} onClick={onOpenAdmin} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap disabled:text-slate-300">
                 <Shield className="w-4 h-4" /> Админка
               </button>
             )}
             {onOpenSettings && (
-              <button onClick={onOpenSettings} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap">
+              <button disabled={isStopping} onClick={onOpenSettings} className="flex items-center gap-1.5 text-sm text-medical-600 hover:text-medical-700 whitespace-nowrap disabled:text-slate-300">
                 <Settings className="w-4 h-4" /> Настройки
               </button>
             )}
@@ -293,12 +308,13 @@ export function RecordingScreen({
                 <FileText className="w-4 h-4 text-amber-600 flex-shrink-0" />
                 <span className="text-sm text-medical-900 truncate flex-1">{s.filename || 'Документ'}</span>
                 <button
+                  disabled={isStopping}
                   onClick={() => onClaimSync?.(s.id)}
-                  className="text-xs bg-medical-600 hover:bg-medical-700 text-white px-2 py-1 rounded-md whitespace-nowrap"
+                  className="text-xs bg-medical-600 hover:bg-medical-700 text-white px-2 py-1 rounded-md whitespace-nowrap disabled:bg-slate-300"
                 >
                   Открыть
                 </button>
-                <button onClick={() => onDismissSync?.(s.id)} className="p-0.5 hover:bg-amber-100 rounded">
+                <button disabled={isStopping} onClick={() => onDismissSync?.(s.id)} className="p-0.5 hover:bg-amber-100 rounded disabled:opacity-40">
                   <XIcon className="w-3.5 h-3.5 text-amber-500" />
                 </button>
               </div>
@@ -388,7 +404,9 @@ export function RecordingScreen({
                 </div>
               )}
               <p className="text-text-muted text-sm mt-2">
-                {isRecording
+                {isStopping
+                  ? 'Завершаем запись…'
+                  : isRecording
                   ? isPaused
                     ? 'Запись на паузе'
                     : 'Идет запись... Скажите "Стоп Нави" для завершения'
@@ -401,7 +419,7 @@ export function RecordingScreen({
 
           {/* Кнопки: на мобильном — wrap + flex-1 чтобы не вылезали; от sm — обычный inline-row */}
           <div className="flex flex-wrap items-stretch justify-center gap-3 sm:gap-4">
-            {!isRecording && !audioBlob && (
+            {!isRecording && !isStopping && !audioBlob && (
               <>
                 <button
                   onClick={handleStart}
@@ -460,6 +478,16 @@ export function RecordingScreen({
                   Аудио
                 </button>
               </>
+            )}
+            {isStopping && (
+              <button
+                type="button"
+                disabled
+                className="btn-primary flex items-center justify-center gap-3 text-base sm:text-lg px-5 sm:px-8 py-3 sm:py-4 flex-1 sm:flex-initial whitespace-nowrap opacity-50 cursor-not-allowed"
+              >
+                <Square className="w-6 h-6" />
+                Завершаем запись…
+              </button>
             )}
 
             {isRecording && (

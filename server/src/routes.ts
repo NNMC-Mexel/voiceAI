@@ -1205,14 +1205,6 @@ export async function registerRoutes(
     },
   });
 
-  // Регистрируем маршруты врачей/пациентов/синхронизации если БД доступна
-  if (db) {
-    await registerDoctorRoutes(fastify, db, documentExtractor, llmService);
-  }
-
-  // Маршруты движка лучевой диагностики (structured reporting, без БД/LLM)
-  registerRadiologyRoutes(fastify);
-
   const rateMap = new Map<string, RateState>();
   const audioJobs = new Map<string, AudioProcessJob>();
   const AUDIO_JOB_TTL_MS = 24 * 60 * 60 * 1000;
@@ -1322,6 +1314,28 @@ export async function registerRoutes(
     if (state.count > config.security.rateLimitMaxRequests) {
       return reply.status(429).send({ error: 'Too many requests' });
     }
+  });
+
+  // Register DB-backed doctor/patient/admin routes only after the global
+  // authentication and rate-limit hook.
+  if (db) {
+    await registerDoctorRoutes(fastify, db, documentExtractor, llmService);
+  }
+
+  // Canonical radiology sessions use the same remote ASR as the rest of the
+  // application, but keep immutable raw output separate from normalization.
+  // Registration happens after the auth/rate-limit hook because artifacts and
+  // feedback contain protected health information.
+  registerRadiologyRoutes(fastify, {
+    transcribeChunk: (audioBase64, context) => whisperService.transcribeBase64Detailed(
+      audioBase64,
+      { templateId: context.templateId },
+    ),
+    allowAudioPersistence: process.env.RADIOLOGY_PERSIST_AUDIO === 'true',
+    // No-owner PHI artifacts defeat object-level authorization. Keep this
+    // compatibility path opt-in and only available in the legacy no-DB mode.
+    allowUnownedSessions:
+      !db && process.env.RADIOLOGY_ALLOW_UNOWNED_SESSIONS === 'true',
   });
 
   if (!db) {

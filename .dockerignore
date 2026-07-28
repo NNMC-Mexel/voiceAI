@@ -1,0 +1,17 @@
+.git
+.env
+.env.*
+!.env.example
+.obsidian
+node_modules
+dist
+server
+artifacts
+audio
+data
+models
+uploads
+temp
+coverage
+**/*.log
+**/.DS_Store

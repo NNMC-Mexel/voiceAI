@@ -1,7 +1,14 @@
 // Движок структурированного протокола: команда → состояние → отчёт.
 // Детерминистичен, без LLM. Один движок обслуживает любой шаблон-конфиг.
 
-import { extractNumbers, hasPhrase, normalizeCommand, type NumberToken } from './numbers.js';
+import {
+  assignNumbersToKeywordGroups,
+  extractNumbers,
+  hasPhrase,
+  normalizeCommand,
+  numberKeywordDistance,
+  type NumberToken,
+} from './numbers.js';
 import type {
   Conflict, EngineContext, Finding, FindingRender, FindingView, Phase,
   ProtocolState, RadiologyTemplate, Section, SectionState, SlotSpec, TechniqueState,
@@ -80,14 +87,24 @@ function fillView(parsed: Parsed, ctx: EngineContext, specs: SlotSpec[], flagSpe
     const vals: number[] = [];
     for (let i = 0; i < parsed.numbers.length && vals.length < (s.count ?? 3); i++) {
       if (consumed.has(i)) continue;
-      if (kws.includes(parsed.numbers[i].precededBy)) { vals.push(parsed.numbers[i].value); consumed.add(i); }
+      if (numberKeywordDistance(parsed.numbers[i], kws) !== undefined) {
+        vals.push(parsed.numbers[i].value);
+        consumed.add(i);
+      }
     }
     dims[s.name] = vals;
   }
-  for (const s of specs.filter((x) => x.role === 'keyword' || x.role === 'category')) {
-    const kws = (s.keywords ?? []).map(norm);
-    const tok = take((t) => kws.includes(t.precededBy));
-    if (tok) slots[s.name] = tok.value;
+  const keywordSpecs = specs.filter((x) => x.role === 'keyword' || x.role === 'category');
+  const assignments = assignNumbersToKeywordGroups(
+    parsed.numbers,
+    keywordSpecs.map((spec) => (spec.keywords ?? []).map(norm)),
+    consumed,
+  );
+  for (let specIndex = 0; specIndex < keywordSpecs.length; specIndex++) {
+    const numberIndex = assignments[specIndex];
+    if (numberIndex === undefined) continue;
+    consumed.add(numberIndex);
+    slots[keywordSpecs[specIndex].name] = parsed.numbers[numberIndex].value;
   }
   for (const s of specs.filter((x) => x.role === 'bareSize')) {
     const tok = take(() => true);
