@@ -30,7 +30,8 @@ const APPEND_TRIGGERS = ['добавь', 'добавить', 'дополните
 function fmt(values: number[], slot: SlotDef): string {
   const one = (n: number): string => {
     const s = slot.decimals !== undefined ? n.toFixed(slot.decimals) : String(n);
-    return s.replace('.', ',');
+    const normalized = s.replace('.', ',');
+    return slot.signMode === 'always' && n >= 0 ? `+${normalized}` : normalized;
   };
   const parts = values.map(one);
   // Продиктовали не все размеры («12 на 6» вместо трёх) — недостающие остаются пустыми.

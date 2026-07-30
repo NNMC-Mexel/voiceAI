@@ -2,7 +2,7 @@
 // Сравниваем мультимножество чисел в РАСШИФРОВКЕ и в тексте, который врач реально надиктовал
 // (только продиктованные секции + unmatched — НЕ нормы-дефолты шаблона, там свои числа).
 
-import { convertNumberWords } from './numbers.js';
+import { convertNumberWords, extractNumbers } from './numbers.js';
 
 export interface NumberCheck {
   matched: number[];       // числа, совпавшие в речи и в выводе
@@ -13,9 +13,7 @@ export interface NumberCheck {
 
 export function numbersOf(text: string): number[] {
   const norm = convertNumberWords(text);
-  const out: number[] = [];
-  for (const m of norm.matchAll(/\d+(?:[.,]\d+)?/g)) out.push(parseFloat(m[0].replace(',', '.')));
-  return out;
+  return extractNumbers(norm).map((token) => token.value);
 }
 
 export interface AmbiguousNumberSequence {

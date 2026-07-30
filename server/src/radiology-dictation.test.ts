@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { structureDictation } from './radiology/dictation.js';
 import { verifyNumbers } from './radiology/number-check.js';
 import type { LLMCall } from './radiology/ollama.js';
+import { sectionizeWithProvenance } from './radiology/sectionize.js';
+import type { DocTemplate } from './radiology/doc-model.js';
 
 // Legacy/unsafe response is useful for proving that authored text is rejected.
 function fakeLLM(sections: Record<string, string>, unmatched = ''): LLMCall {
@@ -234,6 +236,153 @@ test('продиктованное заключение хранится точ�
   assert.equal(conclusion.evidence.length, 1);
   const evidence = conclusion.evidence[0];
   assert.equal(transcript.slice(evidence.start, evidence.end), conclusion.text);
+});
+
+test('canonical report keeps verbatim evidence and adds a filled template review draft', async () => {
+  const transcript = 'печень КВР 150 плотность 60';
+  const report = await structureDictation(
+    'CT_ABDOMEN_MIKHAILOV',
+    transcript,
+    classifyAll(null),
+  );
+
+  const liver = blk(report, 'liver');
+  assert.equal(liver.text, transcript);
+  assert.equal(report.evidenceBackedText, `Печень: ${transcript}`);
+
+  const draft = report.reviewDraft;
+  assert.ok(draft);
+  assert.equal(draft.templateId, 'CT_ABDOMEN_MIKHAILOV');
+  assert.match(draft.fullText, /КВР 150 мм/iu);
+  assert.match(draft.fullText, /\+60 HU/iu);
+  assert.deepEqual(report.fieldAssignments, draft.fieldAssignments);
+
+  const kvr = draft.fieldAssignments.find((assignment) => assignment.fieldId.endsWith('.kvr'));
+  const density = draft.fieldAssignments.find((assignment) => assignment.fieldId.endsWith('.density'));
+  assert.equal(kvr?.status, 'applied');
+  assert.deepEqual(kvr?.values, [150]);
+  assert.equal(density?.status, 'applied');
+  assert.deepEqual(density?.values, [60]);
+  for (const assignment of [kvr, density]) {
+    assert.ok(assignment);
+    assert.ok(assignment.evidence.length > 0);
+    for (const evidence of assignment.evidence) {
+      assert.equal(transcript.slice(evidence.start, evidence.end), evidence.text);
+    }
+  }
+});
+
+test('unique versioned field alias routes a value spoken before the organ without LLM', async () => {
+  let called = false;
+  const llm: LLMCall = async () => {
+    called = true;
+    throw new Error('field alias routing must not call the LLM');
+  };
+  const transcript = 'КВР 150 печень';
+  const report = await structureDictation(
+    'CT_ABDOMEN_MIKHAILOV',
+    transcript,
+    llm,
+    { allowLLM: false },
+  );
+
+  assert.equal(called, false);
+  assert.equal(report.structuringRun.llmAllowed, false);
+  assert.equal(report.structuringRun.llmCalled, false);
+  assert.equal(report.unmatched, '');
+  assert.deepEqual(report.routing.unmatchedAtomIds, []);
+  assert.equal(report.routing.atoms.length, 1);
+  assert.deepEqual(report.routing.atoms[0].candidateSectionIds, ['liver']);
+  assert.deepEqual(report.routing.assignments, [{
+    atomId: report.routing.atoms[0].id,
+    sectionId: 'liver',
+    method: 'rule',
+  }]);
+  assert.match(
+    report.routing.atoms[0].anchorRuleIds[0] ?? '',
+    /^field-alias:ct-abdomen-field-routing-v1:liver\.kvr:квр$/u,
+  );
+
+  const kvr = report.fieldAssignments?.find((assignment) => assignment.fieldId === 'liver.kvr');
+  assert.equal(kvr?.status, 'applied');
+  assert.deepEqual(kvr?.values, [150]);
+  assert.match(report.reviewDraft?.fullText ?? '', /КВР 150 мм/iu);
+});
+
+test('invalid LLM cannot override deterministic field-alias routing before the organ', async () => {
+  let called = false;
+  const invalidLLM: LLMCall = async () => {
+    called = true;
+    return JSON.stringify({
+      assignments: [{ atomId: 'unknown', sectionId: 'spleen' }],
+    });
+  };
+  const report = await structureDictation(
+    'CT_ABDOMEN_MIKHAILOV',
+    'ка вэ эр 150 печень',
+    invalidLLM,
+  );
+
+  assert.equal(called, false);
+  assert.equal(report.structuringRun.llmCalled, false);
+  assert.equal(report.structuringRun.llmValid, true);
+  assert.equal(report.unmatched, '');
+  assert.deepEqual(report.routing.unmatchedAtomIds, []);
+  assert.equal(report.routing.assignments[0]?.sectionId, 'liver');
+  assert.equal(report.routing.assignments[0]?.method, 'rule');
+  const kvr = report.fieldAssignments?.find((assignment) => assignment.fieldId === 'liver.kvr');
+  assert.equal(kvr?.status, 'applied');
+  assert.deepEqual(kvr?.values, [150]);
+});
+
+test('ambiguous field routing alias is rejected instead of using template order', () => {
+  const template: DocTemplate = {
+    id: 'AMBIGUOUS_FIELD_ALIAS_TEST',
+    name: 'Ambiguous field alias test',
+    modality: 'CT',
+    title: 'Test',
+    aliases: [],
+    fieldRoutingVersion: 'ambiguous-routing-v1',
+    blocks: [
+      {
+        id: 'first',
+        label: 'First',
+        anchors: ['первый'],
+        nodes: [{
+          kind: 'slot',
+          slot: {
+            name: 'value',
+            fieldId: 'first.value',
+            keywords: ['маркер'],
+            routingAliases: ['маркер'],
+            default: '___',
+          },
+        }],
+      },
+      {
+        id: 'second',
+        label: 'Second',
+        anchors: ['второй'],
+        nodes: [{
+          kind: 'slot',
+          slot: {
+            name: 'value',
+            fieldId: 'second.value',
+            keywords: ['маркер'],
+            routingAliases: ['маркер'],
+            default: '___',
+          },
+        }],
+      },
+    ],
+  };
+
+  const routed = sectionizeWithProvenance(template, 'маркер 150');
+  assert.equal(routed.atoms.length, 1);
+  assert.deepEqual(routed.atoms[0].anchorRuleIds, []);
+  assert.equal(routed.assignments[0]?.sectionId, null);
+  assert.equal(routed.assignments[0]?.method, 'unmatched');
+  assert.deepEqual(routed.atoms[0].candidateSectionIds, ['first', 'second']);
 });
 
 // ─── прямые тесты number-check ────────────────────────────────────────────────

@@ -23,6 +23,7 @@ import type {
   RadiologyFeedbackInput,
   RadiologyModelMetadata,
   NormalizationResolutionInput,
+  RadiologyRecomposeInput,
   RadiologySessionActor,
   RadiologyTranscriptStructurer,
   RadiologyTranscriptionSource,
@@ -233,6 +234,33 @@ function parseNormalizationResolution(
   };
 }
 
+function parseOptionalUniqueIdArray(
+  value: unknown,
+  field: string,
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 2_000) {
+    throw new RadiologySessionError(
+      Array.isArray(value) ? 413 : 400,
+      'invalid_feedback',
+      `${field} must be an array with at most 2000 entries`,
+    );
+  }
+  const ids = value.map((entry, index) => requiredString(
+    entry,
+    `${field}[${index}]`,
+    { maxLength: 200 },
+  ));
+  if (new Set(ids).size !== ids.length) {
+    throw new RadiologySessionError(
+      400,
+      'invalid_feedback',
+      `${field} must not contain duplicate ids`,
+    );
+  }
+  return ids;
+}
+
 function parseFeedback(body: unknown): RadiologyFeedbackInput {
   if (!isRecord(body)) {
     throw new RadiologySessionError(400, 'invalid_feedback', 'Request body must be an object');
@@ -273,6 +301,27 @@ function parseFeedback(body: unknown): RadiologyFeedbackInput {
       'idempotencyKey must be 16-128 characters using letters, digits, dot, underscore, colon, or hyphen',
     );
   }
+  const baseDraftSha256 = body.baseDraftSha256 === undefined
+    ? undefined
+    : requiredString(body.baseDraftSha256, 'baseDraftSha256', { maxLength: 64 });
+  if (
+    baseDraftSha256 !== undefined
+    && !/^[a-f0-9]{64}$/u.test(baseDraftSha256)
+  ) {
+    throw new RadiologySessionError(
+      400,
+      'invalid_feedback',
+      'baseDraftSha256 must be a lowercase SHA-256 hex digest',
+    );
+  }
+  const acceptedTemplateSegmentIds = parseOptionalUniqueIdArray(
+    body.acceptedTemplateSegmentIds,
+    'acceptedTemplateSegmentIds',
+  );
+  const reviewedResidualAtomIds = parseOptionalUniqueIdArray(
+    body.reviewedResidualAtomIds,
+    'reviewedResidualAtomIds',
+  );
   return {
     idempotencyKey,
     verbatimTranscript: requiredString(
@@ -283,10 +332,34 @@ function parseFeedback(body: unknown): RadiologyFeedbackInput {
     finalReport: requiredString(body.finalReport, 'finalReport', { allowEmpty: true }),
     spanCorrections: body.spanCorrections.map(parseSpanCorrection),
     normalizationResolutions: normalizationResolutions.map(parseNormalizationResolution),
+    ...(baseDraftSha256 !== undefined ? { baseDraftSha256 } : {}),
+    ...(acceptedTemplateSegmentIds !== undefined ? { acceptedTemplateSegmentIds } : {}),
+    ...(reviewedResidualAtomIds !== undefined ? { reviewedResidualAtomIds } : {}),
     approved: body.approved,
     ...(typeof body.author === 'string'
       ? { author: requiredString(body.author, 'author', { maxLength: 200 }) }
       : {}),
+  };
+}
+
+function parseRecompose(body: unknown): RadiologyRecomposeInput {
+  if (!isRecord(body)) {
+    throw new RadiologySessionError(400, 'invalid_recompose', 'Request body must be an object');
+  }
+  if (!Array.isArray(body.spanCorrections) || body.spanCorrections.length > 1_000) {
+    throw new RadiologySessionError(
+      Array.isArray(body.spanCorrections) ? 413 : 400,
+      'invalid_recompose',
+      'spanCorrections must be an array with at most 1000 entries',
+    );
+  }
+  return {
+    verbatimTranscript: requiredString(
+      body.verbatimTranscript,
+      'verbatimTranscript',
+      { allowEmpty: true },
+    ),
+    spanCorrections: body.spanCorrections.map(parseSpanCorrection),
   };
 }
 
@@ -354,7 +427,11 @@ export function registerRadiologyRoutes(
         templateId,
         transcript,
         ollamaLLM(),
-        { allowLLM: context?.allowLLM },
+        {
+          allowLLM: context?.allowLLM,
+          rawTranscript: context?.rawTranscript,
+          normalizationAlignment: context?.normalizationAlignment,
+        },
       )),
     model: {
       llm: {
@@ -492,6 +569,21 @@ export function registerRadiologyRoutes(
         throw new RadiologySessionError(404, 'artifact_not_found', 'Radiology session artifact not found');
       }
       return { artifact };
+    } catch (error) {
+      return sessionError(request, reply, error);
+    }
+  });
+
+  fastify.post('/api/radiology/sessions/:id/recompose', async (request: FastifyRequest, reply: FastifyReply) => {
+    markPhiResponse(reply);
+    try {
+      const { id } = request.params as { id: string };
+      const revision = await sessionService.recompose(
+        id,
+        parseRecompose(request.body),
+        requestActor(request),
+      );
+      return { success: true, revision };
     } catch (error) {
       return sessionError(request, reply, error);
     }

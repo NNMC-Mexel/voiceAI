@@ -209,7 +209,10 @@ function denormalizeUnitsOnly(s: string): string {
 // Приводим к канону «27.04.2026», «27.04.2026», «05.05.2026».
 // Recall на датах был 67% — большая часть потерь именно из-за нестандартного «г.».
 function normalizeNumericFormats(s: string): string {
-  let out = s;
+  // Unicode minus characters that NFKC defines as the ordinary mathematical
+  // minus are canonicalized deterministically. Other dash-like signs are
+  // rejected by the independent clinical safety gate.
+  let out = s.replace(/[\u2212\uFE63\uFF0D](?=\s*\d)/gu, '-');
 
   // Гибридные годы: GigaAM digitizes частично, оставляет ordinal как слово.
   // «20 шестого года» (т.е. «две тысячи двадцать шестого года» → 2026 года)
@@ -326,6 +329,89 @@ export interface GigaAMNormalizationResult {
   version: typeof GIGAAM_DENORMALIZER_VERSION;
   transformations: NormalizationTransformation[];
   issues: NormalizationIssue[];
+  /** Compact final-normalized → immutable-source offset mapping. */
+  alignment: NormalizationAlignmentSpan[];
+}
+
+export interface NormalizationAlignmentSpan {
+  sourceStart: number;
+  sourceEnd: number;
+  normalizedStart: number;
+  normalizedEnd: number;
+  /** The deterministic stage that produced this replacement span. */
+  kind?: NormalizationTransformationType;
+}
+
+interface ProvenanceCell {
+  sourceStart: number;
+  sourceEnd: number;
+  kind?: NormalizationTransformationType;
+}
+
+function applyProvenanceTransformations(
+  provenance: ProvenanceCell[],
+  transformations: Array<Pick<
+    NormalizationTransformation,
+    'type' | 'start' | 'end' | 'normalizedText'
+  >>,
+): void {
+  for (const transformation of [...transformations].sort((left, right) => (
+    right.start - left.start || right.end - left.end
+  ))) {
+    const removed = provenance.slice(transformation.start, transformation.end);
+    const sourceStart = removed[0]?.sourceStart
+      ?? provenance[transformation.start]?.sourceStart
+      ?? provenance[transformation.start - 1]?.sourceEnd
+      ?? 0;
+    const sourceEnd = removed[removed.length - 1]?.sourceEnd ?? sourceStart;
+    const inserted = Array.from(
+      { length: transformation.normalizedText.length },
+      () => ({
+        sourceStart,
+        sourceEnd,
+        kind: transformation.type,
+      }),
+    );
+    provenance.splice(
+      transformation.start,
+      transformation.end - transformation.start,
+      ...inserted,
+    );
+  }
+}
+
+function compactAlignment(provenance: ProvenanceCell[]): NormalizationAlignmentSpan[] {
+  const result: NormalizationAlignmentSpan[] = [];
+  for (let index = 0; index < provenance.length; index++) {
+    const cell = provenance[index];
+    const previous = result[result.length - 1];
+    const sameReplacement = previous
+      && previous.sourceStart === cell.sourceStart
+      && previous.sourceEnd === cell.sourceEnd
+      && previous.kind === cell.kind;
+    const previousIsLinear = previous
+      && previous.sourceEnd - previous.sourceStart
+        === previous.normalizedEnd - previous.normalizedStart;
+    const cellIsLinear = cell.sourceEnd - cell.sourceStart === 1;
+    const linearContinuation = previous
+      && previousIsLinear
+      && cellIsLinear
+      && previous.sourceEnd === cell.sourceStart
+      && previous.kind === cell.kind;
+    if (previous && (sameReplacement || linearContinuation)) {
+      previous.normalizedEnd = index + 1;
+      if (linearContinuation) previous.sourceEnd = cell.sourceEnd;
+      continue;
+    }
+    result.push({
+      sourceStart: cell.sourceStart,
+      sourceEnd: cell.sourceEnd,
+      normalizedStart: index,
+      normalizedEnd: index + 1,
+      ...(cell.kind ? { kind: cell.kind } : {}),
+    });
+  }
+  return result;
 }
 
 function stageTransformation(
@@ -375,11 +461,16 @@ export function denormalizeDetailed(text: string): GigaAMNormalizationResult {
       version: GIGAAM_DENORMALIZER_VERSION,
       transformations: [],
       issues: [],
+      alignment: [],
     };
   }
 
   const transformations: NormalizationTransformation[] = [];
   let current = text;
+  const provenance: ProvenanceCell[] = Array.from(
+    { length: text.length },
+    (_, index) => ({ sourceStart: index, sourceEnd: index + 1 }),
+  );
 
   const applyStage = (
     type: Exclude<NormalizationTransformationType, 'cardinal'>,
@@ -387,7 +478,10 @@ export function denormalizeDetailed(text: string): GigaAMNormalizationResult {
   ): void => {
     const next = transform(current);
     const ledgerItem = stageTransformation(current, next, type);
-    if (ledgerItem) transformations.push(ledgerItem);
+    if (ledgerItem) {
+      transformations.push(ledgerItem);
+      applyProvenanceTransformations(provenance, [ledgerItem]);
+    }
     current = next;
   };
 
@@ -395,7 +489,19 @@ export function denormalizeDetailed(text: string): GigaAMNormalizationResult {
   applyStage('decimal', denormalizeDecimals);
 
   const cardinals = normalizeNumberWordsDetailed(current, { preserveStandaloneOne: true });
+  const cardinalIssues = cardinals.issues.map((issue) => {
+    const sourceCells = provenance.slice(issue.start, issue.end);
+    const sourceStart = sourceCells[0]?.sourceStart ?? issue.start;
+    const sourceEnd = sourceCells[sourceCells.length - 1]?.sourceEnd ?? issue.end;
+    return {
+      ...mapCardinalIssue(issue),
+      start: sourceStart,
+      end: sourceEnd,
+      sourceText: text.slice(sourceStart, sourceEnd),
+    };
+  });
   transformations.push(...cardinals.transformations);
+  applyProvenanceTransformations(provenance, cardinals.transformations);
   current = cardinals.text;
 
   applyStage('unit', denormalizeUnitsOnly);
@@ -410,7 +516,8 @@ export function denormalizeDetailed(text: string): GigaAMNormalizationResult {
     text: current,
     version: GIGAAM_DENORMALIZER_VERSION,
     transformations,
-    issues: cardinals.issues.map(mapCardinalIssue),
+    issues: cardinalIssues,
+    alignment: compactAlignment(provenance),
   };
 }
 

@@ -8,6 +8,7 @@ import { ctAbdomen } from './templates/ct-abdomen.js';
 export * from './schema.js';
 export * from './safety.js';
 export * from './sectionize.js';
+export * from './template-composer.js';
 export { RadiologyEngine } from './engine.js';
 export type { ApplyResult, BuiltReport } from './engine.js';
 

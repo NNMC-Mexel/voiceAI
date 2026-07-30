@@ -16,6 +16,7 @@ import type {
   RadiologyTranscriptStructurer,
 } from './radiology-session.js';
 import type { DictationReport } from './radiology/dictation.js';
+import { structureDictation } from './radiology/dictation.js';
 import { verifyNumbers } from './radiology/number-check.js';
 import { verifyRadiologySafety } from './radiology/safety.js';
 
@@ -92,6 +93,17 @@ function verifiedTranscription(
     rawTextSha256: createHash('sha256').update(rawText).digest('hex'),
     normalizedTextSha256: createHash('sha256').update(normalizedText).digest('hex'),
   };
+  const verification = {
+    metadataAvailable: true,
+    metadataSchema: true,
+    transcriptionSchema: true,
+    runtimeIdentity: true,
+    checkpoint: true,
+    decoder: true,
+    hashes: true,
+    wordEvidence: true,
+    productionReady: true,
+  };
   return {
     schemaVersion: 'gigaam.transcription.v2',
     runtimeId: 'b'.repeat(64),
@@ -100,8 +112,17 @@ function verifiedTranscription(
     normalizedText,
     rawAvailable: true,
     source: 'gigaam' as const,
+    words: [{
+      text: rawText.trim().split(/\s+/u)[0] ?? rawText,
+      startMs: 0,
+      endMs: 100,
+      confidence: 0.97,
+      avgLogprob: -0.03,
+      scoreType: 'ctc_acoustic_logprob',
+    }],
     model,
     hashes,
+    verification,
     provenance: {
       schemaVersion: 'gigaam.transcription.v2',
       runtimeId: 'b'.repeat(64),
@@ -110,6 +131,7 @@ function verifiedTranscription(
       ctcDecoder: null,
       contextBias: { scope: null, active: false, terms: 0 },
       hashes,
+      verification,
     },
   };
 }
@@ -167,10 +189,28 @@ test('canonical radiology session returns and persists a provenance-rich artifac
       rawAvailable: true,
       language: 'ru',
       source: 'gigaam',
-      words: [{ text: marker, startMs: 0, endMs: 100, confidence: 0.97 }],
+      words: [{
+        text: marker,
+        startMs: 0,
+        endMs: 100,
+        confidence: 0.97,
+        avgLogprob: -0.03,
+        scoreType: 'ctc_acoustic_logprob',
+      }],
       model,
       contextBias,
       hashes,
+      verification: {
+        metadataAvailable: true,
+        metadataSchema: true,
+        transcriptionSchema: true,
+        runtimeIdentity: true,
+        checkpoint: true,
+        decoder: true,
+        hashes: true,
+        wordEvidence: true,
+        productionReady: true,
+      },
       provenance: {
         schemaVersion: 'gigaam.transcription.v2',
         runtimeId: 'b'.repeat(64),
@@ -179,6 +219,17 @@ test('canonical radiology session returns and persists a provenance-rich artifac
         ctcDecoder: { mode: 'beam', beamWidth: 32 },
         contextBias,
         hashes,
+        verification: {
+          metadataAvailable: true,
+          metadataSchema: true,
+          transcriptionSchema: true,
+          runtimeIdentity: true,
+          checkpoint: true,
+          decoder: true,
+          hashes: true,
+          wordEvidence: true,
+          productionReady: true,
+        },
       },
     };
   };
@@ -276,6 +327,10 @@ test('canonical radiology session returns and persists a provenance-rich artifac
     runtime: true,
     checkpoint: true,
     hashes: true,
+    metadata: true,
+    decoder: true,
+    wordEvidence: true,
+    productionContract: true,
   });
   assert.equal(artifact.asrChunks[0].provenance.contextBias.scope, 'ct-abdomen');
   assert.equal(
@@ -309,6 +364,88 @@ test('canonical radiology session returns and persists a provenance-rich artifac
   });
   assert.equal(retriedFinish.statusCode, 200);
   assert.equal(retriedFinish.json().artifact.audio.sha256, artifact.audio.sha256);
+});
+
+test('word-number field evidence maps to the exact immutable raw phrase end to end', async (t) => {
+  const rawText = 'печень КВР сто пятьдесят миллиметров';
+  const { app, dataDir } = await fixture(
+    async (audioBase64) => verifiedTranscription(audioBase64, rawText),
+    undefined,
+    async (templateId, transcript, context) => structureDictation(
+      templateId,
+      transcript,
+      async () => {
+        throw new Error('The deterministic liver anchor must not invoke the LLM');
+      },
+      context
+        ? {
+            allowLLM: context.allowLLM,
+            rawTranscript: context.rawTranscript,
+            normalizationAlignment: context.normalizationAlignment,
+          }
+        : {},
+    ),
+  );
+  t.after(async () => {
+    await app.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  const created = await app.inject({
+    method: 'POST',
+    url: '/api/sessions',
+    payload: {
+      mode: 'radiology',
+      templateId: 'CT_ABDOMEN_MIKHAILOV',
+      source: 'gigaam',
+      retainAudio: true,
+    },
+  });
+  assert.equal(created.statusCode, 201);
+  const { sessionId } = created.json();
+  assert.equal((await app.inject({
+    method: 'POST',
+    url: `/api/sessions/${sessionId}/chunks`,
+    payload: {
+      audio_base64: Buffer.from('word-number-evidence').toString('base64'),
+      chunk_index: 0,
+    },
+  })).statusCode, 200);
+
+  const finished = await app.inject({
+    method: 'POST',
+    url: `/api/sessions/${sessionId}/finish`,
+    payload: {},
+  });
+  assert.equal(finished.statusCode, 200);
+  const artifact = finished.json().artifact;
+  assert.equal(artifact.rawTranscript.text, rawText);
+  assert.equal(artifact.normalization.text, 'печень КВР 150 миллиметров');
+  const assignment = artifact.report.fieldAssignments.find(
+    (item: { fieldId: string }) => item.fieldId === 'liver.kvr',
+  );
+  assert.equal(assignment.status, 'applied');
+  assert.equal(assignment.value, 150);
+  assert.match(artifact.report.reviewDraft.fullText, /КВР 150 мм/iu);
+
+  const valueEvidence = assignment.evidence.find(
+    (span: { normalized: { text: string } }) => span.normalized.text === '150',
+  );
+  assert.deepEqual(valueEvidence.raw, {
+    start: rawText.indexOf('сто'),
+    end: rawText.indexOf('сто') + 'сто пятьдесят'.length,
+    text: 'сто пятьдесят',
+  });
+  const unitEvidence = assignment.evidence.find(
+    (span: { normalized: { text: string } }) => /миллиметр/iu.test(span.normalized.text),
+  );
+  assert.equal(unitEvidence.raw.text, 'миллиметров');
+  assert.ok(artifact.normalization.transformations.some(
+    (transformation: { kind: string; source: { text: string } }) => (
+      transformation.kind === 'cardinal'
+      && transformation.source.text === 'сто пятьдесят'
+    ),
+  ));
 });
 
 test('mixed ASR runtime metadata fails closed before artifact persistence', async (t) => {
@@ -479,6 +616,42 @@ test('rejected ASR chunk can be retried and single-chunk audio uses byte SHA-256
   );
 });
 
+test('generic remote ASR rejection is exposed as a retryable 503 at finish', async (t) => {
+  const { app, dataDir } = await fixture(async () => {
+    throw new Error('remote transport closed');
+  });
+  t.after(async () => {
+    await app.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+  const created = await app.inject({
+    method: 'POST',
+    url: '/api/sessions',
+    payload: {
+      mode: 'radiology',
+      templateId: 'CT_ABDOMEN_MIKHAILOV',
+      source: 'gigaam',
+    },
+  });
+  const sessionId = created.json().sessionId;
+  assert.equal((await app.inject({
+    method: 'POST',
+    url: `/api/sessions/${sessionId}/chunks`,
+    payload: {
+      audio_base64: Buffer.from('remote-failure').toString('base64'),
+      chunk_index: 0,
+    },
+  })).statusCode, 200);
+
+  const finished = await app.inject({
+    method: 'POST',
+    url: `/api/sessions/${sessionId}/finish`,
+    payload: {},
+  });
+  assert.equal(finished.statusCode, 503, finished.body);
+  assert.equal(finished.json().error, 'asr_transcription_failed');
+});
+
 test('radiology chunk route accepts payloads above Fastify default body limit', async (t) => {
   const { app, dataDir } = await fixture(async () => ({
     rawText: 'text',
@@ -565,34 +738,9 @@ test('global ASR backpressure rejects new chunks without reserving their index',
 
 test('feedback is immutable, versioned, span-checked, and training eligible only with real raw audio', async (t) => {
   const { app, dataDir, store } = await fixture(async (audioBase64) => {
-    const audio = Buffer.from(audioBase64, 'base64');
     const rawText = 'печень пятнадцать миллиметров';
     const normalizedText = 'печень 15 мм';
-    const hashes = {
-      audioSha256: createHash('sha256').update(audio).digest('hex'),
-      rawTextSha256: createHash('sha256').update(rawText).digest('hex'),
-      normalizedTextSha256: createHash('sha256').update(normalizedText).digest('hex'),
-    };
-    return {
-      schemaVersion: 'gigaam.transcription.v2',
-      runtimeId: 'b'.repeat(64),
-      checkpointVerified: true,
-      rawText,
-      normalizedText,
-      rawAvailable: true,
-      source: 'gigaam',
-      model,
-      hashes,
-      provenance: {
-        schemaVersion: 'gigaam.transcription.v2',
-        runtimeId: 'b'.repeat(64),
-        checkpointVerified: true,
-        acousticDecoder: 'ctc-greedy',
-        ctcDecoder: null,
-        contextBias: { scope: null, active: false, terms: 0 },
-        hashes,
-      },
-    };
+    return verifiedTranscription(audioBase64, rawText, normalizedText);
   });
   t.after(async () => {
     await app.close();
@@ -1000,12 +1148,20 @@ test('unverified ASR provenance remains reviewable but is fail-closed for traini
     runtime: false,
     checkpoint: false,
     hashes: false,
+    metadata: false,
+    decoder: false,
+    wordEvidence: false,
+    productionContract: false,
   });
   for (const reason of [
     'asr_schema_unverified',
     'asr_runtime_unverified',
     'asr_checkpoint_unverified',
     'asr_hashes_unverified',
+    'asr_metadata_unverified',
+    'asr_decoder_unverified',
+    'asr_word_evidence_unverified',
+    'asr_contract_unverified',
   ]) {
     assert.ok(artifact.training.exclusionReasons.includes(reason), reason);
   }
@@ -1222,7 +1378,7 @@ test('critical safety failure returns an artifact but blocks approved feedback',
 
 test('ambiguous number sequences produce a deterministic blocked draft until explicitly resolved', async (t) => {
   const rawText = 'плотность пятьдесят пятьдесят три HU';
-  let structurerContext: { allowLLM: boolean; normalizationAmbiguous: boolean } | undefined;
+  let structurerContext: Parameters<RadiologyTranscriptStructurer>[2];
   const { app, dataDir } = await fixture(
     async (audioBase64) => verifiedTranscription(audioBase64, rawText),
     undefined,
@@ -1267,10 +1423,10 @@ test('ambiguous number sequences produce a deterministic blocked draft until exp
   assert.doesNotMatch(artifact.normalization.text, /\b103\b/u);
   assert.equal(artifact.normalization.issues.length, 1);
   assert.equal(artifact.normalization.issues[0].code, 'ambiguous_number_sequence');
-  assert.deepEqual(structurerContext, {
-    allowLLM: false,
-    normalizationAmbiguous: true,
-  });
+  assert.equal(structurerContext?.allowLLM, false);
+  assert.equal(structurerContext?.normalizationAmbiguous, true);
+  assert.equal(structurerContext?.rawTranscript, rawText);
+  assert.ok((structurerContext?.normalizationAlignment.length ?? 0) > 0);
   assert.notEqual(artifact.report, null);
   assert.equal(artifact.safety.status, 'incomplete');
   assert.equal(artifact.safety.approvalBlocked, true);
@@ -1815,4 +1971,478 @@ test('radiology sessions enforce per-owner and global active audio memory quotas
       && 'code' in error
       && error.code === 'active_audio_bytes_limit',
   );
+});
+
+test('template review feedback is bound to immutable draft SHA, segment ids, and residual review', async (t) => {
+  const rawText = 'печень КВР 150 плотность 60. селезёнка 12 на 6 на 5';
+  const { app, dataDir, store } = await fixture(
+    async (audioBase64) => verifiedTranscription(audioBase64, rawText),
+    undefined,
+    async (templateId, transcript) => structureDictation(
+      templateId,
+      transcript,
+      async (_system, user) => {
+        const atoms = (JSON.parse(user) as { atoms: Array<{ atomId: string }> }).atoms;
+        return JSON.stringify({
+          assignments: atoms.map((atom) => ({
+            atomId: atom.atomId,
+            sectionId: null,
+          })),
+        });
+      },
+    ),
+  );
+  t.after(async () => {
+    await app.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  const created = await app.inject({
+    method: 'POST',
+    url: '/api/sessions',
+    payload: {
+      mode: 'radiology',
+      templateId: 'CT_ABDOMEN_MIKHAILOV',
+      source: 'gigaam',
+      retainAudio: true,
+    },
+  });
+  const { sessionId } = created.json();
+  await app.inject({
+    method: 'POST',
+    url: `/api/sessions/${sessionId}/chunks`,
+    payload: {
+      audio_base64: Buffer.from('template-review-feedback').toString('base64'),
+      chunk_index: 0,
+    },
+  });
+  const finished = await app.inject({
+    method: 'POST',
+    url: `/api/sessions/${sessionId}/finish`,
+    payload: {},
+  });
+  assert.equal(finished.statusCode, 200);
+  const artifact = finished.json().artifact;
+  const draft = artifact.report.reviewDraft;
+  assert.ok(draft);
+  assert.equal(
+    artifact.report.blocks.find((block: { id: string }) => block.id === 'liver').text,
+    'печень КВР 150 плотность 60.',
+  );
+  assert.match(draft.fullText, /КВР 150 мм/iu);
+  assert.match(draft.fullText, /\+60 HU/iu);
+  assert.equal(artifact.components.composer.version, draft.version);
+  assert.equal(draft.composerVersion, draft.version);
+  assert.equal(draft.templateSha256, artifact.components.template.checksum);
+
+  const placeholderSegments = draft.segments.filter(
+    (segment: { defaultKind?: string }) => segment.defaultKind === 'placeholder',
+  );
+  const finalReportWithoutPlaceholders = [...placeholderSegments]
+    .sort((left, right) => right.start - left.start)
+    .reduce(
+      (text, segment) => `${text.slice(0, segment.start)}${text.slice(segment.end)}`,
+      draft.fullText,
+    );
+  const acceptedTemplateSegmentIds = draft.segments
+    .filter((segment: { confirmationRequired: boolean; defaultKind?: string }) => (
+      segment.confirmationRequired && segment.defaultKind !== 'placeholder'
+    ))
+    .map((segment: { id: string }) => segment.id);
+  assert.ok(acceptedTemplateSegmentIds.length > 0);
+  const reviewedResidualAtomIds = [...draft.residualAtomIds];
+  const basePayload = {
+    verbatimTranscript: rawText,
+    finalReport: finalReportWithoutPlaceholders,
+    spanCorrections: [],
+    normalizationResolutions: [],
+    acceptedTemplateSegmentIds,
+    reviewedResidualAtomIds,
+    approved: true,
+    author: 'doctor-1',
+  };
+
+  const staleDraft = await app.inject({
+    method: 'POST',
+    url: `/api/radiology/sessions/${sessionId}/feedback`,
+    payload: {
+      ...basePayload,
+      idempotencyKey: 'review-draft-stale-000001',
+      baseDraftSha256: '0'.repeat(64),
+    },
+  });
+  assert.equal(staleDraft.statusCode, 409);
+  assert.equal(staleDraft.json().error, 'review_draft_sha_mismatch');
+
+  const foreignSegment = await app.inject({
+    method: 'POST',
+    url: `/api/radiology/sessions/${sessionId}/feedback`,
+    payload: {
+      ...basePayload,
+      idempotencyKey: 'review-draft-segment-0001',
+      baseDraftSha256: draft.sha256,
+      acceptedTemplateSegmentIds: [...acceptedTemplateSegmentIds, 'foreign-segment'],
+    },
+  });
+  assert.equal(foreignSegment.statusCode, 422, foreignSegment.body);
+  assert.equal(foreignSegment.json().error, 'template_segment_mismatch');
+
+  const nonConfirmableSegment = draft.segments.find(
+    (segment: { confirmationRequired: boolean }) => !segment.confirmationRequired,
+  );
+  assert.ok(nonConfirmableSegment);
+  const nonConfirmableDecision = await app.inject({
+    method: 'POST',
+    url: `/api/radiology/sessions/${sessionId}/feedback`,
+    payload: {
+      ...basePayload,
+      idempotencyKey: 'review-draft-not-confirmable-0001',
+      baseDraftSha256: draft.sha256,
+      acceptedTemplateSegmentIds: [
+        ...acceptedTemplateSegmentIds,
+        nonConfirmableSegment.id,
+      ],
+    },
+  });
+  assert.equal(nonConfirmableDecision.statusCode, 422, nonConfirmableDecision.body);
+  assert.equal(
+    nonConfirmableDecision.json().error,
+    'template_segment_not_confirmable',
+  );
+
+  const unacceptedButPresent = await app.inject({
+    method: 'POST',
+    url: `/api/radiology/sessions/${sessionId}/feedback`,
+    payload: {
+      ...basePayload,
+      idempotencyKey: 'review-draft-missing-0001',
+      baseDraftSha256: draft.sha256,
+      acceptedTemplateSegmentIds: acceptedTemplateSegmentIds.slice(1),
+    },
+  });
+  assert.equal(unacceptedButPresent.statusCode, 422);
+  assert.equal(
+    unacceptedButPresent.json().error,
+    'unaccepted_template_segment_present',
+  );
+
+  const transcriptSegment = draft.segments.find(
+    (segment: { kind: string; sectionId: string }) => (
+      segment.kind === 'transcript_value' && segment.sectionId === 'liver'
+    ),
+  );
+  assert.ok(transcriptSegment);
+  const movedTranscriptValue = finalReportWithoutPlaceholders
+    .replace(transcriptSegment.text, '')
+    .replace(
+      'Желчный пузырь:',
+      `Желчный пузырь: ${transcriptSegment.text} `,
+    );
+  const movedValue = await app.inject({
+    method: 'POST',
+    url: `/api/radiology/sessions/${sessionId}/feedback`,
+    payload: {
+      ...basePayload,
+      idempotencyKey: 'review-draft-moved-value-0001',
+      baseDraftSha256: draft.sha256,
+      finalReport: movedTranscriptValue,
+    },
+  });
+  assert.equal(movedValue.statusCode, 409, movedValue.body);
+  assert.equal(
+    movedValue.json().error,
+    'transcript_template_segment_mismatch',
+  );
+
+  const kvrSegment = draft.segments.find(
+    (segment: { fieldId?: string }) => segment.fieldId === 'liver.kvr',
+  );
+  const densitySegment = draft.segments.find(
+    (segment: { fieldId?: string }) => segment.fieldId === 'liver.density',
+  );
+  assert.ok(kvrSegment);
+  assert.ok(densitySegment);
+  const swappedLiverValues = finalReportWithoutPlaceholders
+    .replace(kvrSegment.text, 'SWAPVALUE')
+    .replace(densitySegment.text, kvrSegment.text)
+    .replace('SWAPVALUE', densitySegment.text);
+  const swappedValues = await app.inject({
+    method: 'POST',
+    url: `/api/radiology/sessions/${sessionId}/feedback`,
+    payload: {
+      ...basePayload,
+      idempotencyKey: 'review-draft-swapped-values-001',
+      baseDraftSha256: draft.sha256,
+      finalReport: swappedLiverValues,
+    },
+  });
+  assert.equal(swappedValues.statusCode, 409, swappedValues.body);
+  assert.ok(
+    [
+      'accepted_template_segment_mismatch',
+      'transcript_template_segment_mismatch',
+    ].includes(swappedValues.json().error),
+    swappedValues.body,
+  );
+
+  const unsupportedEdit = await app.inject({
+    method: 'POST',
+    url: `/api/radiology/sessions/${sessionId}/feedback`,
+    payload: {
+      ...basePayload,
+      idempotencyKey: 'review-draft-unsafe-edit-001',
+      baseDraftSha256: draft.sha256,
+      finalReport: `${finalReportWithoutPlaceholders}\nПочка слева: образование 50 мм.`,
+    },
+  });
+  assert.equal(unsupportedEdit.statusCode, 422);
+  assert.equal(
+    unsupportedEdit.json().error,
+    'safety_approval_blocked',
+    unsupportedEdit.body,
+  );
+
+  const approved = await app.inject({
+    method: 'POST',
+    url: `/api/radiology/sessions/${sessionId}/feedback`,
+    payload: {
+      ...basePayload,
+      idempotencyKey: 'review-draft-approved-0001',
+      baseDraftSha256: draft.sha256,
+    },
+  });
+  assert.equal(approved.statusCode, 201, approved.body);
+  const [stored] = await store.listFeedback(sessionId);
+  assert.equal(stored.baseDraftSha256, draft.sha256);
+  assert.deepEqual(stored.acceptedTemplateSegmentIds, acceptedTemplateSegmentIds);
+  assert.deepEqual(stored.reviewedResidualAtomIds, reviewedResidualAtomIds);
+  assert.equal(stored.safetyStage.status, 'passed');
+});
+
+test('corrected verbatim recomposes an immutable template revision used by approved feedback', async (t) => {
+  const rawText = 'печень КВР 105. селезёнка 12 на 6 на 5';
+  const correctedText = 'печень КВР 150. селезёнка 12 на 6 на 5';
+  const { app, dataDir, store } = await fixture(
+    async (audioBase64) => verifiedTranscription(audioBase64, rawText),
+    undefined,
+    async (templateId, transcript, context) => structureDictation(
+      templateId,
+      transcript,
+      async () => JSON.stringify({ assignments: [] }),
+      {
+        allowLLM: context?.allowLLM,
+        rawTranscript: context?.rawTranscript,
+        normalizationAlignment: context?.normalizationAlignment,
+      },
+    ),
+  );
+  t.after(async () => {
+    await app.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  const created = await app.inject({
+    method: 'POST',
+    url: '/api/sessions',
+    payload: {
+      mode: 'radiology',
+      templateId: 'CT_ABDOMEN_MIKHAILOV',
+      source: 'gigaam',
+      retainAudio: true,
+    },
+  });
+  const sessionId = created.json().sessionId;
+  await app.inject({
+    method: 'POST',
+    url: `/api/sessions/${sessionId}/chunks`,
+    payload: {
+      audio_base64: Buffer.from('recompose-kvr').toString('base64'),
+      chunk_index: 0,
+    },
+  });
+  const finished = await app.inject({
+    method: 'POST',
+    url: `/api/sessions/${sessionId}/finish`,
+    payload: {},
+  });
+  assert.equal(finished.statusCode, 200, finished.body);
+  const originalArtifact = finished.json().artifact;
+  const originalDraft = originalArtifact.report.reviewDraft;
+  assert.equal(
+    originalDraft.fieldAssignments.find(
+      (assignment: { fieldId: string }) => assignment.fieldId === 'liver.kvr',
+    ).value,
+    105,
+  );
+
+  const correction = {
+    start: rawText.indexOf('105'),
+    end: rawText.indexOf('105') + 3,
+    originalText: '105',
+    correctedText: '150',
+    entityType: 'measurement',
+    confidence: 1,
+    modality: 'CT',
+    author: 'doctor-1',
+  };
+  const recomposed = await app.inject({
+    method: 'POST',
+    url: `/api/radiology/sessions/${sessionId}/recompose`,
+    payload: {
+      verbatimTranscript: correctedText,
+      spanCorrections: [correction],
+    },
+  });
+  assert.equal(recomposed.statusCode, 200, recomposed.body);
+  const revision = recomposed.json().revision;
+  const revisedDraft = revision.report.reviewDraft;
+  assert.match(revision.sourceArtifactSha256, /^[a-f0-9]{64}$/u);
+  assert.notEqual(revisedDraft.sha256, originalDraft.sha256);
+  assert.equal(
+    revisedDraft.fieldAssignments.find(
+      (assignment: { fieldId: string }) => assignment.fieldId === 'liver.kvr',
+    ).value,
+    150,
+  );
+
+  const persistedAfterRecompose = await store.getArtifact(sessionId);
+  assert.equal(persistedAfterRecompose?.rawTranscript.text, rawText);
+  assert.equal(persistedAfterRecompose?.report?.reviewDraft?.sha256, originalDraft.sha256);
+
+  const finalReport = [...revisedDraft.segments]
+    .filter((segment: { defaultKind?: string }) => segment.defaultKind === 'placeholder')
+    .sort((left, right) => right.start - left.start)
+    .reduce(
+      (text, segment) => `${text.slice(0, segment.start)}${text.slice(segment.end)}`,
+      revisedDraft.fullText,
+    );
+  const acceptedTemplateSegmentIds = revisedDraft.segments
+    .filter((segment: { confirmationRequired: boolean; defaultKind?: string }) => (
+      segment.confirmationRequired && segment.defaultKind !== 'placeholder'
+    ))
+    .map((segment: { id: string }) => segment.id);
+  const approved = await app.inject({
+    method: 'POST',
+    url: `/api/radiology/sessions/${sessionId}/feedback`,
+    payload: {
+      idempotencyKey: 'recompose-feedback-approved-0001',
+      verbatimTranscript: correctedText,
+      finalReport,
+      spanCorrections: [correction],
+      normalizationResolutions: [],
+      baseDraftSha256: revisedDraft.sha256,
+      acceptedTemplateSegmentIds,
+      reviewedResidualAtomIds: revisedDraft.residualAtomIds,
+      approved: true,
+      author: 'doctor-1',
+    },
+  });
+  assert.equal(approved.statusCode, 201, approved.body);
+  const [storedFeedback] = await store.listFeedback(sessionId);
+  assert.equal(storedFeedback.baseDraftSha256, revisedDraft.sha256);
+  assert.equal(storedFeedback.recomposeRevision?.report?.reviewDraft?.sha256, revisedDraft.sha256);
+  assert.equal(storedFeedback.recomposeRevision?.sourceArtifactSha256, revision.sourceArtifactSha256);
+  assert.equal((await store.getArtifact(sessionId))?.rawTranscript.text, rawText);
+});
+
+test('approved template feedback requires every composer residual atom to be reviewed', async (t) => {
+  const rawText = 'печень КВР 150 дополнительный текст. селезёнка 12 на 6 на 5';
+  const { app, dataDir } = await fixture(
+    async (audioBase64) => verifiedTranscription(audioBase64, rawText),
+    undefined,
+    async (templateId, transcript) => structureDictation(
+      templateId,
+      transcript,
+      async () => JSON.stringify({ assignments: [] }),
+    ),
+  );
+  t.after(async () => {
+    await app.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  const created = await app.inject({
+    method: 'POST',
+    url: '/api/sessions',
+    payload: {
+      mode: 'radiology',
+      templateId: 'CT_ABDOMEN_MIKHAILOV',
+      source: 'gigaam',
+      retainAudio: true,
+    },
+  });
+  const { sessionId } = created.json();
+  await app.inject({
+    method: 'POST',
+    url: `/api/sessions/${sessionId}/chunks`,
+    payload: {
+      audio_base64: Buffer.from('template-review-residual').toString('base64'),
+      chunk_index: 0,
+    },
+  });
+  const finished = await app.inject({
+    method: 'POST',
+    url: `/api/sessions/${sessionId}/finish`,
+    payload: {},
+  });
+  const draft = finished.json().artifact.report.reviewDraft;
+  assert.equal(draft.status, 'partial');
+  assert.deepEqual(draft.residualAtomIds, ['a0001']);
+  const acceptedTemplateSegmentIds = draft.segments
+    .filter((segment: { confirmationRequired: boolean; defaultKind?: string }) => (
+      segment.confirmationRequired && segment.defaultKind !== 'placeholder'
+    ))
+    .map((segment: { id: string }) => segment.id);
+  const finalReportWithoutPlaceholders = [...draft.segments]
+    .filter((segment: { defaultKind?: string }) => segment.defaultKind === 'placeholder')
+    .sort((left, right) => right.start - left.start)
+    .reduce(
+      (text, segment) => `${text.slice(0, segment.start)}${text.slice(segment.end)}`,
+      draft.fullText,
+    );
+  const basePayload = {
+    verbatimTranscript: rawText,
+    finalReport: finalReportWithoutPlaceholders,
+    spanCorrections: [],
+    normalizationResolutions: [],
+    baseDraftSha256: draft.sha256,
+    acceptedTemplateSegmentIds,
+    approved: true,
+    author: 'doctor-1',
+  };
+
+  const foreignResidual = await app.inject({
+    method: 'POST',
+    url: `/api/radiology/sessions/${sessionId}/feedback`,
+    payload: {
+      ...basePayload,
+      idempotencyKey: 'review-residual-foreign-0001',
+      reviewedResidualAtomIds: ['foreign-atom'],
+    },
+  });
+  assert.equal(foreignResidual.statusCode, 422);
+  assert.equal(foreignResidual.json().error, 'residual_atom_mismatch');
+
+  const missingResidual = await app.inject({
+    method: 'POST',
+    url: `/api/radiology/sessions/${sessionId}/feedback`,
+    payload: {
+      ...basePayload,
+      idempotencyKey: 'review-residual-missing-0001',
+      reviewedResidualAtomIds: [],
+    },
+  });
+  assert.equal(missingResidual.statusCode, 422);
+  assert.equal(missingResidual.json().error, 'residual_atom_review_required');
+
+  const reviewed = await app.inject({
+    method: 'POST',
+    url: `/api/radiology/sessions/${sessionId}/feedback`,
+    payload: {
+      ...basePayload,
+      idempotencyKey: 'review-residual-approved-001',
+      reviewedResidualAtomIds: ['a0001'],
+    },
+  });
+  assert.equal(reviewed.statusCode, 201, reviewed.body);
 });

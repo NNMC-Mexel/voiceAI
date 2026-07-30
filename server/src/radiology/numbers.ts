@@ -302,11 +302,14 @@ const WORD_RE = /[a-zа-яё]+/i;
  */
 export function extractNumbers(text: string): NumberToken[] {
   const result: NumberToken[] = [];
-  const numRe = /\d+(?:[.,]\d+)?/g;
+  const numRe = /(?:(?<![a-zа-яё])(?:минус|плюс)\s+|[+\-\u2212]\s*)?\d+(?:[.,]\d+)?/giu;
   let m: RegExpExecArray | null;
   while ((m = numRe.exec(text)) !== null) {
     const raw = m[0];
-    const value = parseFloat(raw.replace(',', '.'));
+    const normalizedRaw = raw.toLowerCase().replace(/\s+/gu, ' ').trim();
+    const sign = /^(?:минус(?=$|[^a-zа-яё])|[-\u2212])/u.test(normalizedRaw) ? -1 : 1;
+    const numeric = normalizedRaw.match(/\d+(?:[.,]\d+)?/u)?.[0] ?? '';
+    const value = sign * parseFloat(numeric.replace(',', '.'));
     // ищем слово-тег: последнее «словесное» слово слева, пропуская другие числа/предлоги
     const before = text.slice(0, m.index);
     const words = before.match(/[a-zа-яё]+/gi) || [];
@@ -347,6 +350,31 @@ function wordMatchesKeyword(word: string, keyword: string): boolean {
   return word === normalized || word.startsWith(normalized);
 }
 
+function keywordPhraseDistance(
+  words: string[],
+  keyword: string,
+  reverse: boolean,
+): number | undefined {
+  const parts = keyword
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .trim()
+    .split(/\s+/u)
+    .filter(Boolean);
+  if (parts.length === 0) return undefined;
+  const expected = reverse ? [...parts].reverse() : parts;
+  for (let offset = 0; offset <= words.length - expected.length; offset++) {
+    if (
+      expected.every((part, index) => (
+        wordMatchesKeyword(words[offset + index], part)
+      ))
+    ) {
+      return offset;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Возвращает цену связи числа с параметром. Меньше — ближе и надёжнее.
  * Слово перед числом получает небольшой приоритет, но учитываются обе стороны,
@@ -355,13 +383,13 @@ function wordMatchesKeyword(word: string, keyword: string): boolean {
 export function numberKeywordDistance(token: NumberToken, keywords: string[]): number | undefined {
   let best: number | undefined;
   for (const keyword of keywords) {
-    const before = token.precedingWords.findIndex((word) => wordMatchesKeyword(word, keyword));
-    if (before >= 0) {
+    const before = keywordPhraseDistance(token.precedingWords, keyword, true);
+    if (before !== undefined) {
       const score = before * 2;
       if (best === undefined || score < best) best = score;
     }
-    const after = token.followingWords.findIndex((word) => wordMatchesKeyword(word, keyword));
-    if (after >= 0) {
+    const after = keywordPhraseDistance(token.followingWords, keyword, false);
+    if (after !== undefined) {
       const score = after * 2 + 1;
       if (best === undefined || score < best) best = score;
     }
@@ -374,11 +402,16 @@ export function numberKeywordDistance(token: NumberToken, keywords: string[]): n
  * В отличие от последовательного greedy это корректно разбирает и
  * «КВР 145 плотность 62», и «145 КВР 62 плотность».
  */
-export function assignNumbersToKeywordGroups(
+export interface NumberKeywordAssignmentResult {
+  assignment: Array<number | undefined>;
+  ambiguous: boolean;
+}
+
+export function assignNumbersToKeywordGroupsDetailed(
   tokens: NumberToken[],
   keywordGroups: string[][],
   unavailable: ReadonlySet<number> = new Set<number>(),
-): Array<number | undefined> {
+): NumberKeywordAssignmentResult {
   interface Candidate {
     assignment: Array<number | undefined>;
     assigned: number;
@@ -389,6 +422,7 @@ export function assignNumbersToKeywordGroups(
     assigned: -1,
     cost: Number.POSITIVE_INFINITY,
   };
+  let ambiguous = false;
   const current = Array<number | undefined>(keywordGroups.length).fill(undefined);
   const used = new Set<number>(unavailable);
 
@@ -396,6 +430,13 @@ export function assignNumbersToKeywordGroups(
     if (groupIndex === keywordGroups.length) {
       if (assigned > best.assigned || (assigned === best.assigned && cost < best.cost)) {
         best = { assignment: [...current], assigned, cost };
+        ambiguous = false;
+      } else if (
+        assigned === best.assigned
+        && cost === best.cost
+        && current.some((value, index) => value !== best.assignment[index])
+      ) {
+        ambiguous = true;
       }
       return;
     }
@@ -421,7 +462,22 @@ export function assignNumbersToKeywordGroups(
   };
 
   visit(0, 0, 0);
-  return best.assignment;
+  return {
+    assignment: best.assignment,
+    ambiguous,
+  };
+}
+
+export function assignNumbersToKeywordGroups(
+  tokens: NumberToken[],
+  keywordGroups: string[][],
+  unavailable: ReadonlySet<number> = new Set<number>(),
+): Array<number | undefined> {
+  return assignNumbersToKeywordGroupsDetailed(
+    tokens,
+    keywordGroups,
+    unavailable,
+  ).assignment;
 }
 
 /**
