@@ -11,6 +11,7 @@ import type { NumberCheck } from './radiology/number-check.js';
 import {
   denormalizeDetailed,
   type GigaAMNormalizationResult,
+  type NormalizationAlignmentSpan,
 } from './services/gigaam-denormalize.js';
 import {
   verifyRawToNormalizedSafety,
@@ -19,6 +20,13 @@ import {
   type SafetyEntityCheck,
   type SafetyIssue,
 } from './radiology/safety.js';
+import {
+  composeTemplateReviewDraft,
+  TEMPLATE_COMPOSER_VERSION,
+  templateSha256,
+  type TemplateSectionAtom,
+} from './radiology/template-composer.js';
+import { extractNumbers } from './radiology/numbers.js';
 
 export const RADIOLOGY_ARTIFACT_SCHEMA_VERSION = 2 as const;
 export const RADIOLOGY_FEEDBACK_SCHEMA_VERSION = 2 as const;
@@ -37,7 +45,21 @@ export interface RadiologyWordTiming {
   startMs: number;
   endMs: number;
   confidence: number | null;
+  avgLogprob?: number | null;
+  scoreType?: string | null;
   chunkIndex?: number;
+}
+
+export interface RadiologyASRContractVerification {
+  metadataAvailable: boolean;
+  metadataSchema: boolean;
+  transcriptionSchema: boolean;
+  runtimeIdentity: boolean;
+  checkpoint: boolean;
+  decoder: boolean;
+  hashes: boolean;
+  wordEvidence: boolean;
+  productionReady: boolean;
 }
 
 export interface RadiologyComponentVersion {
@@ -59,6 +81,8 @@ export interface RadiologyModelMetadata {
   router: RadiologyComponentVersion;
   prompt: RadiologyComponentVersion;
   structurer: RadiologyComponentVersion;
+  /** Added additively so persisted v2 artifacts without a composer remain readable. */
+  composer?: RadiologyComponentVersion;
   llm: RadiologyComponentVersion | null;
   safety: RadiologyComponentVersion;
 }
@@ -90,6 +114,10 @@ export interface RadiologyASRRuntimeProvenance {
     runtime: boolean;
     checkpoint: boolean;
     hashes: boolean;
+    metadata: boolean;
+    decoder: boolean;
+    wordEvidence: boolean;
+    productionContract: boolean;
   };
 }
 
@@ -332,6 +360,7 @@ export interface RadiologyChunkTranscription {
   runtimeId?: string;
   contextBias?: RadiologyASRContextBiasMetadata;
   hashes?: Partial<RadiologyASRHashMetadata>;
+  verification?: RadiologyASRContractVerification;
   provenance?: {
     schemaVersion: string;
     runtimeId: string;
@@ -340,6 +369,7 @@ export interface RadiologyChunkTranscription {
     contextBias: RadiologyASRContextBiasMetadata;
     hashes: Partial<RadiologyASRHashMetadata>;
     checkpointVerified?: boolean;
+    verification?: RadiologyASRContractVerification;
   };
   checkpointVerified?: boolean;
   longform?: {
@@ -368,6 +398,8 @@ export type RadiologyTranscriptStructurer = (
   context?: {
     allowLLM: boolean;
     normalizationAmbiguous: boolean;
+    rawTranscript: string;
+    normalizationAlignment: NormalizationAlignmentSpan[];
   },
 ) => Promise<DictationReport>;
 
@@ -412,8 +444,38 @@ export interface RadiologyFeedbackInput {
   finalReport: string;
   spanCorrections: SpanCorrectionInput[];
   normalizationResolutions?: NormalizationResolutionInput[];
+  baseDraftSha256?: string;
+  acceptedTemplateSegmentIds?: string[];
+  reviewedResidualAtomIds?: string[];
   approved: boolean;
   author?: string;
+}
+
+export interface RadiologyRecomposeInput {
+  verbatimTranscript: string;
+  spanCorrections: SpanCorrectionInput[];
+}
+
+/**
+ * A deterministic, non-persisted projection built from an immutable source
+ * artifact plus physician span corrections. The original ASR artifact is
+ * never modified; feedback can bind to this revision's review-draft SHA.
+ */
+export interface RadiologyRecomposeRevision {
+  schemaVersion: 1;
+  kind: 'radiology-recompose-revision';
+  sessionId: string;
+  templateId: string;
+  sourceArtifactSha256: string;
+  verbatimTranscript: {
+    text: string;
+    sha256: string;
+  };
+  normalization: RadiologyTranscriptionArtifact['normalization'];
+  routing: RadiologyTranscriptionArtifact['routing'];
+  report: RadiologyArtifactReport | null;
+  safety: RadiologySafetyResult;
+  components: RadiologyModelMetadata;
 }
 
 export interface NormalizationResolutionInput {
@@ -446,6 +508,10 @@ export interface RadiologyFeedbackEvent {
   finalReportSha256: string;
   spanCorrections: StoredSpanCorrection[];
   normalizationResolutions: NormalizationResolutionInput[];
+  baseDraftSha256: string | null;
+  acceptedTemplateSegmentIds: string[];
+  reviewedResidualAtomIds: string[];
+  recomposeRevision: RadiologyRecomposeRevision | null;
   approved: boolean;
   safety: RadiologySafetyReport;
   normalizationSafetyStage: RadiologySafetyStageResult;
@@ -1024,6 +1090,10 @@ export class RadiologyArtifactStore {
         schemaVersion: RADIOLOGY_FEEDBACK_SCHEMA_VERSION,
         datasetVersion: 'radiology-feedback/v2',
         normalizationResolutions: [],
+        baseDraftSha256: null,
+        acceptedTemplateSegmentIds: [],
+        reviewedResidualAtomIds: [],
+        recomposeRevision: null,
         normalizationSafetyStage: notRunSafetyStage('raw_to_normalized'),
         safetyStage: notRunSafetyStage('verbatim_to_final_report'),
         training: {
@@ -1208,22 +1278,11 @@ function modelMetadata(
     ...chunkModel,
   };
   const builtInTemplate = builtInTemplateComponent(templateId);
-  const selectedTemplate = component(selected.template, templateId);
-  const template = {
-    ...selectedTemplate,
-    ...(!selectedTemplate.checksum && builtInTemplate.checksum
-      ? { checksum: builtInTemplate.checksum }
-      : {}),
-    ...(selectedTemplate.version === 'unknown'
-      ? { version: builtInTemplate.version }
-      : {}),
-  };
-  template.configSha256 = selected.template?.configSha256
-    ?? sha256Text(canonicalJson({
-      name: template.name,
-      version: template.version,
-      checksum: template.checksum ?? null,
-    }));
+  // The template is executable server-side schema, not ASR runtime metadata.
+  // Never let a remote transcription response override its version or hash.
+  const template = builtInTemplate.checksum
+    ? component(builtInTemplate, templateId)
+    : component(selected.template, templateId);
   const defaultRouter = component(
     selected.router ?? selected.structurer ?? { version: '2' },
     'radiology-span-router',
@@ -1266,6 +1325,19 @@ function modelMetadata(
     structurer: selected.structurer
       ? component(selected.structurer, 'radiology-structurer-guardrails')
       : defaultRouter,
+    ...(templateId === 'CT_ABDOMEN_MIKHAILOV'
+      ? {
+          composer: selected.composer
+            ? component(selected.composer, 'radiology-template-composer')
+            : component({
+                version: TEMPLATE_COMPOSER_VERSION,
+                configSha256: sha256Text(canonicalJson({
+                  version: TEMPLATE_COMPOSER_VERSION,
+                  templateChecksum: template.checksum ?? null,
+                })),
+              }, 'radiology-template-composer'),
+        }
+      : {}),
     llm: selected.llm === null
       ? null
       : selected.llm
@@ -1307,25 +1379,77 @@ function normalizeChunkResult(
 
 function artifactNormalization(
   result: GigaAMNormalizationResult,
+  sourceText: string,
 ): RadiologyTranscriptionArtifact['normalization'] {
+  const transformations: RadiologyNormalizationTransformation[] = [];
+  let sourceCursor = 0;
+  for (const span of result.alignment) {
+    if (span.sourceStart > sourceCursor) {
+      transformations.push({
+        kind: sourceText.slice(sourceCursor, span.sourceStart).trim().length === 0
+          ? 'whitespace'
+          : 'aligned_normalization',
+        source: {
+          start: sourceCursor,
+          end: span.sourceStart,
+          text: sourceText.slice(sourceCursor, span.sourceStart),
+        },
+        normalized: {
+          start: span.normalizedStart,
+          end: span.normalizedStart,
+          text: '',
+        },
+      });
+    }
+    const source = sourceText.slice(span.sourceStart, span.sourceEnd);
+    const normalized = result.text.slice(span.normalizedStart, span.normalizedEnd);
+    if (source !== normalized) {
+      transformations.push({
+        kind: span.kind ?? 'aligned_normalization',
+        source: {
+          start: span.sourceStart,
+          end: span.sourceEnd,
+          text: source,
+        },
+        normalized: {
+          start: span.normalizedStart,
+          end: span.normalizedEnd,
+          text: normalized,
+        },
+      });
+    }
+    sourceCursor = Math.max(sourceCursor, span.sourceEnd);
+  }
+  if (sourceCursor < sourceText.length) {
+    transformations.push({
+      kind: sourceText.slice(sourceCursor).trim().length === 0
+        ? 'whitespace'
+        : 'aligned_normalization',
+      source: {
+        start: sourceCursor,
+        end: sourceText.length,
+        text: sourceText.slice(sourceCursor),
+      },
+      normalized: {
+        start: result.text.length,
+        end: result.text.length,
+        text: '',
+      },
+    });
+  }
   return {
     text: result.text,
     sha256: sha256Text(result.text),
     version: result.version,
-    transformations: result.transformations.map((transformation) => ({
-      kind: transformation.type,
-      source: {
-        start: transformation.start,
-        end: transformation.end,
-        text: transformation.sourceText,
-      },
-      normalized: {
-        start: transformation.start,
-        end: transformation.start + transformation.normalizedText.length,
-        text: transformation.normalizedText,
-      },
-    })),
-    issues: result.issues.map((issue) => ({
+    transformations,
+    issues: result.issues.map((issue) => {
+      const aligned = result.alignment.filter((span) => (
+        span.sourceStart < issue.end && span.sourceEnd > issue.start
+      ));
+      const normalizedStart = aligned[0]?.normalizedStart ?? issue.start;
+      const normalizedEnd = aligned[aligned.length - 1]?.normalizedEnd
+        ?? normalizedStart + issue.normalizedText.length;
+      return {
       id: sha256Text(canonicalJson({
         code: issue.code,
         start: issue.start,
@@ -1342,12 +1466,13 @@ function artifactNormalization(
         text: issue.sourceText,
       },
       normalized: {
-        start: issue.start,
-        end: issue.start + issue.normalizedText.length,
-        text: issue.normalizedText,
+        start: normalizedStart,
+        end: normalizedEnd,
+        text: result.text.slice(normalizedStart, normalizedEnd),
       },
       values: issue.values,
-    })),
+      };
+    }),
   };
 }
 
@@ -1461,6 +1586,22 @@ function artifactTranscriptionChunk(
       'ASR checkpoint verification differs between top-level and nested provenance',
     );
   }
+  const directContractVerification = chunk.verification;
+  const nestedContractVerification = chunk.provenance?.verification;
+  if (
+    directContractVerification
+    && nestedContractVerification
+    && canonicalJson(directContractVerification)
+      !== canonicalJson(nestedContractVerification)
+  ) {
+    throw new RadiologySessionError(
+      422,
+      'inconsistent_asr_provenance',
+      'ASR production-contract verification differs between top-level and nested provenance',
+    );
+  }
+  const contractVerification =
+    directContractVerification ?? nestedContractVerification;
   const source = chunk.source ?? 'unknown';
   const expectedSchema = source === 'gigaam'
     ? 'gigaam.transcription.v2'
@@ -1473,6 +1614,80 @@ function artifactTranscriptionChunk(
     && suppliedHashes.rawTextSha256 === rawTextSha256
     && suppliedHashes.normalizedTextSha256 === normalizedTextSha256,
   );
+  const wordEvidenceIsAcoustic = Boolean(
+    (chunk.words?.length ?? 0) > 0
+    && chunk.words?.every((word) => {
+      const scoreType = word.scoreType?.trim().toLowerCase() ?? '';
+      return (
+        typeof word.confidence === 'number'
+        && Number.isFinite(word.confidence)
+        && word.confidence >= 0
+        && word.confidence <= 1
+        && typeof word.avgLogprob === 'number'
+        && Number.isFinite(word.avgLogprob)
+        && !scoreType.includes('fused')
+        && !scoreType.includes('language_model')
+        && (
+          scoreType.includes('acoustic')
+          || scoreType.includes('emission')
+          || scoreType.includes('ctc_')
+        )
+      );
+    })
+  );
+  const verification = {
+    schema: Boolean(
+      expectedSchema !== null
+      && schemaVersion === expectedSchema
+      && (
+        source !== 'gigaam'
+        || contractVerification?.transcriptionSchema === true
+      )
+    ),
+    runtime: Boolean(
+      /^[a-f0-9]{64}$/u.test(runtimeId)
+      && (
+        source !== 'gigaam'
+        || contractVerification?.runtimeIdentity === true
+      )
+    ),
+    checkpoint: Boolean(
+      (directCheckpointVerified ?? nestedCheckpointVerified) === true
+      && (
+        source !== 'gigaam'
+        || contractVerification?.checkpoint === true
+      )
+    ),
+    hashes: Boolean(
+      requiredHashesWereSupplied
+      && (
+        source !== 'gigaam'
+        || contractVerification?.hashes === true
+      )
+    ),
+    metadata: Boolean(
+      source !== 'gigaam'
+      || (
+        contractVerification?.metadataAvailable === true
+        && contractVerification.metadataSchema === true
+      )
+    ),
+    decoder: Boolean(
+      source !== 'gigaam'
+      || contractVerification?.decoder === true
+    ),
+    wordEvidence: Boolean(
+      source !== 'gigaam'
+      || (
+        contractVerification?.wordEvidence === true
+        && wordEvidenceIsAcoustic
+      )
+    ),
+    productionContract: Boolean(
+      source !== 'gigaam'
+      || contractVerification?.productionReady === true
+    ),
+  };
   return {
     index,
     rawText,
@@ -1499,13 +1714,7 @@ function artifactTranscriptionChunk(
         rawTextSha256,
         normalizedTextSha256,
       },
-      verification: {
-        schema: expectedSchema !== null && schemaVersion === expectedSchema,
-        runtime: /^[a-f0-9]{64}$/u.test(runtimeId),
-        checkpoint:
-          (directCheckpointVerified ?? nestedCheckpointVerified) === true,
-        hashes: requiredHashesWereSupplied,
-      },
+      verification,
     },
   };
 }
@@ -1578,6 +1787,34 @@ function trainingExclusionReasons(input: {
     || input.asrChunks.some((chunk) => chunk.provenance?.verification?.hashes !== true)
   ) {
     reasons.push('asr_hashes_unverified');
+  }
+  if (
+    input.asrChunks.length === 0
+    || input.asrChunks.some((chunk) => chunk.provenance?.verification?.metadata !== true)
+  ) {
+    reasons.push('asr_metadata_unverified');
+  }
+  if (
+    input.asrChunks.length === 0
+    || input.asrChunks.some((chunk) => chunk.provenance?.verification?.decoder !== true)
+  ) {
+    reasons.push('asr_decoder_unverified');
+  }
+  if (
+    input.asrChunks.length === 0
+    || input.asrChunks.some((chunk) => (
+      chunk.provenance?.verification?.wordEvidence !== true
+    ))
+  ) {
+    reasons.push('asr_word_evidence_unverified');
+  }
+  if (
+    input.asrChunks.length === 0
+    || input.asrChunks.some((chunk) => (
+      chunk.provenance?.verification?.productionContract !== true
+    ))
+  ) {
+    reasons.push('asr_contract_unverified');
   }
   if (!/^[a-f0-9]{64}$/u.test(input.model.asr.checksum ?? '')) {
     reasons.push('asr_checkpoint_checksum_unverified');
@@ -1950,12 +2187,69 @@ function applySpanCorrections(
   return result + rawTranscript.slice(cursor);
 }
 
+function validateArtifactCorrections(
+  artifact: RadiologyTranscriptionArtifact,
+  verbatimTranscript: string,
+  submitted: StoredSpanCorrection[],
+): StoredSpanCorrection[] {
+  const templateModality = getDocTemplate(artifact.templateId)?.modality;
+  const corrections = submitted.map((correction, index) => {
+    if (
+      !Number.isSafeInteger(correction.start)
+      || !Number.isSafeInteger(correction.end)
+      || correction.start < 0
+      || correction.end < correction.start
+      || correction.end > artifact.rawTranscript.text.length
+    ) {
+      throw new RadiologySessionError(
+        400,
+        'correction_span_out_of_bounds',
+        `spanCorrections[${index}] is outside the raw transcript`,
+      );
+    }
+    const originalAtSpan = artifact.rawTranscript.text.slice(correction.start, correction.end);
+    if (originalAtSpan !== correction.originalText) {
+      throw new RadiologySessionError(
+        409,
+        'correction_span_mismatch',
+        `spanCorrections[${index}].originalText does not match the immutable raw transcript`,
+      );
+    }
+    if (
+      templateModality
+      && correction.modality.trim().toUpperCase() !== templateModality.toUpperCase()
+    ) {
+      throw new RadiologySessionError(
+        409,
+        'correction_modality_mismatch',
+        `spanCorrections[${index}].modality does not match template modality ${templateModality}`,
+      );
+    }
+    return correction;
+  });
+  const reconstructedVerbatim = applySpanCorrections(artifact.rawTranscript.text, corrections);
+  if (reconstructedVerbatim !== verbatimTranscript) {
+    throw new RadiologySessionError(
+      409,
+      'verbatim_corrections_mismatch',
+      'verbatimTranscript must equal the immutable raw transcript with spanCorrections applied',
+    );
+  }
+  return corrections;
+}
+
 function validateNormalizationResolutions(
   artifact: RadiologyTranscriptionArtifact,
   input: RadiologyFeedbackInput,
+  sourceArtifact?: RadiologyTranscriptionArtifact,
 ): NormalizationResolutionInput[] {
   const resolutions = input.normalizationResolutions ?? [];
-  const issueById = new Map(artifact.normalization.issues.map((issue) => [issue.id, issue]));
+  const issueById = new Map(
+    [
+      ...(sourceArtifact?.normalization.issues ?? []),
+      ...artifact.normalization.issues,
+    ].map((issue) => [issue.id, issue]),
+  );
   const seen = new Set<string>();
   for (const resolution of resolutions) {
     if (seen.has(resolution.issueId)) {
@@ -2012,16 +2306,435 @@ function removeOnce(text: string, fragment: string): string {
   return `${text.slice(0, index)}${' '.repeat(fragment.length)}${text.slice(index + fragment.length)}`;
 }
 
+function reviewSectionBodies(
+  finalReport: string,
+  draft: NonNullable<RadiologyArtifactReport['reviewDraft']>,
+): Map<string, string> {
+  const located = draft.sections
+    .map((section) => {
+      const marker = `${section.label}:`;
+      const markerStart = finalReport.indexOf(marker);
+      return {
+        section,
+        markerStart,
+        bodyStart: markerStart < 0 ? -1 : markerStart + marker.length,
+      };
+    })
+    .filter((item) => item.markerStart >= 0)
+    .sort((left, right) => left.markerStart - right.markerStart);
+  const result = new Map<string, string>();
+  for (let index = 0; index < located.length; index++) {
+    const current = located[index];
+    const end = located[index + 1]?.markerStart ?? finalReport.length;
+    result.set(
+      current.section.id,
+      finalReport.slice(current.bodyStart, end),
+    );
+  }
+  return result;
+}
+
+function validateFinalFieldBindings(
+  report: RadiologyArtifactReport,
+  sectionBodies: Map<string, string>,
+  acceptedTemplateSegmentIds: ReadonlySet<string>,
+): void {
+  const draft = report.reviewDraft;
+  if (!draft) return;
+  const template = getDocTemplate(draft.templateId);
+  if (!template) {
+    throw new RadiologySessionError(
+      409,
+      'review_template_unavailable',
+      `Template ${draft.templateId} is unavailable for final field validation`,
+    );
+  }
+  if (templateSha256(template) !== draft.templateSha256) {
+    throw new RadiologySessionError(
+      409,
+      'review_template_version_changed',
+      'The template schema changed after this draft was created; reprocessing is required',
+    );
+  }
+
+  const sectionsWithAcceptedTemplateContext = new Set(
+    draft.segments
+      .filter((segment) => (
+        segment.confirmationRequired
+        && acceptedTemplateSegmentIds.has(segment.id)
+      ))
+      .map((segment) => segment.sectionId),
+  );
+  const expectedAssignments = draft.fieldAssignments.filter((assignment) => (
+    assignment.status === 'applied'
+    && assignment.kind !== 'explicit_normal'
+    && !sectionsWithAcceptedTemplateContext.has(assignment.sectionId)
+  ));
+  const sectionsRequiringParsing = new Set(
+    expectedAssignments.map((assignment) => assignment.sectionId),
+  );
+
+  let transcript = '';
+  const atoms: TemplateSectionAtom[] = [];
+  for (const section of draft.sections) {
+    const body = (sectionBodies.get(section.id) ?? '').trim();
+    if (!body) continue;
+    if (body.length > 20_000 || extractNumbers(body).length > 64) {
+      throw new RadiologySessionError(
+        422,
+        'final_section_too_large',
+        `Section ${section.id} exceeds deterministic review limits`,
+      );
+    }
+    if (!sectionsRequiringParsing.has(section.id)) continue;
+    if (transcript) transcript += '\n';
+    const start = transcript.length;
+    transcript += body;
+    atoms.push({
+      atomId: `final:${section.id}`,
+      sectionId: section.id,
+      start,
+      end: start + body.length,
+      text: body,
+    });
+  }
+  const recomposed = composeTemplateReviewDraft(template, transcript, atoms);
+  const finalAssignments = new Map(
+    recomposed.fieldAssignments
+      .filter((assignment) => assignment.status === 'applied')
+      .map((assignment) => [assignment.fieldId, assignment]),
+  );
+
+  for (const expected of expectedAssignments) {
+    const actual = finalAssignments.get(expected.fieldId);
+    if (
+      !actual
+      || canonicalJson(actual.value) !== canonicalJson(expected.value)
+      || actual.canonicalUnit !== expected.canonicalUnit
+    ) {
+      throw new RadiologySessionError(
+        422,
+        'final_field_binding_changed',
+        `Final report changed the value, unit, or section binding of ${expected.fieldId}`,
+      );
+    }
+  }
+
+  for (const placeholder of draft.segments.filter(
+    (segment) => segment.defaultKind === 'placeholder' && segment.fieldId,
+  )) {
+    const body = (sectionBodies.get(placeholder.sectionId) ?? '').trim();
+    const addressedSection = draft.fieldAssignments.some(
+      (assignment) => assignment.sectionId === placeholder.sectionId,
+    ) || draft.residualAtomIds.some((atomId) => (
+      draft.segments.some((segment) => (
+        segment.sectionId === placeholder.sectionId
+        && segment.evidence.some((evidence) => evidence.atomId === atomId)
+      ))
+    ));
+    if (body && addressedSection && !finalAssignments.has(placeholder.fieldId!)) {
+      throw new RadiologySessionError(
+        422,
+        'incomplete_final_template_field',
+        `Section ${placeholder.sectionId} still contains unresolved field ${placeholder.fieldId}`,
+      );
+    }
+  }
+}
+
+function segmentIndex(text: string, fragment: string): number {
+  const trimmed = fragment.trim();
+  if (/^[+-]?\d+(?:[.,]\d+)?$/u.test(trimmed)) {
+    const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    const match = new RegExp(
+      `(?<![\\d.,])${escaped}(?![\\d.,])`,
+      'u',
+    ).exec(text);
+    return match?.index ?? -1;
+  }
+  return text.indexOf(fragment);
+}
+
+function removeSegmentOnce(text: string, fragment: string): string {
+  const index = segmentIndex(text, fragment);
+  if (index < 0) return text;
+  return `${text.slice(0, index)}${' '.repeat(fragment.length)}${text.slice(index + fragment.length)}`;
+}
+
+function maskSegmentAt(text: string, index: number, fragment: string): string {
+  if (index < 0) return text;
+  return `${text.slice(0, index)}${' '.repeat(fragment.length)}${text.slice(index + fragment.length)}`;
+}
+
+interface ValidatedReviewDraftFeedback {
+  baseDraftSha256: string | null;
+  acceptedTemplateSegmentIds: string[];
+  reviewedResidualAtomIds: string[];
+  acceptedSegments: NonNullable<RadiologyArtifactReport['reviewDraft']>['segments'];
+  requireCompleteDraftEvidence: boolean;
+}
+
+function validateReviewDraftFeedback(
+  artifact: RadiologyTranscriptionArtifact,
+  input: RadiologyFeedbackInput,
+): ValidatedReviewDraftFeedback {
+  const report = artifact.report;
+  const draft = report?.reviewDraft;
+  const acceptedIds = input.acceptedTemplateSegmentIds ?? [];
+  const reviewedResidualIds = input.reviewedResidualAtomIds ?? [];
+  const submittedReviewState =
+    input.baseDraftSha256 !== undefined
+    || input.acceptedTemplateSegmentIds !== undefined
+    || input.reviewedResidualAtomIds !== undefined;
+
+  if (!draft) {
+    if (submittedReviewState) {
+      throw new RadiologySessionError(
+        409,
+        'review_draft_unavailable',
+        'This v2 artifact has no immutable template review draft',
+      );
+    }
+    return {
+      baseDraftSha256: null,
+      acceptedTemplateSegmentIds: [],
+      reviewedResidualAtomIds: [],
+      acceptedSegments: [],
+      requireCompleteDraftEvidence: false,
+    };
+  }
+
+  if (draft.sha256 !== sha256Text(draft.fullText)) {
+    throw new RadiologySessionError(
+      409,
+      'review_draft_integrity_mismatch',
+      'The immutable review draft does not match its stored SHA-256',
+    );
+  }
+  if (
+    input.baseDraftSha256 !== undefined
+    && input.baseDraftSha256 !== draft.sha256
+  ) {
+    throw new RadiologySessionError(
+      409,
+      'review_draft_sha_mismatch',
+      'baseDraftSha256 does not match the immutable artifact review draft',
+    );
+  }
+  if (
+    (input.approved || acceptedIds.length > 0 || reviewedResidualIds.length > 0)
+    && input.baseDraftSha256 === undefined
+  ) {
+    throw new RadiologySessionError(
+      422,
+      'review_draft_sha_required',
+      'Template review decisions require baseDraftSha256',
+    );
+  }
+  if (input.approved && draft.status === 'failed') {
+    throw new RadiologySessionError(
+      422,
+      'review_draft_approval_blocked',
+      'The template review draft has critical composition issues',
+    );
+  }
+  const segmentById = new Map(draft.segments.map((segment) => [segment.id, segment]));
+  const acceptedSegments = acceptedIds.map((id) => {
+    const segment = segmentById.get(id);
+    if (!segment) {
+      throw new RadiologySessionError(
+        422,
+        'template_segment_mismatch',
+        `Template segment ${id} does not belong to this artifact`,
+      );
+    }
+    if (!segment.confirmationRequired) {
+      throw new RadiologySessionError(
+        422,
+        'template_segment_not_confirmable',
+        `Template segment ${id} does not require physician confirmation`,
+      );
+    }
+    if (segment.defaultKind === 'placeholder') {
+      throw new RadiologySessionError(
+        422,
+        'template_placeholder_not_approvable',
+        `Template placeholder ${id} must be filled or removed, not accepted as clinical text`,
+      );
+    }
+    if (
+      draft.fullText.slice(segment.start, segment.end) !== segment.text
+    ) {
+      throw new RadiologySessionError(
+        409,
+        'template_segment_integrity_mismatch',
+        `Template segment ${id} does not match its immutable draft span`,
+      );
+    }
+    return segment;
+  });
+  const residualIds = new Set(draft.residualAtomIds);
+  for (const atomId of reviewedResidualIds) {
+    if (!residualIds.has(atomId)) {
+      throw new RadiologySessionError(
+        422,
+        'residual_atom_mismatch',
+        `Residual atom ${atomId} does not belong to this artifact`,
+      );
+    }
+  }
+  if (input.approved) {
+    const reviewed = new Set(reviewedResidualIds);
+    const missing = draft.residualAtomIds.filter((atomId) => !reviewed.has(atomId));
+    if (missing.length > 0) {
+      throw new RadiologySessionError(
+        422,
+        'residual_atom_review_required',
+        `Residual atom ${missing[0]} requires explicit physician review`,
+      );
+    }
+    const unresolvedAssignment = draft.fieldAssignments.find(
+      (assignment) => assignment.status !== 'applied',
+    );
+    if (unresolvedAssignment) {
+      throw new RadiologySessionError(
+        422,
+        'review_draft_field_unresolved',
+        `Template field ${unresolvedAssignment.fieldId} is ${unresolvedAssignment.status} and must be resolved before approval`,
+      );
+    }
+  }
+
+  return {
+    baseDraftSha256: input.baseDraftSha256 ?? null,
+    acceptedTemplateSegmentIds: acceptedIds,
+    reviewedResidualAtomIds: reviewedResidualIds,
+    acceptedSegments,
+    requireCompleteDraftEvidence: input.approved,
+  };
+}
+
 /**
  * Removes only unchanged deterministic template fragments. The remaining text
  * is what the doctor dictated or manually added, so every critical entity in
  * it must be supported by the reviewed verbatim transcript.
  */
-function feedbackComparableText(report: RadiologyArtifactReport | null, finalReport: string): string {
+function feedbackComparableText(
+  report: RadiologyArtifactReport | null,
+  finalReport: string,
+  review?: ValidatedReviewDraftFeedback,
+): string {
   let comparable = finalReport.replace(/\r\n?/gu, '\n');
   if (!report) return comparable;
 
   comparable = removeOnce(comparable, report.title.replace(/\r\n?/gu, '\n'));
+  if (report.reviewDraft) {
+    const acceptedIds = new Set(
+      review?.acceptedTemplateSegmentIds ?? [],
+    );
+    const orderedSegments = [...report.reviewDraft.segments]
+      .sort((left, right) => left.start - right.start);
+    const remainingSectionBodies = reviewSectionBodies(
+      finalReport.replace(/\r\n?/gu, '\n'),
+      report.reviewDraft,
+    );
+    const sectionCursors = new Map<string, number>();
+
+    // First reserve every accepted or transcript-backed segment inside its
+    // original section. A value copied under another organ can no longer
+    // satisfy this check.
+    for (const segment of orderedSegments) {
+      const normalizedSegmentText = segment.text.replace(/\r\n?/gu, '\n');
+      const requiredAcceptedSegment = (
+        segment.confirmationRequired
+        && acceptedIds.has(segment.id)
+      );
+      const requiredEvidenceSegment = (
+        review?.requireCompleteDraftEvidence
+        && segment.evidence.length > 0
+      );
+      if (!requiredAcceptedSegment && !requiredEvidenceSegment) continue;
+      const sectionBody = remainingSectionBodies.get(segment.sectionId) ?? '';
+      const cursor = sectionCursors.get(segment.sectionId) ?? 0;
+      const relativeIndex = segmentIndex(
+        sectionBody.slice(cursor),
+        normalizedSegmentText,
+      );
+      if (relativeIndex < 0) {
+        throw new RadiologySessionError(
+          409,
+          requiredAcceptedSegment
+            ? 'accepted_template_segment_mismatch'
+            : 'transcript_template_segment_mismatch',
+          requiredAcceptedSegment
+            ? `Accepted template segment ${segment.id} is absent, modified, or moved to another section`
+            : `Transcript-backed template segment ${segment.id} is absent, modified, or moved to another section`,
+        );
+      }
+      const absoluteIndex = cursor + relativeIndex;
+      sectionCursors.set(
+        segment.sectionId,
+        absoluteIndex + normalizedSegmentText.length,
+      );
+      remainingSectionBodies.set(
+        segment.sectionId,
+        maskSegmentAt(sectionBody, absoluteIndex, normalizedSegmentText),
+      );
+    }
+
+    // Accepted/required occurrences have been reserved. Any remaining exact
+    // occurrence of an omitted template segment is therefore unapproved,
+    // including when it was moved under a different organ.
+    for (const segment of orderedSegments) {
+      if (
+        !segment.confirmationRequired
+        || acceptedIds.has(segment.id)
+      ) {
+        continue;
+      }
+      const normalizedSegmentText = segment.text.replace(/\r\n?/gu, '\n');
+      if (
+        [...remainingSectionBodies.values()].some(
+          (body) => segmentIndex(body, normalizedSegmentText) >= 0,
+        )
+      ) {
+        throw new RadiologySessionError(
+          422,
+          'unaccepted_template_segment_present',
+          `Unaccepted template segment ${segment.id} must be removed from finalReport`,
+        );
+      }
+    }
+    if (review?.requireCompleteDraftEvidence) {
+      validateFinalFieldBindings(report, reviewSectionBodies(
+        finalReport.replace(/\r\n?/gu, '\n'),
+        report.reviewDraft,
+      ), acceptedIds);
+    }
+
+    for (const section of report.reviewDraft.sections) {
+      comparable = removeOnce(comparable, `${section.label}:`.replace(/\r\n?/gu, '\n'));
+    }
+    for (const segment of orderedSegments) {
+      const normalizedSegmentText = segment.text.replace(/\r\n?/gu, '\n');
+      const found = segmentIndex(comparable, normalizedSegmentText) >= 0;
+      if (
+        found
+        && (
+          !segment.confirmationRequired
+          || acceptedIds.has(segment.id)
+        )
+      ) {
+        comparable = removeSegmentOnce(comparable, normalizedSegmentText);
+      }
+    }
+    // The immutable evidence text preserves organ/field association that is
+    // intentionally absent from value-only template segments. Any text that
+    // was added to or changed in the draft remains in `comparable` and is
+    // checked as an additional physician-authored claim.
+    return `${report.evidenceBackedText}\n${comparable}`;
+  }
+
   for (const block of report.blocks) {
     // Section labels are presentation metadata, never acoustic evidence.
     comparable = removeOnce(comparable, `${block.label}:`.replace(/\r\n?/gu, '\n'));
@@ -2311,6 +3024,111 @@ export class RadiologySessionService {
     return artifact;
   }
 
+  private async buildRecomposeRevision(
+    artifact: RadiologyTranscriptionArtifact,
+    verbatimTranscript: string,
+  ): Promise<RadiologyRecomposeRevision> {
+    const normalizationResult = denormalizeDetailed(verbatimTranscript);
+    const normalization = artifactNormalization(normalizationResult, verbatimTranscript);
+    const normalizationGate = rawToNormalizedStage(
+      verbatimTranscript,
+      normalization,
+      true,
+    );
+    const structuredReport = this.options.structureTranscript && !normalizationGate.destructive
+      ? await this.options.structureTranscript(
+          artifact.templateId,
+          normalization.text,
+          {
+            allowLLM: !normalizationGate.ambiguous,
+            normalizationAmbiguous: normalizationGate.ambiguous,
+            rawTranscript: verbatimTranscript,
+            normalizationAlignment: normalizationResult.alignment,
+          },
+        )
+      : null;
+    const report = artifactReport(structuredReport);
+    const evidenceBackedText = report?.evidenceBackedText ?? '';
+    const normalizedToReportStage = structuredReport
+      ? safetyStageFromReport(
+          'normalized_to_report',
+          normalization.text,
+          evidenceBackedText,
+          verifyRadiologySafety(normalization.text, evidenceBackedText),
+        )
+      : notRunSafetyStage(
+          'normalized_to_report',
+          normalization.sha256,
+          null,
+        );
+    return {
+      schemaVersion: 1,
+      kind: 'radiology-recompose-revision',
+      sessionId: artifact.sessionId,
+      templateId: artifact.templateId,
+      sourceArtifactSha256: sha256Text(canonicalJson(artifact)),
+      verbatimTranscript: {
+        text: verbatimTranscript,
+        sha256: sha256Text(verbatimTranscript),
+      },
+      normalization,
+      routing: routingForReport(structuredReport),
+      report,
+      safety: safetyResult(
+        structuredReport,
+        [normalizationGate.stage, normalizedToReportStage],
+      ),
+      components: artifact.components,
+    };
+  }
+
+  private artifactWithRevision(
+    artifact: RadiologyTranscriptionArtifact,
+    revision: RadiologyRecomposeRevision,
+  ): RadiologyTranscriptionArtifact {
+    return {
+      ...artifact,
+      normalizedTranscript: {
+        text: revision.normalization.text,
+        sha256: revision.normalization.sha256,
+      },
+      normalization: revision.normalization,
+      sections: revision.report?.sections ?? [],
+      routing: revision.routing,
+      unmatchedText: revision.report?.unmatched ?? '',
+      report: revision.report,
+      reportSha256: revision.report
+        ? sha256Text(revision.report.fullText)
+        : null,
+      safety: revision.safety,
+    };
+  }
+
+  async recompose(
+    sessionId: string,
+    input: RadiologyRecomposeInput,
+    actor?: RadiologySessionActor,
+  ): Promise<RadiologyRecomposeRevision> {
+    const artifact = await this.options.store.getArtifact(sessionId);
+    if (!artifact) {
+      throw new RadiologySessionError(404, 'artifact_not_found', 'Radiology session artifact not found');
+    }
+    this.assertOwner(this.artifactOwner(artifact), actor);
+    const submittedCorrections: StoredSpanCorrection[] = input.spanCorrections.map(
+      (correction) => ({
+        ...correction,
+        confidence: correction.confidence ?? null,
+        author: correction.author?.trim() ?? '',
+      }),
+    );
+    validateArtifactCorrections(
+      artifact,
+      input.verbatimTranscript,
+      submittedCorrections,
+    );
+    return this.buildRecomposeRevision(artifact, input.verbatimTranscript);
+  }
+
   async saveFeedback(
     sessionId: string,
     input: RadiologyFeedbackInput,
@@ -2332,13 +3150,6 @@ export class RadiologySessionService {
         'Artifact v1 must be reprocessed through the v2 integrity pipeline before approval',
       );
     }
-    if (input.approved && artifact.report === null) {
-      throw new RadiologySessionError(
-        422,
-        'artifact_report_unavailable',
-        'This artifact has no integrity-safe report and must be reprocessed before approval',
-      );
-    }
     if (
       input.approved
       && (
@@ -2350,13 +3161,6 @@ export class RadiologySessionService {
         422,
         'longform_integrity_approval_blocked',
         'Degraded long-form decoding or a critical overlap conflict must be reprocessed before approval',
-      );
-    }
-    if (input.approved && artifact.routing.unmatchedAtomIds.length > 0) {
-      throw new RadiologySessionError(
-        422,
-        'unmatched_atoms_approval_blocked',
-        'Every clinical transcript atom must be assigned before approval',
       );
     }
     const defaultAuthor = authenticatedAuthor?.trim() || input.author?.trim() || '';
@@ -2371,32 +3175,6 @@ export class RadiologySessionService {
         || correction.author?.trim()
         || defaultAuthor,
     }));
-    const effectiveContent = {
-      sessionId,
-      templateId: artifact.templateId,
-      source: artifact.source.type,
-      author: defaultAuthor,
-      verbatimTranscript: input.verbatimTranscript,
-      finalReport: input.finalReport,
-      spanCorrections: submittedCorrections,
-      normalizationResolutions: input.normalizationResolutions ?? [],
-      approved: input.approved,
-    };
-    const contentSha256 = sha256Text(canonicalJson(effectiveContent));
-    const existingFeedback = await this.options.store.getFeedbackByIdempotencyKey(
-      sessionId,
-      input.idempotencyKey,
-    );
-    if (existingFeedback) {
-      if (existingFeedback.contentSha256 !== contentSha256) {
-        throw new RadiologySessionError(
-          409,
-          'feedback_idempotency_conflict',
-          'idempotencyKey is already bound to a different feedback payload',
-        );
-      }
-      return { feedback: existingFeedback, idempotentReplay: true };
-    }
     if (input.approved && (!input.verbatimTranscript.trim() || !input.finalReport.trim())) {
       throw new RadiologySessionError(
         400,
@@ -2404,56 +3182,40 @@ export class RadiologySessionService {
         'Approved feedback requires both a verbatim transcript and a final report',
       );
     }
-    const templateModality = getDocTemplate(artifact.templateId)?.modality;
-    const corrections: StoredSpanCorrection[] = submittedCorrections.map((correction, index) => {
-      if (
-        !Number.isSafeInteger(correction.start)
-        || !Number.isSafeInteger(correction.end)
-        || correction.start < 0
-        || correction.end < correction.start
-        || correction.end > artifact.rawTranscript.text.length
-      ) {
-        throw new RadiologySessionError(
-          400,
-          'correction_span_out_of_bounds',
-          `spanCorrections[${index}] is outside the raw transcript`,
-        );
-      }
-      const originalAtSpan = artifact.rawTranscript.text.slice(correction.start, correction.end);
-      if (originalAtSpan !== correction.originalText) {
-        throw new RadiologySessionError(
-          409,
-          'correction_span_mismatch',
-          `spanCorrections[${index}].originalText does not match the immutable raw transcript`,
-        );
-      }
-      if (
-        templateModality
-        && correction.modality.trim().toUpperCase() !== templateModality.toUpperCase()
-      ) {
-        throw new RadiologySessionError(
-          409,
-          'correction_modality_mismatch',
-          `spanCorrections[${index}].modality does not match template modality ${templateModality}`,
-        );
-      }
-      return {
-        ...correction,
-        confidence: correction.confidence ?? null,
-      };
-    });
-
-    const reconstructedVerbatim = applySpanCorrections(artifact.rawTranscript.text, corrections);
-    if (reconstructedVerbatim !== input.verbatimTranscript) {
+    const corrections = validateArtifactCorrections(
+      artifact,
+      input.verbatimTranscript,
+      submittedCorrections,
+    );
+    const recomposeRevision = corrections.length > 0
+      ? await this.buildRecomposeRevision(artifact, input.verbatimTranscript)
+      : null;
+    const effectiveArtifact = recomposeRevision
+      ? this.artifactWithRevision(artifact, recomposeRevision)
+      : artifact;
+    if (input.approved && effectiveArtifact.report === null) {
       throw new RadiologySessionError(
-        409,
-        'verbatim_corrections_mismatch',
-        'verbatimTranscript must equal the immutable raw transcript with spanCorrections applied',
+        422,
+        'artifact_report_unavailable',
+        'The reviewed transcript has no integrity-safe report and must be reprocessed before approval',
       );
     }
-    const normalizationResolutions = validateNormalizationResolutions(artifact, input);
-    const reviewedNormalization = artifactNormalization(
+    if (input.approved && effectiveArtifact.routing.unmatchedAtomIds.length > 0) {
+      throw new RadiologySessionError(
+        422,
+        'unmatched_atoms_approval_blocked',
+        'Every clinical transcript atom must be assigned before approval',
+      );
+    }
+    const reviewDraftFeedback = validateReviewDraftFeedback(effectiveArtifact, input);
+    const normalizationResolutions = validateNormalizationResolutions(
+      effectiveArtifact,
+      input,
+      recomposeRevision ? artifact : undefined,
+    );
+    const reviewedNormalization = recomposeRevision?.normalization ?? artifactNormalization(
       denormalizeDetailed(input.verbatimTranscript),
+      input.verbatimTranscript,
     );
     const reviewedNormalizationGate = rawToNormalizedStage(
       input.verbatimTranscript,
@@ -2473,10 +3235,50 @@ export class RadiologySessionService {
       );
     }
 
+    const effectiveContent = {
+      sessionId,
+      templateId: artifact.templateId,
+      source: artifact.source.type,
+      sourceArtifactSha256: recomposeRevision?.sourceArtifactSha256
+        ?? sha256Text(canonicalJson(artifact)),
+      author: defaultAuthor,
+      verbatimTranscript: input.verbatimTranscript,
+      finalReport: input.finalReport,
+      spanCorrections: submittedCorrections,
+      normalizationResolutions: input.normalizationResolutions ?? [],
+      ...(effectiveArtifact.report?.reviewDraft
+        ? {
+            baseDraftSha256: reviewDraftFeedback.baseDraftSha256,
+            acceptedTemplateSegmentIds: reviewDraftFeedback.acceptedTemplateSegmentIds,
+            reviewedResidualAtomIds: reviewDraftFeedback.reviewedResidualAtomIds,
+          }
+        : {}),
+      approved: input.approved,
+    };
+    const contentSha256 = sha256Text(canonicalJson(effectiveContent));
+    const existingFeedback = await this.options.store.getFeedbackByIdempotencyKey(
+      sessionId,
+      input.idempotencyKey,
+    );
+    if (existingFeedback) {
+      if (existingFeedback.contentSha256 !== contentSha256) {
+        throw new RadiologySessionError(
+          409,
+          'feedback_idempotency_conflict',
+          'idempotencyKey is already bound to a different feedback payload',
+        );
+      }
+      return { feedback: existingFeedback, idempotentReplay: true };
+    }
+
     // Re-run the checks over the text the doctor is actually approving. This
     // both lets a doctor repair a failed draft and prevents a safe draft from
     // becoming unsafe through edits made in the review form.
-    const comparableFinalReport = feedbackComparableText(artifact.report, input.finalReport);
+    const comparableFinalReport = feedbackComparableText(
+      effectiveArtifact.report,
+      input.finalReport,
+      reviewDraftFeedback,
+    );
     const reviewedSafety = verifyRadiologySafety(
       reviewedNormalization.text,
       comparableFinalReport,
@@ -2533,6 +3335,10 @@ export class RadiologySessionService {
       finalReportSha256: sha256Text(input.finalReport),
       spanCorrections: corrections,
       normalizationResolutions,
+      baseDraftSha256: reviewDraftFeedback.baseDraftSha256,
+      acceptedTemplateSegmentIds: reviewDraftFeedback.acceptedTemplateSegmentIds,
+      reviewedResidualAtomIds: reviewDraftFeedback.reviewedResidualAtomIds,
+      recomposeRevision,
       approved: input.approved,
       safety: reviewedSafety,
       normalizationSafetyStage: reviewedNormalizationGate.stage,
@@ -2624,16 +3430,25 @@ export class RadiologySessionService {
     const ordered = [...session.chunks.values()].sort((a, b) => a.index - b.index);
     let chunks: RadiologyChunkTranscription[];
     if (ordered.length > 0) {
-      chunks = await Promise.all(ordered.map((chunk) => {
-        if (!chunk.transcription) {
-          throw new RadiologySessionError(
-            503,
-            'chunk_transcription_unavailable',
-            `Chunk ${chunk.index} has no active transcription`,
-          );
-        }
-        return chunk.transcription;
-      }));
+      try {
+        chunks = await Promise.all(ordered.map((chunk) => {
+          if (!chunk.transcription) {
+            throw new RadiologySessionError(
+              503,
+              'chunk_transcription_unavailable',
+              `Chunk ${chunk.index} has no active transcription`,
+            );
+          }
+          return chunk.transcription;
+        }));
+      } catch (error) {
+        if (error instanceof RadiologySessionError) throw error;
+        throw new RadiologySessionError(
+          503,
+          'asr_transcription_failed',
+          'The remote ASR service failed to transcribe this recording; retry the chunk or session',
+        );
+      }
     } else if (
       (session.source === 'browser' || session.source === 'manual')
       && input?.browserTranscript?.trim()
@@ -2662,7 +3477,11 @@ export class RadiologySessionService {
     const rawAvailable = chunks.every((chunk) => chunk.rawAvailable === true);
     const normalizationInput = rawText
       || chunks.map((chunk) => chunk.normalizedText.trim()).filter(Boolean).join(' ');
-    const normalization = artifactNormalization(denormalizeDetailed(normalizationInput));
+    const normalizationResult = denormalizeDetailed(normalizationInput);
+    const normalization = artifactNormalization(
+      normalizationResult,
+      normalizationInput,
+    );
     const normalizedText = normalization.text;
     if (!normalizedText) {
       throw new RadiologySessionError(422, 'empty_transcription', 'All chunks failed transcription');
@@ -2690,6 +3509,8 @@ export class RadiologySessionService {
           {
             allowLLM: !normalizationGate.ambiguous,
             normalizationAmbiguous: normalizationGate.ambiguous,
+            rawTranscript: rawText || normalizationInput,
+            normalizationAlignment: normalizationResult.alignment,
           },
         )
       : null;

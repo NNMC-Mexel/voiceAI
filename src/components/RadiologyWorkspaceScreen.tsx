@@ -7,7 +7,10 @@ import type {
   RadiologyBlockHint,
   RadiologyDictationReport,
   RadiologyReport,
+  RadiologyRecomposeRevision,
   RadiologySpanCorrection,
+  RadiologyTemplateReviewDraft,
+  RadiologyTemplateReviewSegment,
   RadiologyTemplatePreview,
   RadiologyTemplateSummary,
   RadiologyTranscriptionArtifact,
@@ -282,6 +285,175 @@ function toDisplayReport(report: RadiologyDictationReport): RadiologyReport {
   };
 }
 
+function reviewSegmentTitle(segment: RadiologyTemplateReviewSegment): string {
+  const evidence = segment.evidence.map((item) => item.text).filter(Boolean).join(' · ');
+  switch (segment.kind) {
+    case 'transcript_value':
+      return evidence ? `Подставлено из диктовки: «${evidence}»` : 'Подставлено из диктовки';
+    case 'template_choice':
+      return evidence
+        ? `Вариант выбран по диктовке: «${evidence}»`
+        : 'Вариант шаблона';
+    case 'derived':
+      return evidence
+        ? `Детерминированно вычислено из: «${evidence}»`
+        : 'Детерминированно вычисленное значение';
+    case 'verbatim':
+      return evidence ? `Дословный остаточный фрагмент: «${evidence}»` : 'Дословный фрагмент';
+    case 'template_default':
+      return segment.defaultKind === 'placeholder'
+        ? 'Незаполненное поле шаблона'
+        : 'Норма или значение по умолчанию из шаблона';
+    default:
+      return segment.confirmationRequired
+        ? 'Текст шаблона, требующий подтверждения'
+        : 'Служебный текст шаблона';
+  }
+}
+
+function ReviewDraftSegment({
+  segment,
+  accepted,
+}: {
+  segment: RadiologyTemplateReviewSegment;
+  accepted: boolean;
+}) {
+  const evidenceBackedChoice = segment.kind === 'template_choice' && segment.evidence.length > 0;
+  const className = [
+    'rounded-sm',
+    segment.kind === 'transcript_value' || evidenceBackedChoice
+      ? 'bg-emerald-100 text-emerald-950 font-semibold px-0.5'
+      : '',
+    segment.kind === 'template_default'
+      ? segment.defaultKind === 'placeholder'
+        ? 'bg-amber-50 text-amber-900 px-0.5'
+        : 'bg-slate-100 text-slate-700 px-0.5'
+      : '',
+    segment.kind === 'template_literal' ? 'text-slate-600' : '',
+    segment.kind === 'template_choice' && !evidenceBackedChoice
+      ? 'bg-slate-100 text-slate-700 px-0.5'
+      : '',
+    segment.kind === 'derived' ? 'bg-indigo-50 text-indigo-900 px-0.5' : '',
+    segment.kind === 'verbatim' ? 'bg-amber-100 text-amber-950 px-0.5' : '',
+    segment.confirmationRequired && !accepted ? 'opacity-50 line-through' : '',
+  ].filter(Boolean).join(' ');
+
+  return (
+    <span className={className} title={reviewSegmentTitle(segment)}>
+      {segment.text}
+      {segment.kind === 'derived' && (
+        <sup className="ml-0.5 text-[9px] font-bold text-indigo-600">fx</sup>
+      )}
+    </span>
+  );
+}
+
+function segmentsForSection(
+  draft: RadiologyTemplateReviewDraft,
+  segmentIds: string[],
+): RadiologyTemplateReviewSegment[] {
+  const byId = new Map(draft.segments.map((segment) => [segment.id, segment]));
+  return segmentIds
+    .map((segmentId) => byId.get(segmentId))
+    .filter((segment): segment is RadiologyTemplateReviewSegment => Boolean(segment));
+}
+
+function composeAcceptedReviewDraftText(
+  draft: RadiologyTemplateReviewDraft,
+  acceptedSegmentIds: Set<string>,
+  sourceAtoms: RadiologyTranscriptionArtifact['routing']['atoms'] = [],
+): string {
+  const confirmationSegments = draft.segments.filter(
+    (segment) => segment.confirmationRequired,
+  );
+  if (
+    confirmationSegments.every((segment) => acceptedSegmentIds.has(segment.id))
+  ) {
+    return draft.fullText;
+  }
+
+  let text = draft.title;
+  const atomById = new Map(sourceAtoms.map((sourceAtom) => [sourceAtom.id, sourceAtom]));
+  for (const section of draft.sections) {
+    const sectionSegments = segmentsForSection(draft, section.segmentIds);
+    const confirmable = sectionSegments.filter(
+      (segment) => segment.confirmationRequired,
+    );
+    const acceptedConfirmable = confirmable.filter(
+      (segment) => acceptedSegmentIds.has(segment.id),
+    );
+    let body = sectionSegments
+      .filter(
+        (segment) => (
+          !segment.confirmationRequired || acceptedSegmentIds.has(segment.id)
+        ),
+      )
+      .map((segment) => segment.text)
+      .join('')
+      .trim();
+    const hasUnacceptedPlaceholder = sectionSegments.some(
+      (segment) => (
+        segment.confirmationRequired
+        && segment.defaultKind === 'placeholder'
+        && !acceptedSegmentIds.has(segment.id)
+      ),
+    );
+
+    // If the doctor disables all template text for a section that contains
+    // dictated evidence, keep the exact evidence instead of leaving isolated
+    // slot values such as "150 60" without their acoustic context.
+    if (
+      hasUnacceptedPlaceholder
+      || (confirmable.length > 0 && acceptedConfirmable.length === 0)
+    ) {
+      const evidenceSpans = sectionSegments
+        .flatMap((segment) => segment.evidence)
+        .sort((left, right) => left.start - right.start || left.end - right.end)
+        .filter((item, index, all) => (
+          index === 0
+          || item.atomId !== all[index - 1].atomId
+          || item.start !== all[index - 1].start
+          || item.end !== all[index - 1].end
+        ));
+      const evidenceAtoms = [...new Set(evidenceSpans.map((item) => item.atomId))]
+        .map((atomId) => atomById.get(atomId))
+        .filter(
+          (sourceAtom): sourceAtom is RadiologyTranscriptionArtifact['routing']['atoms'][number] => (
+            Boolean(sourceAtom)
+          ),
+        )
+        .sort((left, right) => left.start - right.start || left.end - right.end);
+      body = (
+        evidenceAtoms.length > 0
+          ? evidenceAtoms.map((sourceAtom) => sourceAtom.text)
+          : evidenceSpans.map((item) => item.text)
+      ).join(' ').trim();
+    }
+    if (!body) continue;
+    text += `\n${section.label}: ${body}`;
+  }
+  return text;
+}
+
+function initiallyAcceptedTemplateSegments(
+  draft: RadiologyTemplateReviewDraft | undefined,
+): Set<string> {
+  const residualSectionIds = new Set(
+    draft?.segments
+      .filter((segment) => segment.origin === 'transcript_append')
+      .map((segment) => segment.sectionId) ?? [],
+  );
+  return new Set(
+    draft?.segments
+      .filter((segment) => segment.confirmationRequired)
+      .filter((segment) => segment.defaultKind !== 'placeholder')
+      // A section with out-of-schema clinical text must be reviewed as a
+      // whole; its normal template literals are never pre-accepted.
+      .filter((segment) => !residualSectionIds.has(segment.sectionId))
+      .map((segment) => segment.id) ?? [],
+  );
+}
+
 export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, onOpenTherapy, onLogout }: RadiologyWorkspaceScreenProps) {
   const [templates, setTemplates] = useState<RadiologyTemplateSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -308,6 +480,14 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
   const [templatePreview, setTemplatePreview] = useState<RadiologyTemplatePreview | null>(null);
   const [templatePreviewLoading, setTemplatePreviewLoading] = useState(false);
   const [artifact, setArtifact] = useState<RadiologyTranscriptionArtifact | null>(null);
+  const [reviewRevision, setReviewRevision] = useState<RadiologyRecomposeRevision | null>(null);
+  const [recomposingReview, setRecomposingReview] = useState(false);
+  const [acceptedTemplateSegmentIds, setAcceptedTemplateSegmentIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [reviewedResidualAtomIds, setReviewedResidualAtomIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [verbatimTranscript, setVerbatimTranscript] = useState('');
   const [finalReportText, setFinalReportText] = useState('');
   const [feedbackState, setFeedbackState] = useState<'idle' | 'saving' | 'saved'>('idle');
@@ -334,8 +514,31 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
   const [audioRetryToken, setAudioRetryToken] = useState(0);
 
   const selected = templates.find((t) => t.id === selectedId) || null;
-  const displayedDocument = report ?? templatePreview;
+  const effectiveReport = reviewRevision?.report ?? artifact?.report ?? null;
+  const effectiveNormalization = reviewRevision?.normalization ?? artifact?.normalization ?? null;
+  const effectiveRouting = reviewRevision?.routing ?? artifact?.routing ?? null;
+  const effectiveSafety = reviewRevision?.safety ?? artifact?.safety ?? null;
+  const reviewDraft = effectiveReport?.reviewDraft ?? null;
+  const displayedDocument = reviewDraft ? null : report ?? templatePreview;
   const showingTemplateDefaults = report === null && templatePreview !== null;
+  const reviewConfirmationSegments = reviewDraft?.segments.filter(
+    (segment) => segment.confirmationRequired,
+  ) ?? [];
+  const confirmationSegments = reviewConfirmationSegments.filter(
+    (segment) => segment.defaultKind !== 'placeholder',
+  ) ?? [];
+  const unacceptedTemplateSegmentIds = confirmationSegments
+    .filter((segment) => !acceptedTemplateSegmentIds.has(segment.id))
+    .map((segment) => segment.id);
+  const unreviewedResidualAtomIds = (reviewDraft?.residualAtomIds ?? [])
+    .filter((atomId) => !reviewedResidualAtomIds.has(atomId));
+  const incompleteRequiredFieldIds = (reviewDraft?.fieldAssignments ?? [])
+    .filter((assignment) => assignment.status === 'incomplete' && assignment.evidence.length === 0)
+    .map((assignment) => assignment.fieldId);
+  const unresolvedCriticalDraftIssues = (reviewDraft?.issues ?? []).filter((issue) => (
+    issue.severity === 'critical'
+    && (!issue.atomId || !reviewedResidualAtomIds.has(issue.atomId))
+  ));
   selectedTemplateIdRef.current = selectedId;
   const reviewSpanCorrections = useMemo(
     () => (
@@ -351,9 +554,26 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
     ),
     [artifact, doctor.name, selected, verbatimTranscript],
   );
-  const unresolvedCriticalNormalization = artifact
-    ? artifact.normalization.issues.some((issue) => {
+  const residualEvidenceByAtomId = useMemo(() => {
+    const result = new Map<string, string>();
+    if (!reviewDraft) return result;
+    for (const segment of reviewDraft.segments) {
+      if (segment.kind !== 'verbatim') continue;
+      for (const evidence of segment.evidence) {
+        if (!result.has(evidence.atomId)) result.set(evidence.atomId, evidence.text);
+      }
+    }
+    for (const issue of reviewDraft.issues) {
+      if (!issue.atomId || result.has(issue.atomId)) continue;
+      const text = issue.evidence?.map((item) => item.text).filter(Boolean).join(' ');
+      if (text) result.set(issue.atomId, text);
+    }
+    return result;
+  }, [reviewDraft]);
+  const unresolvedCriticalNormalization = effectiveNormalization
+    ? effectiveNormalization.issues.some((issue) => {
         if (issue.severity !== 'critical') return false;
+        if (reviewRevision) return true;
         if (!issue.source) return true;
         return !reviewSpanCorrections.some(
           (correction) =>
@@ -363,19 +583,33 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
         );
       })
     : false;
+  const reviewRequiresRecompose = (
+    reviewSpanCorrections.length > 0
+    && reviewRevision?.verbatimTranscript.text !== verbatimTranscript
+  );
   const hardApprovalBlockReason = artifact
     ? artifact.legacySchemaVersion === 1
       ? 'Artifact v1 нужно повторно прогнать через pipeline v2.'
-      : artifact.report === null
+      : reviewRequiresRecompose
+        ? 'После исправления дословной расшифровки пересоберите шаблонный черновик.'
+      : effectiveReport === null
         ? 'Безопасный черновик не построен; запись нужно обработать повторно.'
-          : unresolvedCriticalNormalization
-            ? 'Есть неоднозначность нормализации; сначала нужна явная resolution врача.'
-        : artifact.longform.degraded
-          || artifact.longform.seamConflicts.some((seam) => seam.critical)
-          ? 'Long-form декодирование degraded или содержит критический overlap-конфликт.'
-          : artifact.routing.unmatchedAtomIds.length > 0
-            ? 'Есть клинические фрагменты без секции; сначала требуется повторная маршрутизация.'
-            : null
+        : unresolvedCriticalNormalization
+          ? 'Есть неоднозначность нормализации; сначала нужна явная resolution врача.'
+          : artifact.longform.degraded
+            || artifact.longform.seamConflicts.some((seam) => seam.critical)
+            ? 'Long-form декодирование degraded или содержит критический overlap-конфликт.'
+            : (effectiveRouting?.unmatchedAtomIds.length ?? 0) > 0
+              ? 'Есть клинические фрагменты без секции; сначала требуется повторная маршрутизация.'
+              : incompleteRequiredFieldIds.length > 0
+                ? `Заполните обязательные поля шаблона: ${incompleteRequiredFieldIds.join(', ')}.`
+              : reviewDraft?.status === 'failed'
+                ? 'Шаблонный черновик не построен; используйте evidence-backed текст и повторите обработку.'
+                : unresolvedCriticalDraftIssues.length > 0
+                  ? 'В шаблонном черновике остались критические ошибки разбора.'
+                  : unreviewedResidualAtomIds.length > 0
+                    ? 'Проверьте все остаточные дословные фрагменты перед подтверждением.'
+                    : null
     : null;
 
   const {
@@ -398,6 +632,7 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
     || isStopping
     || processingAudio
     || recoveringArtifact
+    || recomposingReview
     || hasPendingServerAudio
     || hasPendingClientTranscript
     || feedbackState === 'saving';
@@ -408,9 +643,29 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
     }
     const transcript = nextArtifact.normalization.text.trim();
     const displayReport = nextArtifact.report ? toDisplayReport(nextArtifact.report) : null;
+    const nextReviewDraft = nextArtifact.report?.reviewDraft;
+    const appliedFieldCount = nextReviewDraft?.fieldAssignments.filter(
+      (assignment) => assignment.status === 'applied',
+    ).length ?? 0;
+    const residualCount = nextReviewDraft?.residualAtomIds.length ?? 0;
     setArtifact(nextArtifact);
+    setReviewRevision(null);
+    setRecomposingReview(false);
+    const initiallyAcceptedTemplateSegmentIds = initiallyAcceptedTemplateSegments(
+      nextReviewDraft,
+    );
+    setAcceptedTemplateSegmentIds(initiallyAcceptedTemplateSegmentIds);
+    setReviewedResidualAtomIds(new Set());
     setVerbatimTranscript(nextArtifact.rawTranscript.text);
-    setFinalReportText(nextArtifact.report?.fullText ?? '');
+    setFinalReportText(
+      nextReviewDraft
+        ? composeAcceptedReviewDraftText(
+            nextReviewDraft,
+            initiallyAcceptedTemplateSegmentIds,
+            nextArtifact.routing.atoms,
+          )
+        : nextArtifact.report?.fullText ?? '',
+    );
     feedbackSubmissionRef.current = null;
     setCommands(transcript ? [transcript] : []);
     setReport(displayReport);
@@ -418,9 +673,16 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
       command: transcript,
       ok: !nextArtifact.safety.approvalBlocked,
       action: 'server-artifact',
-      detail: nextArtifact.safety.status === 'passed'
-        ? 'проверки безопасности пройдены'
-        : 'нужна проверка врача',
+      detail: nextReviewDraft
+        ? [
+            `Подставлено полей: ${appliedFieldCount}`,
+            residualCount > 0
+              ? `Остаточных фрагментов для проверки: ${residualCount}`
+              : '',
+          ].filter(Boolean).join('; ')
+        : nextArtifact.safety.status === 'passed'
+          ? 'проверки безопасности пройдены'
+          : 'нужна проверка врача',
     }]);
     writeStoredRadiologyPointer(LAST_RADIOLOGY_ARTIFACT_KEY, {
       sessionId: nextArtifact.sessionId,
@@ -558,6 +820,10 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
 
   const clearClinicalResult = useCallback(() => {
     setArtifact(null);
+    setReviewRevision(null);
+    setRecomposingReview(false);
+    setAcceptedTemplateSegmentIds(new Set());
+    setReviewedResidualAtomIds(new Set());
     setReport(null);
     setCommands([]);
     setApplied([]);
@@ -959,9 +1225,84 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
     });
   }, [artifact, finalReportText, report, templatePreview]);
 
+  const recomposeReviewDraft = useCallback(async () => {
+    if (
+      !artifact
+      || !selected
+      || reviewSpanCorrections.length === 0
+      || recomposingReview
+      || feedbackState === 'saving'
+    ) {
+      return;
+    }
+    setRecomposingReview(true);
+    setError('');
+    try {
+      const { revision } = await apiClient.recomposeRadiologyReview(
+        artifact.sessionId,
+        {
+          verbatimTranscript,
+          spanCorrections: reviewSpanCorrections,
+        },
+      );
+      if (
+        revision.sessionId !== artifact.sessionId
+        || revision.templateId !== artifact.templateId
+        || !/^[a-f0-9]{64}$/u.test(revision.sourceArtifactSha256)
+      ) {
+        throw new Error('Сервер вернул пересборку для другого artifact');
+      }
+      const nextDraft = revision.report?.reviewDraft;
+      const accepted = initiallyAcceptedTemplateSegments(nextDraft);
+      setReviewRevision(revision);
+      setAcceptedTemplateSegmentIds(accepted);
+      setReviewedResidualAtomIds(new Set());
+      setFinalReportText(
+        nextDraft
+          ? composeAcceptedReviewDraftText(
+              nextDraft,
+              accepted,
+              revision.routing.atoms,
+            )
+          : revision.report?.fullText ?? '',
+      );
+      setReport(revision.report ? toDisplayReport(revision.report) : null);
+      feedbackSubmissionRef.current = null;
+      setFeedbackState('idle');
+    } catch (recomposeError) {
+      setError(
+        recomposeError instanceof Error
+          ? recomposeError.message
+          : 'Не удалось пересобрать черновик после исправления расшифровки',
+      );
+    } finally {
+      setRecomposingReview(false);
+    }
+  }, [
+    artifact,
+    feedbackState,
+    recomposingReview,
+    reviewSpanCorrections,
+    selected,
+    verbatimTranscript,
+  ]);
+
   const submitFeedback = useCallback(async () => {
-    if (!artifact || !selected || feedbackSavingRef.current || feedbackState === 'saved') return;
+    if (
+      !artifact
+      || !selected
+      || feedbackSavingRef.current
+      || feedbackState === 'saved'
+      || reviewRequiresRecompose
+    ) return;
     const spanCorrections = reviewSpanCorrections;
+    const currentReviewDraft = effectiveReport?.reviewDraft;
+    const acceptedTemplateSegments = currentReviewDraft
+      ? [...acceptedTemplateSegmentIds].sort()
+      : undefined;
+    const reviewedResidualAtoms = currentReviewDraft
+      ? [...reviewedResidualAtomIds].sort()
+      : undefined;
     const normalizationResolutions = artifact.normalization.issues.flatMap((issue) => {
       if (!issue.source) return [];
       const correction = spanCorrections.find(
@@ -989,6 +1330,9 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
       finalReport: finalReportText,
       spanCorrections,
       normalizationResolutions,
+      baseDraftSha256: currentReviewDraft?.sha256,
+      acceptedTemplateSegmentIds: acceptedTemplateSegments,
+      reviewedResidualAtomIds: reviewedResidualAtoms,
       approved,
     });
     let submission = feedbackSubmissionRef.current;
@@ -1009,6 +1353,9 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
         finalReport: finalReportText,
         spanCorrections,
         normalizationResolutions,
+        baseDraftSha256: currentReviewDraft?.sha256,
+        acceptedTemplateSegmentIds: acceptedTemplateSegments,
+        reviewedResidualAtomIds: reviewedResidualAtoms,
         approved,
         author: doctor.name,
       });
@@ -1022,10 +1369,14 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
     }
   }, [
     artifact,
+    acceptedTemplateSegmentIds,
     doctor.name,
+    effectiveReport,
     feedbackState,
     finalReportText,
     reviewSpanCorrections,
+    reviewRequiresRecompose,
+    reviewedResidualAtomIds,
     selected,
     verbatimTranscript,
   ]);
@@ -1039,6 +1390,10 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
     setApplied([]);
     setInput('');
     setArtifact(null);
+    setReviewRevision(null);
+    setRecomposingReview(false);
+    setAcceptedTemplateSegmentIds(new Set());
+    setReviewedResidualAtomIds(new Set());
     setTemplatePreview(null);
     setTemplatePreviewLoading(false);
     setVerbatimTranscript('');
@@ -1134,7 +1489,7 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
             </button>
             <button
               onClick={handleCopy}
-              disabled={!displayedDocument}
+              disabled={!reviewDraft && !displayedDocument}
               className="flex items-center gap-1 text-sm text-medical-700 hover:underline disabled:text-slate-300 disabled:no-underline"
             >
               {copied
@@ -1149,8 +1504,49 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
                 Это нормы по умолчанию, а не результат распознавания и не подтверждённые данные исследования.
               </div>
             )}
+            {reviewDraft && (
+              <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-950">
+                <div className="font-semibold">Черновик собран по выбранному шаблону.</div>
+                <p className="mt-1 text-xs">
+                  Зелёным выделены значения из диктовки, серым — нормы шаблона,
+                  <span className="mx-1 rounded-sm bg-indigo-50 px-0.5 text-indigo-900">fx</span>
+                  — детерминированно вычисленные значения.
+                </p>
+                {confirmationSegments.length > 0 && (
+                  <label className="mt-2 flex items-start gap-2 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={unacceptedTemplateSegmentIds.length === 0}
+                      disabled={feedbackState === 'saving'}
+                      onChange={(event) => {
+                        const checked = event.target.checked;
+                        const next = new Set(acceptedTemplateSegmentIds);
+                        for (const segment of confirmationSegments) {
+                          if (checked) next.add(segment.id);
+                          else next.delete(segment.id);
+                        }
+                        setAcceptedTemplateSegmentIds(next);
+                        setFinalReportText(
+                          composeAcceptedReviewDraftText(
+                            reviewDraft,
+                            next,
+                            artifact?.routing.atoms,
+                          ),
+                        );
+                        setFeedbackState('idle');
+                      }}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      Использовать и подтвердить нормы всего выбранного шаблона
+                      ({confirmationSegments.length})
+                    </span>
+                  </label>
+                )}
+              </div>
+            )}
             <div className="text-center font-semibold text-medical-900 mb-4">
-              {displayedDocument?.title ?? selected.title}
+              {reviewDraft?.title ?? displayedDocument?.title ?? selected.title}
             </div>
             {templatePreviewLoading && !report && (
               <div className="py-8 text-center text-sm text-text-muted">
@@ -1158,34 +1554,157 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
               </div>
             )}
             <div className="space-y-2 text-[15px] leading-relaxed text-medical-900">
-              {displayedDocument?.blocks.map((b) => {
-                const sep = b.text.indexOf(': ');
-                const label = sep > 0 ? b.text.slice(0, sep) : b.label;
-                const body = sep > 0 ? b.text.slice(sep + 2) : b.text;
-                const isConclusion = b.id === 'conclusion';
-                return (
-                  <p
-                    key={b.id}
-                    className={[
-                      isConclusion ? 'pt-2 mt-2 border-t border-slate-200' : '',
-                      showingTemplateDefaults ? 'text-slate-600' : '',
-                    ].filter(Boolean).join(' ')}
-                  >
-                    <span className="font-semibold">{label}:</span> {body}
-                  </p>
-                );
-              })}
+              {reviewDraft
+                ? reviewDraft.sections.map((section) => {
+                    const sectionSegments = segmentsForSection(reviewDraft, section.segmentIds);
+                    const confirmationIds = sectionSegments
+                      .filter(
+                        (segment) => (
+                          segment.confirmationRequired
+                          && segment.defaultKind !== 'placeholder'
+                        ),
+                      )
+                      .map((segment) => segment.id);
+                    const sectionAccepted = confirmationIds.length > 0
+                      && confirmationIds.every((segmentId) => (
+                        acceptedTemplateSegmentIds.has(segmentId)
+                      ));
+                    const isConclusion = section.mode === 'conclusion';
+                    return (
+                      <div
+                        key={section.id}
+                        className={[
+                          isConclusion ? 'pt-2 mt-2 border-t border-slate-200' : '',
+                          section.mode === 'verbatim_fallback'
+                            ? 'rounded-md border border-amber-200 bg-amber-50 p-2'
+                            : '',
+                        ].filter(Boolean).join(' ')}
+                      >
+                        <p className="whitespace-pre-wrap">
+                          <span className="font-semibold">{section.label}:</span>{' '}
+                          {sectionSegments.length > 0
+                            ? sectionSegments.map((segment) => (
+                                <ReviewDraftSegment
+                                  key={segment.id}
+                                  segment={segment}
+                                  accepted={
+                                    !segment.confirmationRequired
+                                    || acceptedTemplateSegmentIds.has(segment.id)
+                                  }
+                                />
+                              ))
+                            : section.text}
+                        </p>
+                        {confirmationIds.length > 0 && (
+                          <label className="mt-1 flex items-center gap-1.5 text-[11px] text-slate-500">
+                            <input
+                              type="checkbox"
+                              checked={sectionAccepted}
+                              disabled={feedbackState === 'saving'}
+                              onChange={(event) => {
+                                const checked = event.target.checked;
+                                const next = new Set(acceptedTemplateSegmentIds);
+                                for (const segmentId of confirmationIds) {
+                                  if (checked) next.add(segmentId);
+                                  else next.delete(segmentId);
+                                }
+                                setAcceptedTemplateSegmentIds(next);
+                                setFinalReportText(
+                                  composeAcceptedReviewDraftText(
+                                    reviewDraft,
+                                    next,
+                                    artifact?.routing.atoms,
+                                  ),
+                                );
+                                setFeedbackState('idle');
+                              }}
+                            />
+                            Подтвердить нормы раздела ({confirmationIds.length})
+                          </label>
+                        )}
+                        {section.issues.length > 0 && (
+                          <ul className="mt-1 space-y-0.5 text-xs text-amber-800">
+                            {section.issues.map((issue, index) => (
+                              <li key={`${issue.code}-${issue.fieldId ?? issue.atomId ?? index}`}>
+                                • {issue.message}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    );
+                  })
+                : displayedDocument?.blocks.map((b) => {
+                    const sep = b.text.indexOf(': ');
+                    const label = sep > 0 ? b.text.slice(0, sep) : b.label;
+                    const body = sep > 0 ? b.text.slice(sep + 2) : b.text;
+                    const isConclusion = b.id === 'conclusion';
+                    return (
+                      <p
+                        key={b.id}
+                        className={[
+                          isConclusion ? 'pt-2 mt-2 border-t border-slate-200' : '',
+                          showingTemplateDefaults ? 'text-slate-600' : '',
+                        ].filter(Boolean).join(' ')}
+                      >
+                        <span className="font-semibold">{label}:</span> {body}
+                      </p>
+                    );
+                  })}
             </div>
-            {artifact?.report?.templateDefaults.length ? (
+            {reviewDraft && reviewDraft.residualAtomIds.length > 0 && (
+              <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3">
+                <div className="text-sm font-semibold text-amber-950">
+                  Остаточные дословные фрагменты требуют проверки
+                </div>
+                <div className="mt-2 space-y-2">
+                  {reviewDraft.residualAtomIds.map((atomId) => (
+                    <label key={atomId} className="flex items-start gap-2 text-sm text-amber-950">
+                      <input
+                        type="checkbox"
+                        checked={reviewedResidualAtomIds.has(atomId)}
+                        disabled={feedbackState === 'saving'}
+                        onChange={(event) => {
+                          const checked = event.target.checked;
+                          setReviewedResidualAtomIds((current) => {
+                            const next = new Set(current);
+                            if (checked) next.add(atomId);
+                            else next.delete(atomId);
+                            return next;
+                          });
+                          setFeedbackState('idle');
+                        }}
+                        className="mt-0.5"
+                      />
+                      <span>
+                        {residualEvidenceByAtomId.get(atomId) ?? `Фрагмент ${atomId}`}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+            {reviewDraft && reviewDraft.issues.some((issue) => !issue.sectionId) && (
+              <ul className="mt-4 space-y-1 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+                {reviewDraft.issues
+                  .filter((issue) => !issue.sectionId)
+                  .map((issue, index) => (
+                    <li key={`${issue.code}-${issue.atomId ?? issue.fieldId ?? index}`}>
+                      • {issue.message}
+                    </li>
+                  ))}
+              </ul>
+            )}
+            {!reviewDraft && effectiveReport?.templateDefaults.length ? (
               <details className="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
                 <summary className="cursor-pointer text-sm font-semibold text-slate-700">
-                  Неподтверждённые нормы шаблона ({artifact.report.templateDefaults.length})
+                  Неподтверждённые нормы шаблона ({effectiveReport.templateDefaults.length})
                 </summary>
                 <p className="mt-2 text-xs text-slate-500">
                   Эти разделы не были произнесены и не входят в доказательный протокол.
                 </p>
                 <div className="mt-3 space-y-2 text-sm text-slate-600">
-                  {artifact.report.templateDefaults.map((item) => (
+                  {effectiveReport.templateDefaults.map((item) => (
                     <p key={item.id}>
                       <span className="font-semibold">{item.label}:</span> {item.text}
                     </p>
@@ -1212,13 +1731,13 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
                   </div>
                 </div>
                 <span className={`text-xs font-semibold px-2 py-1 rounded-full ${
-                  artifact.safety.status === 'passed'
+                  effectiveSafety?.status === 'passed'
                     ? 'bg-emerald-100 text-emerald-800'
-                    : artifact.safety.status === 'failed'
+                    : effectiveSafety?.status === 'failed'
                       ? 'bg-red-100 text-red-800'
                       : 'bg-amber-100 text-amber-800'
                 }`}>
-                  {artifact.safety.status === 'passed' ? 'Проверки пройдены' : 'Требуется проверка'}
+                  {effectiveSafety?.status === 'passed' ? 'Проверки пройдены' : 'Требуется проверка'}
                 </span>
               </div>
 
@@ -1230,6 +1749,8 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
                 disabled={feedbackState === 'saving'}
                 onChange={(e) => {
                   setVerbatimTranscript(e.target.value);
+                  setReviewRevision(null);
+                  setReviewedResidualAtomIds(new Set());
                   setFeedbackState('idle');
                 }}
                 rows={5}
@@ -1238,16 +1759,30 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
               <p className="text-xs text-text-muted mt-1 mb-4">
                 Исправляйте только то, что реально произнесено. Протокольные нормы сюда не добавляются.
               </p>
+              {reviewSpanCorrections.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => void recomposeReviewDraft()}
+                  disabled={recomposingReview || feedbackState === 'saving'}
+                  className="mb-4 w-full rounded-lg border border-medical-300 bg-medical-50 px-3 py-2 text-sm font-semibold text-medical-800 hover:bg-medical-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {recomposingReview
+                    ? 'Пересобираем черновик…'
+                    : reviewRevision?.verbatimTranscript.text === verbatimTranscript
+                      ? 'Черновик пересобран по исправленному тексту'
+                      : 'Пересобрать черновик по исправленной расшифровке'}
+                </button>
+              )}
 
               <label className="block text-sm font-semibold text-medical-800 mb-1">
                 Нормализованный текст
               </label>
               <div className="mb-4 whitespace-pre-wrap rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-medical-900">
-                {artifact.normalization.text || 'Нормализация не выполнена'}
+                {effectiveNormalization?.text || 'Нормализация не выполнена'}
               </div>
-              {artifact.normalization.issues.length > 0 && (
+              {(effectiveNormalization?.issues.length ?? 0) > 0 && (
                 <ul className="mb-4 space-y-1 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
-                  {artifact.normalization.issues.map((issue) => (
+                  {effectiveNormalization?.issues.map((issue) => (
                     <li key={issue.id}>
                       • {issue.message}
                       {issue.source?.text ? ` Исходный фрагмент: «${issue.source.text}».` : ''}
@@ -1270,14 +1805,15 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
                 className="w-full box-border px-3 py-2 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-medical-400 text-sm"
               />
 
-              {artifact.unmatchedText && (
+              {(effectiveReport?.unmatched || artifact.unmatchedText) && (
                 <div className="mt-3 rounded-lg bg-amber-50 border border-amber-200 p-3 text-sm text-amber-900">
-                  <span className="font-semibold">Не удалось разнести по секциям:</span> {artifact.unmatchedText}
+                  <span className="font-semibold">Не удалось разнести по секциям:</span>{' '}
+                  {effectiveReport?.unmatched || artifact.unmatchedText}
                 </div>
               )}
-              {artifact.safety.issues.length > 0 && (
+              {(effectiveSafety?.issues.length ?? 0) > 0 && (
                 <ul className="mt-3 space-y-1 rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-900">
-                  {artifact.safety.issues.map((issue, index) => (
+                  {effectiveSafety?.issues.map((issue, index) => (
                     <li key={`${issue.code}-${index}`}>• {issue.message}</li>
                   ))}
                 </ul>

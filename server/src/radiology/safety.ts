@@ -48,6 +48,7 @@ export type SafetyIssueCode =
   | 'normalization_number_added'
   | 'normalization_number_lost'
   | 'ambiguous_number_sequence'
+  | 'ambiguous_numeric_sign'
   | 'normalization_issue'
   | 'number_or_unit_changed'
   | 'negation_changed'
@@ -1241,6 +1242,17 @@ export function verifyRawToNormalizedSafety(
   }
 
   let hasOtherCriticalNormalizationIssue = false;
+  if (
+    /(?:плюс\s*[-/]?\s*минус|\+\s*\/\s*-|[±]|[\u00AD\u2010-\u2015\u2043\u207B\u208B](?=\s*\d))/iu
+      .test(rawText)
+  ) {
+    hasOtherCriticalNormalizationIssue = true;
+    issues.push({
+      code: 'ambiguous_numeric_sign',
+      severity: 'critical',
+      message: 'Raw ASR contains an ambiguous numeric sign that cannot be interpreted automatically.',
+    });
+  }
   for (const issue of evidence.issues ?? []) {
     if (issue.code === 'ambiguous_number_sequence') {
       const sourceText = issue.sourceText ?? (

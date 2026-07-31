@@ -31,6 +31,21 @@ interface GigaAMCtcDecoderMetadata {
   hotwordWeight?: number | null;
 }
 
+interface GigaAMCheckpointMetadata {
+  expectedChecksum?: string | null;
+  verified?: boolean;
+  hashes?: Record<string, string | undefined>;
+}
+
+interface GigaAMModelMetadata {
+  name?: string;
+  requested?: string;
+  decoder?: string | null;
+  acousticDecoder?: string | null;
+  ctcDecoder?: GigaAMCtcDecoderMetadata;
+  checkpoint?: GigaAMCheckpointMetadata;
+}
+
 interface WhisperServerResponse {
   schema_version?: string;
   text: string;
@@ -40,18 +55,7 @@ interface WhisperServerResponse {
   elapsed: number;
   method?: string;
   runtime_id?: string;
-  model?: {
-    name?: string;
-    requested?: string;
-    decoder?: string | null;
-    acousticDecoder?: string | null;
-    ctcDecoder?: GigaAMCtcDecoderMetadata;
-    checkpoint?: {
-      expectedChecksum?: string | null;
-      verified?: boolean;
-      hashes?: Record<string, string | undefined>;
-    };
-  };
+  model?: GigaAMModelMetadata;
   context_bias?: {
     scope?: string | null;
     active?: boolean;
@@ -71,6 +75,8 @@ interface WhisperServerResponse {
     start?: number;
     end?: number;
     confidence?: number | null;
+    avg_logprob?: number | null;
+    score_type?: string | null;
   }>;
   confidence?: {
     available?: boolean;
@@ -128,6 +134,15 @@ interface WhisperServerResponse {
   };
 }
 
+interface GigaAMRuntimeMetadataResponse {
+  schema_version?: string;
+  runtime_id?: string;
+  model?: GigaAMModelMetadata;
+  configuration?: {
+    ctc_decoder?: GigaAMCtcDecoderMetadata;
+  };
+}
+
 interface ASRContextBiasMetadata {
   scope: string | null;
   active: boolean;
@@ -141,6 +156,18 @@ interface ASRHashMetadata {
   outputTextSha256?: string;
   finalTextSha256?: string;
   normalizedTextSha256: string;
+}
+
+export interface ASRProductionContractVerification {
+  metadataAvailable: boolean;
+  metadataSchema: boolean;
+  transcriptionSchema: boolean;
+  runtimeIdentity: boolean;
+  checkpoint: boolean;
+  decoder: boolean;
+  hashes: boolean;
+  wordEvidence: boolean;
+  productionReady: boolean;
 }
 
 export interface DetailedStreamingTranscription {
@@ -174,6 +201,8 @@ export interface DetailedStreamingTranscription {
     startMs: number;
     endMs: number;
     confidence: number | null;
+    avgLogprob: number | null;
+    scoreType: string | null;
   }>;
   model: {
     asr: { name: string; version: string; checksum?: string };
@@ -186,6 +215,7 @@ export interface DetailedStreamingTranscription {
   };
   contextBias: ASRContextBiasMetadata;
   hashes: ASRHashMetadata;
+  verification: ASRProductionContractVerification;
   provenance: {
     schemaVersion: string;
     runtimeId: string;
@@ -194,6 +224,7 @@ export interface DetailedStreamingTranscription {
     contextBias: ASRContextBiasMetadata;
     hashes: ASRHashMetadata;
     checkpointVerified: boolean;
+    verification: ASRProductionContractVerification;
   };
   longform: {
     mode: 'vad' | 'emission_stitch' | 'text_fallback' | 'single';
@@ -252,6 +283,99 @@ function sha256Text(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
+function sha256Base64(value: string): string {
+  const compact = value.replace(/\s+/gu, '');
+  return createHash('sha256').update(Buffer.from(compact, 'base64')).digest('hex');
+}
+
+function isSha256(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value);
+}
+
+function canonicalJson(value: unknown): string {
+  const normalize = (input: unknown): unknown => {
+    if (Array.isArray(input)) return input.map(normalize);
+    if (input && typeof input === 'object') {
+      return Object.fromEntries(
+        Object.entries(input as Record<string, unknown>)
+          .filter(([, nested]) => nested !== undefined)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, nested]) => [key, normalize(nested)]),
+      );
+    }
+    return input;
+  };
+  return JSON.stringify(normalize(value));
+}
+
+function checkpointSelfVerified(checkpoint: GigaAMCheckpointMetadata | undefined): boolean {
+  if (checkpoint?.verified !== true) return false;
+  if (!isSha256(checkpoint.hashes?.sha256)) return false;
+  const expected = checkpoint.expectedChecksum?.trim().toLowerCase();
+  if (!expected || !expected.includes(':')) return false;
+  const [algorithm, digest, ...extra] = expected.split(':');
+  if (extra.length > 0 || !algorithm || !digest) return false;
+  const expectedLength = algorithm === 'sha256' ? 64 : algorithm === 'md5' ? 32 : 0;
+  if (
+    expectedLength === 0
+    || digest.length !== expectedLength
+    || !/^[a-f0-9]+$/u.test(digest)
+  ) {
+    return false;
+  }
+  return checkpoint.hashes?.[algorithm]?.toLowerCase() === digest;
+}
+
+function decoderIdentity(model: GigaAMModelMetadata | undefined): {
+  acousticDecoder: string | null;
+  ctcDecoder: GigaAMCtcDecoderMetadata | null;
+} {
+  return {
+    acousticDecoder:
+      model?.acousticDecoder?.trim()
+      || model?.decoder?.trim()
+      || null,
+    ctcDecoder: model?.ctcDecoder ?? null,
+  };
+}
+
+function decoderMetadataComplete(model: GigaAMModelMetadata | undefined): boolean {
+  const identity = decoderIdentity(model);
+  const implementation = identity.ctcDecoder?.implementation?.trim();
+  return Boolean(
+    identity.acousticDecoder
+    && identity.acousticDecoder.toLowerCase() !== 'unknown'
+    && identity.ctcDecoder?.active === true
+    && (identity.ctcDecoder.mode === 'greedy' || identity.ctcDecoder.mode === 'beam')
+    && implementation
+    && implementation.toLowerCase() !== 'unknown',
+  );
+}
+
+function wordHasFiniteAcousticConfidence(
+  word: NonNullable<WhisperServerResponse['words']>[number],
+): boolean {
+  const confidence = word.confidence;
+  const avgLogprob = word.avg_logprob;
+  const scoreType = word.score_type?.trim().toLowerCase() ?? '';
+  return (
+    typeof confidence === 'number'
+    && Number.isFinite(confidence)
+    && confidence >= 0
+    && confidence <= 1
+    && typeof avgLogprob === 'number'
+    && Number.isFinite(avgLogprob)
+    && scoreType.length > 0
+    && !scoreType.includes('fused')
+    && !scoreType.includes('language_model')
+    && (
+      scoreType.includes('acoustic')
+      || scoreType.includes('emission')
+      || scoreType.includes('ctc_')
+    )
+  );
+}
+
 function decodedBase64Bytes(value: string): number {
   const compact = value.replace(/\s+/gu, '');
   if (!compact) return 0;
@@ -288,6 +412,27 @@ export class WhisperService {
   constructor(config: WhisperConfig) {
     this.config = config;
     this.tempDir = './temp';
+  }
+
+  private async fetchGigaAMRuntimeMetadata(
+    signal: AbortSignal,
+  ): Promise<GigaAMRuntimeMetadataResponse | null> {
+    if (!this.config.serverUrl) return null;
+    try {
+      const response = await fetch(`${this.config.serverUrl}/metadata`, {
+        method: 'GET',
+        signal,
+      });
+      if (!response.ok) return null;
+      const metadata = await response.json() as unknown;
+      if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+        return null;
+      }
+      return metadata as GigaAMRuntimeMetadataResponse;
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') throw error;
+      return null;
+    }
   }
 
   async init(): Promise<void> {
@@ -630,6 +775,7 @@ export class WhisperService {
         + `${REMOTE_SINGLE_PAYLOAD_MAX_BYTES} bytes. Split the recording into valid audio chunks.`,
       );
     }
+    const requestAudioSha256 = sha256Base64(audioBase64);
     const contextScope = approvedContextScope(context.templateId);
 
     const controller = new AbortController();
@@ -654,6 +800,59 @@ export class WhisperService {
       }
 
       const data = (await response.json()) as WhisperServerResponse;
+      const source = data.source === 'gigaam'
+        ? 'gigaam'
+        : data.source === 'whisper'
+          ? 'whisper'
+          : 'unknown';
+      const runtimeMetadata = source === 'gigaam'
+        ? await this.fetchGigaAMRuntimeMetadata(controller.signal)
+        : null;
+      const metadataAvailable = runtimeMetadata !== null;
+      const metadataSchema =
+        runtimeMetadata?.schema_version === 'gigaam.runtime.v1';
+      const transcriptionSchema =
+        data.schema_version === 'gigaam.transcription.v2';
+      const responseRuntimeId = data.runtime_id?.trim() || '';
+      const metadataRuntimeId = runtimeMetadata?.runtime_id?.trim() || '';
+      const runtimeIdentity = Boolean(
+        metadataSchema
+        && isSha256(responseRuntimeId)
+        && responseRuntimeId === metadataRuntimeId,
+      );
+      if (metadataSchema && !runtimeIdentity) {
+        throw new Error(
+          'GigaAM runtime_id does not match the verified /metadata runtime identity',
+        );
+      }
+      if (
+        metadataSchema
+        && canonicalJson(data.model?.checkpoint ?? null)
+          !== canonicalJson(runtimeMetadata?.model?.checkpoint ?? null)
+      ) {
+        throw new Error(
+          'GigaAM checkpoint metadata differs between /metadata and /transcribe',
+        );
+      }
+      if (
+        metadataSchema
+        && canonicalJson(decoderIdentity(data.model))
+          !== canonicalJson(decoderIdentity(runtimeMetadata?.model))
+      ) {
+        throw new Error(
+          'GigaAM decoder metadata differs between /metadata and /transcribe',
+        );
+      }
+      if (
+        metadataSchema
+        && runtimeMetadata?.configuration?.ctc_decoder !== undefined
+        && canonicalJson(runtimeMetadata.configuration.ctc_decoder)
+          !== canonicalJson(runtimeMetadata.model?.ctcDecoder ?? null)
+      ) {
+        throw new Error(
+          'GigaAM /metadata exposes inconsistent decoder identities',
+        );
+      }
       const hasExplicitRaw = typeof data.raw_text === 'string' && data.raw_text.trim().length > 0;
       // Keep the explicit runtime output byte-for-byte so the supplied hash can
       // be verified. `text` is only a display fallback, never raw training truth.
@@ -708,7 +907,7 @@ export class WhisperService {
           values: issue.values,
         })),
       };
-      const runtimeVersion = data.runtime_id?.trim() || 'unknown';
+      const runtimeVersion = responseRuntimeId || 'unknown';
       const checkpointHashes = data.model?.checkpoint?.hashes;
       const checkpointChecksum = checkpointHashes?.sha256 || checkpointHashes?.md5;
       const ctcDecoder = data.model?.ctcDecoder;
@@ -760,6 +959,13 @@ export class WhisperService {
         : null;
       const normalizedTextSha256 = sha256Text(normalizedText);
       const computedRawTextSha256 = hasExplicitRaw ? sha256Text(rawText) : undefined;
+      if (source === 'gigaam') {
+        for (const [name, value] of Object.entries(data.hashes ?? {})) {
+          if (value !== undefined && !isSha256(value)) {
+            throw new Error(`GigaAM ${name} is not a lowercase SHA-256 digest`);
+          }
+        }
+      }
       if (
         data.hashes?.raw_text_sha256
         && computedRawTextSha256
@@ -767,27 +973,38 @@ export class WhisperService {
       ) {
         throw new Error('GigaAM raw_text SHA-256 does not match the explicit raw_text payload');
       }
+      if (
+        data.hashes?.audio_sha256
+        && data.hashes.audio_sha256 !== requestAudioSha256
+      ) {
+        throw new Error('GigaAM audio SHA-256 does not match the submitted audio payload');
+      }
+      const computedOutputTextSha256 = sha256Text(data.text ?? '');
+      const suppliedOutputTextSha256 =
+        data.hashes?.output_text_sha256
+        || data.hashes?.text_sha256;
+      if (
+        suppliedOutputTextSha256
+        && suppliedOutputTextSha256 !== computedOutputTextSha256
+      ) {
+        throw new Error('GigaAM output text SHA-256 does not match the text payload');
+      }
       const hashes: ASRHashMetadata = {
         ...(data.hashes?.audio_sha256 ? { audioSha256: data.hashes.audio_sha256 } : {}),
         ...(data.hashes?.normalized_audio_sha256
           ? { normalizedAudioSha256: data.hashes.normalized_audio_sha256 }
           : {}),
-        ...((data.hashes?.raw_text_sha256 || computedRawTextSha256)
-          ? { rawTextSha256: data.hashes?.raw_text_sha256 || computedRawTextSha256 }
+        ...(data.hashes?.raw_text_sha256
+          ? { rawTextSha256: data.hashes.raw_text_sha256 }
           : {}),
-        ...((data.hashes?.output_text_sha256 || data.hashes?.text_sha256)
-          ? { outputTextSha256: data.hashes.output_text_sha256 || data.hashes.text_sha256 }
-          : { outputTextSha256: sha256Text(data.text ?? '') }),
+        ...(suppliedOutputTextSha256
+          ? { outputTextSha256: suppliedOutputTextSha256 }
+          : {}),
         ...(data.hashes?.final_text_sha256
           ? { finalTextSha256: data.hashes.final_text_sha256 }
-          : { finalTextSha256: normalizedTextSha256 }),
+          : {}),
         normalizedTextSha256,
       };
-      const source = data.source === 'gigaam'
-        ? 'gigaam'
-        : data.source === 'whisper'
-          ? 'whisper'
-          : 'unknown';
       const words = (data.words ?? [])
         .map((word) => {
           const text = (word.text ?? word.word ?? '').trim();
@@ -801,9 +1018,60 @@ export class WhisperService {
             confidence: typeof word.confidence === 'number' && Number.isFinite(word.confidence)
               ? word.confidence
               : null,
+            avgLogprob:
+              typeof word.avg_logprob === 'number' && Number.isFinite(word.avg_logprob)
+                ? word.avg_logprob
+                : null,
+            scoreType: word.score_type?.trim() || null,
           };
         })
         .filter((word): word is NonNullable<typeof word> => word !== null);
+      const checkpointVerified = Boolean(
+        metadataSchema
+        && runtimeIdentity
+        && checkpointSelfVerified(data.model?.checkpoint)
+        && checkpointSelfVerified(runtimeMetadata?.model?.checkpoint),
+      );
+      const decoderVerified = Boolean(
+        metadataSchema
+        && runtimeIdentity
+        && decoderMetadataComplete(data.model)
+        && decoderMetadataComplete(runtimeMetadata?.model),
+      );
+      const hashesVerified = Boolean(
+        hasExplicitRaw
+        && isSha256(data.hashes?.audio_sha256)
+        && data.hashes.audio_sha256 === requestAudioSha256
+        && isSha256(data.hashes?.normalized_audio_sha256)
+        && isSha256(data.hashes?.raw_text_sha256)
+        && data.hashes.raw_text_sha256 === computedRawTextSha256,
+      );
+      const wordEvidenceVerified = Boolean(
+        hasExplicitRaw
+        && (data.words?.length ?? 0) > 0
+        && words.length === data.words?.length
+        && data.words?.every(wordHasFiniteAcousticConfidence),
+      );
+      const verification: ASRProductionContractVerification = {
+        metadataAvailable,
+        metadataSchema,
+        transcriptionSchema,
+        runtimeIdentity,
+        checkpoint: checkpointVerified,
+        decoder: decoderVerified,
+        hashes: hashesVerified,
+        wordEvidence: wordEvidenceVerified,
+        productionReady: Boolean(
+          source === 'gigaam'
+          && metadataSchema
+          && transcriptionSchema
+          && runtimeIdentity
+          && checkpointVerified
+          && decoderVerified
+          && hashesVerified
+          && wordEvidenceVerified,
+        ),
+      };
       const vadConfiguration = data.configuration?.vad;
       const vadRevision = vadConfiguration?.snapshotRevision
         || vadConfiguration?.requestedRevision
@@ -844,7 +1112,7 @@ export class WhisperService {
       return {
         schemaVersion: data.schema_version?.trim() || 'unknown',
         runtimeId: runtimeVersion,
-        checkpointVerified: data.model?.checkpoint?.verified === true,
+        checkpointVerified,
         rawText,
         normalizedText,
         normalization,
@@ -887,6 +1155,7 @@ export class WhisperService {
         },
         contextBias,
         hashes,
+        verification,
         provenance: {
           schemaVersion: data.schema_version?.trim() || 'unknown',
           runtimeId: runtimeVersion,
@@ -894,7 +1163,8 @@ export class WhisperService {
           ctcDecoder: ctcDecoder ?? null,
           contextBias,
           hashes,
-          checkpointVerified: data.model?.checkpoint?.verified === true,
+          checkpointVerified,
+          verification,
         },
         longform,
       };

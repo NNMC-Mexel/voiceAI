@@ -141,6 +141,8 @@ export interface RadiologyWordTiming {
   startMs: number;
   endMs: number;
   confidence: number | null;
+  avgLogprob?: number | null;
+  scoreType?: string | null;
   chunkIndex?: number;
 }
 
@@ -177,6 +179,114 @@ export interface RadiologyTranscriptEvidenceSpan {
   end: number;
   text: string;
   source: 'transcript';
+}
+
+export interface RadiologyTemplateEvidenceSpan {
+  atomId: string;
+  start: number;
+  end: number;
+  text: string;
+  source: 'transcript';
+  normalized: {
+    start: number;
+    end: number;
+    text: string;
+  };
+  raw: {
+    start: number;
+    end: number;
+    text: string;
+  } | null;
+}
+
+export interface RadiologyTemplateFieldAssignment {
+  id: string;
+  fieldId: string;
+  sectionId: string;
+  kind: 'slot' | 'switch' | 'explicit_normal';
+  status: 'applied' | 'ambiguous' | 'conflict' | 'invalid_unit' | 'incomplete';
+  value: unknown;
+  canonicalUnit: 'mm' | 'cm' | 'HU' | 'percent' | null;
+  unitSource: 'transcript' | 'template_schema' | null;
+  ruleId: string;
+  values?: number[];
+  formattedText?: string;
+  unit?: string;
+  conversionRuleId?: 'cm-to-mm-v1' | 'mm-to-cm-v1';
+  optionId?: string;
+  evidence: RadiologyTemplateEvidenceSpan[];
+}
+
+export interface RadiologyTemplateReviewIssue {
+  code: string;
+  severity: 'critical' | 'warning';
+  message: string;
+  sectionId?: string;
+  fieldId?: string;
+  atomId?: string;
+  evidence?: RadiologyTemplateEvidenceSpan[];
+}
+
+export interface RadiologyTemplateReviewSegment {
+  id: string;
+  sectionId: string;
+  fieldId?: string;
+  kind:
+    | 'template_literal'
+    | 'template_default'
+    | 'transcript_value'
+    | 'template_choice'
+    | 'derived'
+    | 'verbatim';
+  origin:
+    | 'template_literal'
+    | 'template_default_value'
+    | 'transcript_slot'
+    | 'transcript_switch'
+    | 'transcript_append'
+    | 'derived_from_transcript'
+    | 'dictated_conclusion';
+  text: string;
+  start: number;
+  end: number;
+  evidence: RadiologyTemplateEvidenceSpan[];
+  confirmationRequired: boolean;
+  defaultKind?: 'placeholder' | 'clinical_default';
+  unit?: string;
+}
+
+export interface RadiologyTemplateReviewSection {
+  id: string;
+  label: string;
+  /** Section body without the deterministic label. */
+  text: string;
+  mode:
+    | 'template_default'
+    | 'template_filled'
+    | 'explicit_normal'
+    | 'verbatim_fallback'
+    | 'conclusion';
+  segmentIds: string[];
+  /** Offsets of the section body in reviewDraft.fullText. */
+  start: number;
+  end: number;
+  issues: RadiologyTemplateReviewIssue[];
+}
+
+export interface RadiologyTemplateReviewDraft {
+  version: string;
+  composerVersion: string;
+  templateId: string;
+  templateSha256: string;
+  title: string;
+  fullText: string;
+  sha256: string;
+  status: 'complete' | 'partial' | 'failed';
+  sections: RadiologyTemplateReviewSection[];
+  segments: RadiologyTemplateReviewSegment[];
+  fieldAssignments: RadiologyTemplateFieldAssignment[];
+  residualAtomIds: string[];
+  issues: RadiologyTemplateReviewIssue[];
 }
 
 export interface RadiologyDictationReport {
@@ -224,6 +334,13 @@ export interface RadiologyDictationReport {
   evidenceBackedText: string;
   evidenceSha256: string;
   templateDefaults: Array<{ id: string; label: string; text: string }>;
+  /**
+   * Additive template-composer output. Older schema-v2 artifacts do not have
+   * these fields and continue to use the evidence-only report above.
+   */
+  reviewDraft?: RadiologyTemplateReviewDraft;
+  /** Compatibility mirror; canonical assignments also live in reviewDraft. */
+  fieldAssignments?: RadiologyTemplateFieldAssignment[];
 }
 
 export interface RadiologyComponentVersion {
@@ -283,6 +400,10 @@ export interface RadiologyArtifactTranscriptionChunk {
       runtime: boolean;
       checkpoint: boolean;
       hashes: boolean;
+      metadata: boolean;
+      decoder: boolean;
+      wordEvidence: boolean;
+      productionContract: boolean;
     };
   };
 }
@@ -414,6 +535,7 @@ export interface RadiologyTranscriptionArtifact {
     router: RadiologyComponentVersion;
     prompt: RadiologyComponentVersion;
     structurer: RadiologyComponentVersion;
+    composer?: RadiologyComponentVersion;
     llm: RadiologyComponentVersion | null;
     safety: RadiologyComponentVersion;
   };
@@ -422,6 +544,23 @@ export interface RadiologyTranscriptionArtifact {
     eligible: boolean;
     exclusionReasons: string[];
   };
+}
+
+export interface RadiologyRecomposeRevision {
+  schemaVersion: 1;
+  kind: 'radiology-recompose-revision';
+  sessionId: string;
+  templateId: string;
+  sourceArtifactSha256: string;
+  verbatimTranscript: {
+    text: string;
+    sha256: string;
+  };
+  normalization: RadiologyTranscriptionArtifact['normalization'];
+  routing: RadiologyTranscriptionArtifact['routing'];
+  report: RadiologyDictationReport | null;
+  safety: RadiologyTranscriptionArtifact['safety'];
+  components: RadiologyTranscriptionArtifact['components'];
 }
 
 export interface RadiologySpanCorrection {
@@ -725,6 +864,24 @@ class ApiClient {
     );
   }
 
+  async recomposeRadiologyReview(
+    sessionId: string,
+    input: {
+      verbatimTranscript: string;
+      spanCorrections: RadiologySpanCorrection[];
+    },
+  ): Promise<{ success: true; revision: RadiologyRecomposeRevision }> {
+    return this.request(
+      `/api/radiology/sessions/${encodeURIComponent(sessionId)}/recompose`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      },
+      300_000,
+    );
+  }
+
   async submitRadiologyFeedback(
     sessionId: string,
     feedback: {
@@ -737,6 +894,9 @@ class ApiClient {
         replacementText: string;
         resolution: 'confirmed_single' | 'confirmed_range' | 'confirmed_verbatim';
       }>;
+      baseDraftSha256?: string;
+      acceptedTemplateSegmentIds?: string[];
+      reviewedResidualAtomIds?: string[];
       approved: boolean;
       author?: string;
     },

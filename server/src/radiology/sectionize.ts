@@ -1,4 +1,4 @@
-import type { DocTemplate } from './doc-model.js';
+import type { BlockNode, DocTemplate, SlotDef } from './doc-model.js';
 
 export type AssignmentMethod = 'anchor' | 'rule' | 'llm' | 'unmatched';
 
@@ -175,9 +175,116 @@ function hitForPhrase(
   return hits;
 }
 
+function exactPhrasePattern(value: string): string {
+  return norm(value)
+    .trim()
+    .split(/\s+/u)
+    .filter(Boolean)
+    .map(esc)
+    .join('\\s+');
+}
+
+function hitForExactFieldAlias(
+  transcript: string,
+  alias: string,
+  blockId: string,
+  blockOrder: number,
+  fieldId: string,
+  routingVersion: string,
+): Hit[] {
+  const text = norm(transcript);
+  const body = exactPhrasePattern(alias);
+  if (!body) return [];
+  const expression = new RegExp(`(^|[^a-zа-я])(${body})(?=$|[^a-zа-я])`, 'gu');
+  const hits: Hit[] = [];
+  for (let match = expression.exec(text); match; match = expression.exec(text)) {
+    const pos = match.index + match[1].length;
+    hits.push({
+      pos,
+      end: pos + match[2].length,
+      blockId,
+      label: alias,
+      ruleId: `field-alias:${routingVersion}:${fieldId}:${norm(alias)}`,
+      method: 'rule',
+      len: match[2].length,
+      blockOrder,
+      sticky: false,
+    });
+  }
+  return hits;
+}
+
+interface FieldRoutingAlias {
+  alias: string;
+  blockId: string;
+  blockOrder: number;
+  fieldId: string;
+}
+
+function slotsFromNodes(nodes: BlockNode[]): SlotDef[] {
+  const slots: SlotDef[] = [];
+  for (const node of nodes) {
+    if (node.kind === 'slot') {
+      slots.push(node.slot);
+      continue;
+    }
+    if (node.kind === 'switch') {
+      for (const option of node.sw.options) {
+        slots.push(...slotsFromNodes(option.nodes));
+      }
+    }
+  }
+  return slots;
+}
+
+/**
+ * Builds the routing table from the versioned template schema. An alias is
+ * usable only when it names one stable field in one section; duplicates are
+ * rejected rather than resolved by template order.
+ */
+function uniqueFieldRoutingAliases(tpl: DocTemplate): FieldRoutingAlias[] {
+  if (!tpl.fieldRoutingVersion) return [];
+  const byAlias = new Map<string, FieldRoutingAlias[]>();
+  for (let blockOrder = 0; blockOrder < tpl.blocks.length; blockOrder++) {
+    const block = tpl.blocks[blockOrder];
+    if (block.id === tpl.conclusionBlockId) continue;
+    for (const slot of slotsFromNodes(block.nodes)) {
+      if (!slot.fieldId) continue;
+      for (const configuredAlias of slot.routingAliases ?? []) {
+        const alias = norm(configuredAlias).trim().replace(/\s+/gu, ' ');
+        if (!alias) continue;
+        const records = byAlias.get(alias) ?? [];
+        records.push({
+          alias,
+          blockId: block.id,
+          blockOrder,
+          fieldId: slot.fieldId,
+        });
+        byAlias.set(alias, records);
+      }
+    }
+  }
+  return [...byAlias.values()].flatMap((records) => {
+    const identities = new Set(records.map((record) => (
+      `${record.blockId}\u0000${record.fieldId}`
+    )));
+    return identities.size === 1 ? [records[0]] : [];
+  });
+}
+
 function detectHits(tpl: DocTemplate, transcript: string, bodyEnd: number): Hit[] {
   const body = transcript.slice(0, bodyEnd);
   const hits: Hit[] = [];
+  for (const fieldAlias of uniqueFieldRoutingAliases(tpl)) {
+    hits.push(...hitForExactFieldAlias(
+      body,
+      fieldAlias.alias,
+      fieldAlias.blockId,
+      fieldAlias.blockOrder,
+      fieldAlias.fieldId,
+      tpl.fieldRoutingVersion!,
+    ));
+  }
   for (let blockOrder = 0; blockOrder < tpl.blocks.length; blockOrder++) {
     const block = tpl.blocks[blockOrder];
     if (block.id === tpl.conclusionBlockId) continue;

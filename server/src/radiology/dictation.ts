@@ -16,6 +16,13 @@ import {
   type TranscriptAtom,
 } from './sectionize.js';
 import { verifyRadiologySafety, type RadiologySafetyReport } from './safety.js';
+import {
+  composeTemplateReviewDraft,
+  type TemplateFieldAssignment,
+  type TemplateNormalizationAlignmentSpan,
+  type TemplateReviewDraft,
+  type TemplateSectionAtom,
+} from './template-composer.js';
 
 export interface DictationBlock {
   id: string;
@@ -74,6 +81,13 @@ export interface DictationReport {
   numberCheck: NumberCheck;
   safety: RadiologySafetyReport;
   provenance: DictationProvenance;
+  /**
+   * Optional additive v2 fields. Existing persisted v2 artifacts remain
+   * readable without them; newly composed reports expose the immutable,
+   * physician-reviewable template draft without changing evidenceBackedText.
+   */
+  fieldAssignments?: TemplateFieldAssignment[];
+  reviewDraft?: TemplateReviewDraft;
 }
 
 export interface StructureDictationOptions {
@@ -82,6 +96,8 @@ export interface StructureDictationOptions {
    * Unresolved atoms remain unmatched; the LLM is not called.
    */
   allowLLM?: boolean;
+  rawTranscript?: string;
+  normalizationAlignment?: TemplateNormalizationAlignmentSpan[];
 }
 
 const explicitNormal = (value: string): boolean => {
@@ -228,6 +244,39 @@ export async function structureDictation(
     };
   });
   const routed = applySpanAssignments(deterministic, combinedAssignments);
+  const sectionByAtom = new Map(
+    routed.assignments.map((assignment) => [assignment.atomId, assignment.sectionId]),
+  );
+  const compositionAtoms: TemplateSectionAtom[] = routed.atoms.flatMap((atom) => {
+    const sectionId = sectionByAtom.get(atom.id);
+    if (!sectionId) return [];
+    return [{
+      atomId: atom.id,
+      sectionId,
+      start: atom.start,
+      end: atom.end,
+      text: atom.text,
+    }];
+  });
+  if (routed.dictatedConclusion && tpl.conclusionBlockId) {
+    compositionAtoms.push({
+      atomId: 'dictated-conclusion',
+      sectionId: tpl.conclusionBlockId,
+      start: routed.dictatedConclusion.start,
+      end: routed.dictatedConclusion.end,
+      text: routed.dictatedConclusion.text,
+    });
+  }
+  const reviewDraft = templateId === 'CT_ABDOMEN_MIKHAILOV'
+    ? composeTemplateReviewDraft(tpl, transcript, compositionAtoms, {
+        ...(options.rawTranscript !== undefined
+          ? { rawTranscript: options.rawTranscript }
+          : {}),
+        ...(options.normalizationAlignment
+          ? { alignment: options.normalizationAlignment }
+          : {}),
+      })
+    : undefined;
 
   const renderedDefaults = createDocEngine(templateId).build().blocks;
   const defaultById = new Map(renderedDefaults.map((block) => [
@@ -377,5 +426,11 @@ export async function structureDictation(
       sections: provenanceSections,
       unmatched: routed.unmatched,
     },
+    ...(reviewDraft
+      ? {
+          fieldAssignments: reviewDraft.fieldAssignments,
+          reviewDraft,
+        }
+      : {}),
   };
 }
