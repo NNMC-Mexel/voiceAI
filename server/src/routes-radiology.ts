@@ -574,6 +574,20 @@ export function registerRadiologyRoutes(
     }
   });
 
+  fastify.get('/api/radiology/sessions/:id/approved-report', async (request: FastifyRequest, reply: FastifyReply) => {
+    markPhiResponse(reply);
+    try {
+      const { id } = request.params as { id: string };
+      const approvedReport = await sessionService.getApprovedReport(
+        id,
+        requestActor(request),
+      );
+      return { approvedReport };
+    } catch (error) {
+      return sessionError(request, reply, error);
+    }
+  });
+
   fastify.post('/api/radiology/sessions/:id/recompose', async (request: FastifyRequest, reply: FastifyReply) => {
     markPhiResponse(reply);
     try {

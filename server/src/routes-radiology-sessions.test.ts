@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import Fastify from 'fastify';
@@ -1801,6 +1801,238 @@ test('canonical PHI sessions are owner-scoped, accept numeric JWT ids, and disab
   assert.equal(feedback[0]?.author, '101');
 });
 
+test('approved report endpoint returns the latest approved exact text and remains owner-scoped', async (t) => {
+  const rawText = 'печень без особенностей';
+  const { app, dataDir } = await fixture(
+    async (audioBase64) => verifiedTranscription(audioBase64, rawText),
+  );
+  t.after(async () => {
+    await app.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  const ownerHeaders = { 'x-test-doctor-id': '301' };
+  const otherHeaders = { 'x-test-doctor-id': '302' };
+  const createFinishedSession = async (audioMarker: string): Promise<string> => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: ownerHeaders,
+      payload: {
+        mode: 'radiology',
+        templateId: 'CT_ABDOMEN_MIKHAILOV',
+        source: 'gigaam',
+      },
+    });
+    assert.equal(created.statusCode, 201, created.body);
+    const sessionId = created.json().sessionId as string;
+    const chunk = await app.inject({
+      method: 'POST',
+      url: `/api/sessions/${sessionId}/chunks`,
+      headers: ownerHeaders,
+      payload: {
+        audio_base64: Buffer.from(audioMarker).toString('base64'),
+        chunk_index: 0,
+      },
+    });
+    assert.equal(chunk.statusCode, 200, chunk.body);
+    const finished = await app.inject({
+      method: 'POST',
+      url: `/api/sessions/${sessionId}/finish`,
+      headers: ownerHeaders,
+      payload: {},
+    });
+    assert.equal(finished.statusCode, 200, finished.body);
+    return sessionId;
+  };
+
+  const sessionId = await createFinishedSession('approved-report-main');
+  const submit = (payload: {
+    idempotencyKey: string;
+    finalReport: string;
+    approved: boolean;
+    verbatimTranscript?: string;
+    spanCorrections?: Array<{
+      start: number;
+      end: number;
+      originalText: string;
+      correctedText: string;
+      entityType: string;
+      modality: string;
+    }>;
+  }) => app.inject({
+    method: 'POST',
+    url: `/api/radiology/sessions/${sessionId}/feedback`,
+    headers: ownerHeaders,
+    payload: {
+      ...payload,
+      verbatimTranscript: payload.verbatimTranscript ?? rawText,
+      spanCorrections: payload.spanCorrections ?? [],
+    },
+  });
+  const firstApproved = await submit({
+    idempotencyKey: 'approved-report-first-0001',
+    finalReport: rawText,
+    approved: true,
+  });
+  assert.equal(firstApproved.statusCode, 201, firstApproved.body);
+  const firstApprovedRead = await app.inject({
+    method: 'GET',
+    url: `/api/radiology/sessions/${sessionId}/approved-report`,
+    headers: ownerHeaders,
+  });
+  assert.equal(firstApprovedRead.statusCode, 200, firstApprovedRead.body);
+  assert.match(
+    firstApprovedRead.json().approvedReport.sourceArtifactSha256,
+    /^[a-f0-9]{64}$/u,
+  );
+  assert.equal(firstApprovedRead.json().approvedReport.recomposeRevision, null);
+  const ignoredUnapproved = await submit({
+    idempotencyKey: 'approved-report-draft-0001',
+    finalReport: 'неподтверждённый черновик',
+    approved: false,
+  });
+  assert.equal(ignoredUnapproved.statusCode, 201, ignoredUnapproved.body);
+  const correctedVerbatim = `${rawText}.`;
+  const exactLatestText = `${correctedVerbatim}\n`;
+  const latestApproved = await submit({
+    idempotencyKey: 'approved-report-latest-0001',
+    finalReport: exactLatestText,
+    approved: true,
+    verbatimTranscript: correctedVerbatim,
+    spanCorrections: [{
+      start: rawText.length,
+      end: rawText.length,
+      originalText: '',
+      correctedText: '.',
+      entityType: 'punctuation',
+      modality: 'CT',
+    }],
+  });
+  assert.equal(latestApproved.statusCode, 201, latestApproved.body);
+
+  const unauthenticated = await app.inject({
+    method: 'GET',
+    url: `/api/radiology/sessions/${sessionId}/approved-report`,
+  });
+  assert.equal(unauthenticated.statusCode, 403, unauthenticated.body);
+  const forbidden = await app.inject({
+    method: 'GET',
+    url: `/api/radiology/sessions/${sessionId}/approved-report`,
+    headers: otherHeaders,
+  });
+  assert.equal(forbidden.statusCode, 403, forbidden.body);
+  assert.equal(forbidden.headers['cache-control'], 'no-store');
+
+  const response = await app.inject({
+    method: 'GET',
+    url: `/api/radiology/sessions/${sessionId}/approved-report`,
+    headers: ownerHeaders,
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.headers['cache-control'], 'no-store');
+  const approvedReport = response.json().approvedReport;
+  assert.deepEqual(Object.keys(response.json()), ['approvedReport']);
+  assert.deepEqual(Object.keys(approvedReport).sort(), [
+    'acceptedTemplateSegmentIds',
+    'approvedAt',
+    'author',
+    'baseDraftSha256',
+    'createdAt',
+    'feedbackId',
+    'finalReport',
+    'finalReportSha256',
+    'recomposeRevision',
+    'reviewedResidualAtomIds',
+    'revision',
+    'sessionId',
+    'sourceArtifactSha256',
+    'templateId',
+    'verbatimTranscript',
+  ]);
+  assert.equal(approvedReport.sessionId, sessionId);
+  assert.equal(approvedReport.templateId, 'CT_ABDOMEN_MIKHAILOV');
+  assert.equal(approvedReport.feedbackId, latestApproved.json().feedbackId);
+  assert.notEqual(approvedReport.feedbackId, firstApproved.json().feedbackId);
+  assert.equal(approvedReport.revision, 3);
+  assert.equal(approvedReport.author, '301');
+  assert.equal(approvedReport.verbatimTranscript, correctedVerbatim);
+  assert.equal(approvedReport.finalReport, exactLatestText);
+  assert.equal(
+    approvedReport.finalReportSha256,
+    createHash('sha256').update(exactLatestText, 'utf8').digest('hex'),
+  );
+  assert.equal(approvedReport.approvedAt, approvedReport.createdAt);
+  assert.equal(approvedReport.baseDraftSha256, null);
+  assert.deepEqual(approvedReport.acceptedTemplateSegmentIds, []);
+  assert.deepEqual(approvedReport.reviewedResidualAtomIds, []);
+  assert.equal(approvedReport.recomposeRevision.sessionId, sessionId);
+  assert.equal(approvedReport.recomposeRevision.templateId, 'CT_ABDOMEN_MIKHAILOV');
+  assert.equal(
+    approvedReport.sourceArtifactSha256,
+    approvedReport.recomposeRevision.sourceArtifactSha256,
+  );
+  assert.equal(
+    approvedReport.recomposeRevision.verbatimTranscript.text,
+    correctedVerbatim,
+  );
+  assert.equal(
+    approvedReport.recomposeRevision.verbatimTranscript.sha256,
+    createHash('sha256').update(correctedVerbatim, 'utf8').digest('hex'),
+  );
+
+  approvedReport.acceptedTemplateSegmentIds.push('client-mutation');
+  approvedReport.recomposeRevision.verbatimTranscript.text = 'client-mutation';
+  const immutableReplay = await app.inject({
+    method: 'GET',
+    url: `/api/radiology/sessions/${sessionId}/approved-report`,
+    headers: ownerHeaders,
+  });
+  assert.equal(immutableReplay.statusCode, 200, immutableReplay.body);
+  assert.deepEqual(
+    immutableReplay.json().approvedReport.acceptedTemplateSegmentIds,
+    [],
+  );
+  assert.equal(
+    immutableReplay.json().approvedReport.recomposeRevision.verbatimTranscript.text,
+    correctedVerbatim,
+  );
+
+  const artifactPath = path.join(
+    dataDir,
+    'schema-v2',
+    'artifacts',
+    `${sessionId}.json`,
+  );
+  const outOfSyncArtifact = JSON.parse(await readFile(artifactPath, 'utf8'));
+  outOfSyncArtifact.components.safety.version = 'out-of-sync-test';
+  await writeFile(artifactPath, `${JSON.stringify(outOfSyncArtifact, null, 2)}\n`, 'utf8');
+  const outOfSync = await app.inject({
+    method: 'GET',
+    url: `/api/radiology/sessions/${sessionId}/approved-report`,
+    headers: ownerHeaders,
+  });
+  assert.equal(outOfSync.statusCode, 500, outOfSync.body);
+  assert.equal(outOfSync.json().error, 'approved_report_integrity_mismatch');
+
+  const withoutApprovalId = await createFinishedSession('approved-report-empty');
+  const withoutApproval = await app.inject({
+    method: 'GET',
+    url: `/api/radiology/sessions/${withoutApprovalId}/approved-report`,
+    headers: ownerHeaders,
+  });
+  assert.equal(withoutApproval.statusCode, 404, withoutApproval.body);
+  assert.equal(withoutApproval.json().error, 'approved_report_not_found');
+
+  const missing = await app.inject({
+    method: 'GET',
+    url: '/api/radiology/sessions/00000000-0000-4000-8000-000000000000/approved-report',
+    headers: ownerHeaders,
+  });
+  assert.equal(missing.statusCode, 404, missing.body);
+  assert.equal(missing.json().error, 'artifact_not_found');
+});
+
 test('radiology sessions enforce active/chunk/total-byte limits and refresh TTL on activity', async (t) => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'voicemed-radiology-limits-'));
   t.after(async () => {
@@ -2212,6 +2444,16 @@ test('template review feedback is bound to immutable draft SHA, segment ids, and
     },
   });
   assert.equal(approved.statusCode, 201, approved.body);
+  const approvedDraftRead = await app.inject({
+    method: 'GET',
+    url: `/api/radiology/sessions/${sessionId}/approved-report`,
+  });
+  assert.equal(approvedDraftRead.statusCode, 200, approvedDraftRead.body);
+  assert.equal(approvedDraftRead.json().approvedReport.baseDraftSha256, draft.sha256);
+  assert.deepEqual(
+    approvedDraftRead.json().approvedReport.acceptedTemplateSegmentIds,
+    acceptedTemplateSegmentIds,
+  );
   const [stored] = await store.listFeedback(sessionId);
   assert.equal(stored.baseDraftSha256, draft.sha256);
   assert.deepEqual(stored.acceptedTemplateSegmentIds, acceptedTemplateSegmentIds);

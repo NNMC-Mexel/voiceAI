@@ -1,9 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Mic, Search, Copy, Check, LogOut, Settings, Shield, Stethoscope, Lightbulb } from 'lucide-react';
+import {
+  AlertTriangle,
+  Check,
+  ChevronDown,
+  Copy,
+  Download,
+  FileText,
+  Lightbulb,
+  LogOut,
+  Mic,
+  RotateCcw,
+  Search,
+  Settings,
+  Shield,
+  Stethoscope,
+} from 'lucide-react';
 import { apiClient, ApiRequestError } from '../api/client';
 import type {
   DoctorInfo,
   RadiologyApplied,
+  RadiologyApprovedReport,
   RadiologyBlockHint,
   RadiologyDictationReport,
   RadiologyReport,
@@ -89,6 +105,102 @@ function audioFileExtension(mimeType: string): string {
     'audio/webm': 'webm',
   };
   return knownExtensions[normalized] ?? 'webm';
+}
+
+function safeProtocolFilename(value: string): string {
+  const normalized = value
+    .normalize('NFKC')
+    .replace(/[^\p{L}\p{N}._-]+/gu, '_')
+    .replace(/^[_.]+|[_.]+$/gu, '')
+    .slice(0, 80);
+  return normalized || 'radiology-protocol';
+}
+
+function downloadUtf8Text(text: string, filename: string): void {
+  const blob = new Blob(['\uFEFF', text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  try {
+    link.href = url;
+    link.download = filename;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+  } finally {
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
+}
+
+function localDateStamp(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function formatLocalDateTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? 'дата не указана'
+    : date.toLocaleString('ru-RU');
+}
+
+async function validateApprovedReport(
+  approvedReport: RadiologyApprovedReport,
+  artifact: RadiologyTranscriptionArtifact,
+): Promise<void> {
+  const revision = approvedReport.recomposeRevision;
+  const effectiveApprovedReport = revision?.report ?? artifact.report;
+  const approvedDraft = effectiveApprovedReport?.reviewDraft;
+  const acceptedIds = new Set(approvedReport.acceptedTemplateSegmentIds);
+  const reviewedResidualIds = new Set(approvedReport.reviewedResidualAtomIds);
+  if (
+    approvedReport.sessionId !== artifact.sessionId
+    || approvedReport.templateId !== artifact.templateId
+    || !/^[a-f0-9]{64}$/u.test(approvedReport.sourceArtifactSha256)
+    || !approvedReport.verbatimTranscript.trim()
+    || !approvedReport.finalReport.trim()
+    || !/^[a-f0-9]{64}$/u.test(approvedReport.finalReportSha256)
+    || acceptedIds.size !== approvedReport.acceptedTemplateSegmentIds.length
+    || reviewedResidualIds.size !== approvedReport.reviewedResidualAtomIds.length
+    || (
+      revision !== null
+      && (
+        revision.sessionId !== artifact.sessionId
+        || revision.templateId !== artifact.templateId
+        || revision.sourceArtifactSha256 !== approvedReport.sourceArtifactSha256
+        || revision.verbatimTranscript.text !== approvedReport.verbatimTranscript
+      )
+    )
+    || (approvedReport.baseDraftSha256 ?? null) !== (approvedDraft?.sha256 ?? null)
+    || [...acceptedIds].some((id) => !approvedDraft?.segments.some((segment) => (
+      segment.id === id
+      && segment.confirmationRequired
+      && segment.defaultKind !== 'placeholder'
+    )))
+    || [...reviewedResidualIds].some((id) => !approvedDraft?.residualAtomIds.includes(id))
+  ) {
+    throw new Error('Сервер вернул подтверждённый протокол для другого исследования');
+  }
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return;
+  const digestText = async (text: string): Promise<string> => {
+    const digest = await subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return [...new Uint8Array(digest)]
+      .map((value) => value.toString(16).padStart(2, '0'))
+      .join('');
+  };
+  const finalReportSha256 = await digestText(approvedReport.finalReport);
+  const verbatimSha256 = await digestText(approvedReport.verbatimTranscript);
+  const expectedVerbatimSha256 = revision?.verbatimTranscript.sha256
+    ?? artifact.rawTranscript.sha256;
+  if (
+    finalReportSha256 !== approvedReport.finalReportSha256
+    || verbatimSha256 !== expectedVerbatimSha256
+  ) {
+    throw new Error('Контрольная сумма подтверждённого протокола не совпала');
+  }
 }
 
 function createIdempotencyKey(): string {
@@ -480,6 +592,7 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
   const [templatePreview, setTemplatePreview] = useState<RadiologyTemplatePreview | null>(null);
   const [templatePreviewLoading, setTemplatePreviewLoading] = useState(false);
   const [artifact, setArtifact] = useState<RadiologyTranscriptionArtifact | null>(null);
+  const [approvedReport, setApprovedReport] = useState<RadiologyApprovedReport | null>(null);
   const [reviewRevision, setReviewRevision] = useState<RadiologyRecomposeRevision | null>(null);
   const [recomposingReview, setRecomposingReview] = useState(false);
   const [acceptedTemplateSegmentIds, setAcceptedTemplateSegmentIds] = useState<Set<string>>(
@@ -490,7 +603,14 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
   );
   const [verbatimTranscript, setVerbatimTranscript] = useState('');
   const [finalReportText, setFinalReportText] = useState('');
-  const [feedbackState, setFeedbackState] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [finalReportManuallyEdited, setFinalReportManuallyEdited] = useState(false);
+  const [finalReportEditing, setFinalReportEditing] = useState(false);
+  const [compositionReviewOpen, setCompositionReviewOpen] = useState(false);
+  const [sourceReviewOpen, setSourceReviewOpen] = useState(false);
+  const [reviewError, setReviewError] = useState('');
+  const [feedbackState, setFeedbackState] = useState<
+    'idle' | 'saving' | 'saved' | 'saved_unverified'
+  >('idle');
   const recogRef = useRef<SpeechRecognitionLike | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const sessionIdRef = useRef<string | null>(null);
@@ -498,6 +618,11 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
   const browserGenerationRef = useRef(0);
   const operationInFlightRef = useRef(false);
   const feedbackSavingRef = useRef(false);
+  const finalReportEditBaselineRef = useRef('');
+  const finalReportEditFeedbackBaselineRef = useRef<'idle' | 'saved'>('idle');
+  const finalReportEditManualBaselineRef = useRef(false);
+  const recomposeGenerationRef = useRef(0);
+  const copyResetTimerRef = useRef<number | null>(null);
   const feedbackSubmissionRef = useRef<{
     payloadSignature: string;
     idempotencyKey: string;
@@ -587,30 +712,98 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
     reviewSpanCorrections.length > 0
     && reviewRevision?.verbatimTranscript.text !== verbatimTranscript
   );
-  const hardApprovalBlockReason = artifact
-    ? artifact.legacySchemaVersion === 1
-      ? 'Artifact v1 нужно повторно прогнать через pipeline v2.'
-      : reviewRequiresRecompose
-        ? 'После исправления дословной расшифровки пересоберите шаблонный черновик.'
-      : effectiveReport === null
-        ? 'Безопасный черновик не построен; запись нужно обработать повторно.'
-        : unresolvedCriticalNormalization
-          ? 'Есть неоднозначность нормализации; сначала нужна явная resolution врача.'
-          : artifact.longform.degraded
-            || artifact.longform.seamConflicts.some((seam) => seam.critical)
-            ? 'Long-form декодирование degraded или содержит критический overlap-конфликт.'
-            : (effectiveRouting?.unmatchedAtomIds.length ?? 0) > 0
-              ? 'Есть клинические фрагменты без секции; сначала требуется повторная маршрутизация.'
-              : incompleteRequiredFieldIds.length > 0
-                ? `Заполните обязательные поля шаблона: ${incompleteRequiredFieldIds.join(', ')}.`
-              : reviewDraft?.status === 'failed'
-                ? 'Шаблонный черновик не построен; используйте evidence-backed текст и повторите обработку.'
-                : unresolvedCriticalDraftIssues.length > 0
-                  ? 'В шаблонном черновике остались критические ошибки разбора.'
-                  : unreviewedResidualAtomIds.length > 0
-                    ? 'Проверьте все остаточные дословные фрагменты перед подтверждением.'
-                    : null
-    : null;
+  const reviewMutationBusy = recomposingReview || feedbackState === 'saving';
+  const feedbackLocked = feedbackState === 'saved' || feedbackState === 'saved_unverified';
+  const approvedReady = Boolean(
+    feedbackState === 'saved'
+    && approvedReport
+    && approvedReport.finalReport === finalReportText,
+  );
+  const approvalBlockReasons = useMemo(() => {
+    if (!artifact) return [];
+    const reasons: string[] = [];
+    if (artifact.legacySchemaVersion === 1) {
+      reasons.push('Artifact v1 нужно повторно прогнать через pipeline v2.');
+    }
+    if (!finalReportText.trim()) {
+      reasons.push('Финальный протокол пуст. Добавьте текст перед подтверждением.');
+    }
+    if (reviewRequiresRecompose) {
+      reasons.push('После исправления дословной расшифровки пересоберите шаблонный черновик.');
+    }
+    if (effectiveReport === null) {
+      reasons.push('Безопасный черновик не построен; запись нужно обработать повторно.');
+    }
+    if (unresolvedCriticalNormalization) {
+      reasons.push('Есть неоднозначность в распознанном фрагменте. Исправьте дословную расшифровку и пересоберите протокол.');
+    }
+    if (
+      artifact.longform.degraded
+      || artifact.longform.seamConflicts.some((seam) => seam.critical)
+    ) {
+      reasons.push('Длинная запись обработана в резервном режиме или содержит критический конфликт на стыке фрагментов.');
+    }
+    if ((effectiveRouting?.unmatchedAtomIds.length ?? 0) > 0) {
+      reasons.push('Есть клинические фрагменты без секции; сначала требуется повторная маршрутизация.');
+    }
+    if (incompleteRequiredFieldIds.length > 0) {
+      reasons.push(`Заполните обязательные поля шаблона: ${incompleteRequiredFieldIds.join(', ')}.`);
+    }
+    if (reviewDraft?.status === 'failed') {
+      reasons.push('Шаблонный черновик не построен безопасно. Проверьте исходный текст и повторите обработку.');
+    }
+    if (unresolvedCriticalDraftIssues.length > 0) {
+      reasons.push('В шаблонном черновике остались критические ошибки разбора.');
+    }
+    if (unreviewedResidualAtomIds.length > 0) {
+      reasons.push('Проверьте все остаточные дословные фрагменты перед подтверждением.');
+    }
+    if (effectiveSafety?.approvalBlocked) {
+      reasons.push('Проверки безопасности не пройдены. Подробности доступны в разделе расшифровки и ошибок.');
+    }
+    return [...new Set(reasons)];
+  }, [
+    artifact,
+    effectiveReport,
+    effectiveRouting,
+    effectiveSafety,
+    finalReportText,
+    incompleteRequiredFieldIds,
+    reviewDraft,
+    reviewRequiresRecompose,
+    unresolvedCriticalDraftIssues,
+    unresolvedCriticalNormalization,
+    unreviewedResidualAtomIds,
+  ]);
+  const hardApprovalBlockReason = approvalBlockReasons[0] ?? null;
+
+  const confirmDiscardCurrentReview = useCallback((ignoreManualInput = false): boolean => {
+    const hasUnsavedManualInput = !ignoreManualInput && input.trim().length > 0;
+    if (!artifact) {
+      if (!hasUnsavedManualInput) return true;
+      return window.confirm(
+        'В поле ручной расшифровки есть несохранённый текст. Уйти и потерять его?',
+      );
+    }
+    if (approvedReady && !hasUnsavedManualInput) return true;
+    if (approvedReady) {
+      return window.confirm(
+        'В поле ручной расшифровки есть несохранённый текст. Уйти и потерять его?',
+      );
+    }
+    if (feedbackState === 'saved_unverified') {
+      return window.confirm(
+        `Подтверждение сохранено, но контрольная копия ещё не сверена.${
+          hasUnsavedManualInput ? ' В поле ручной расшифровки также есть несохранённый текст.' : ''
+        } Уйти до повторной сверки с сервером?`,
+      );
+    }
+    return window.confirm(
+      `Текущий протокол ещё не подтверждён.${
+        hasUnsavedManualInput ? ' В поле ручной расшифровки также есть несохранённый текст.' : ''
+      } Уйти и потерять несохранённые правки?`,
+    );
+  }, [approvedReady, artifact, feedbackState, input]);
 
   const {
     isRecording,
@@ -649,6 +842,7 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
     ).length ?? 0;
     const residualCount = nextReviewDraft?.residualAtomIds.length ?? 0;
     setArtifact(nextArtifact);
+    setApprovedReport(null);
     setReviewRevision(null);
     setRecomposingReview(false);
     const initiallyAcceptedTemplateSegmentIds = initiallyAcceptedTemplateSegments(
@@ -666,6 +860,21 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
           )
         : nextArtifact.report?.fullText ?? '',
     );
+    setFinalReportManuallyEdited(false);
+    setFinalReportEditing(false);
+    setCompositionReviewOpen(Boolean(
+      nextReviewDraft
+      && (
+        nextReviewDraft.status === 'failed'
+        || nextReviewDraft.residualAtomIds.length > 0
+        || nextReviewDraft.fieldAssignments.some((assignment) => assignment.status !== 'applied')
+      )
+    ));
+    setSourceReviewOpen(
+      nextArtifact.normalization.issues.some((issue) => issue.severity === 'critical'),
+    );
+    setCopied(false);
+    setReviewError('');
     feedbackSubmissionRef.current = null;
     setCommands(transcript ? [transcript] : []);
     setReport(displayReport);
@@ -689,6 +898,36 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
       templateId: nextArtifact.templateId,
     });
     clearStoredRadiologyPointer(PENDING_RADIOLOGY_SESSION_KEY);
+  }, []);
+
+  const applyApprovedReport = useCallback((
+    nextApprovedReport: RadiologyApprovedReport,
+    sourceArtifact: RadiologyTranscriptionArtifact,
+  ) => {
+    const revision = nextApprovedReport.recomposeRevision;
+    const nextReport = revision?.report ?? sourceArtifact.report;
+    const nextRouting = revision?.routing ?? sourceArtifact.routing;
+    const nextDraft = nextReport?.reviewDraft;
+    const acceptedIds = new Set(nextApprovedReport.acceptedTemplateSegmentIds);
+    const reviewedIds = new Set(nextApprovedReport.reviewedResidualAtomIds);
+    const composedText = nextDraft
+      ? composeAcceptedReviewDraftText(nextDraft, acceptedIds, nextRouting.atoms)
+      : nextReport?.fullText ?? '';
+    setApprovedReport(nextApprovedReport);
+    setReviewRevision(revision);
+    setVerbatimTranscript(nextApprovedReport.verbatimTranscript);
+    setAcceptedTemplateSegmentIds(acceptedIds);
+    setReviewedResidualAtomIds(reviewedIds);
+    setFinalReportText(nextApprovedReport.finalReport);
+    setFinalReportManuallyEdited(nextApprovedReport.finalReport !== composedText);
+    setFinalReportEditing(false);
+    setCompositionReviewOpen(false);
+    setSourceReviewOpen(false);
+    setCopied(false);
+    setReviewError('');
+    setReport(nextReport ? toDisplayReport(nextReport) : null);
+    feedbackSubmissionRef.current = null;
+    setFeedbackState('saved');
   }, []);
 
   useEffect(() => {
@@ -738,7 +977,7 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
             if (cancelled) return;
             const terminal =
               requestError instanceof ApiRequestError
-              && [400, 403, 404, 410].includes(requestError.status);
+              && [400, 403, 404, 409, 410].includes(requestError.status);
             if (terminal) {
               clearStoredRadiologyPointer(key);
               continue;
@@ -762,9 +1001,33 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
             continue;
           }
 
+          let recoveredApprovedReport: RadiologyApprovedReport | null = null;
+          let approvedReportLoadError = '';
+          try {
+            const response = await apiClient.getRadiologyApprovedReport(pointer.sessionId);
+            await validateApprovedReport(response.approvedReport, recoveredArtifact);
+            recoveredApprovedReport = response.approvedReport;
+          } catch (approvedError) {
+            const notFound = approvedError instanceof ApiRequestError
+              && approvedError.status === 404;
+            if (!notFound) {
+              approvedReportLoadError = approvedError instanceof Error
+                ? approvedError.message
+                : 'Не удалось восстановить подтверждённую версию протокола';
+            }
+          }
+
           selectedTemplateIdRef.current = pointer.templateId;
           setSelectedId(pointer.templateId);
           applyArtifact(recoveredArtifact);
+          if (recoveredApprovedReport) {
+            applyApprovedReport(recoveredApprovedReport, recoveredArtifact);
+          } else if (approvedReportLoadError) {
+            setFeedbackState('saved_unverified');
+            setReviewError(
+              `Черновик восстановлен, но подтверждённую версию загрузить не удалось: ${approvedReportLoadError}`,
+            );
+          }
           setError('');
           return;
         }
@@ -776,7 +1039,7 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
     return () => {
       cancelled = true;
     };
-  }, [applyArtifact, loading, templates]);
+  }, [applyApprovedReport, applyArtifact, loading, templates]);
 
   // Подсказки «что можно диктовать» для выбранного шаблона.
   useEffect(() => {
@@ -820,6 +1083,7 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
 
   const clearClinicalResult = useCallback(() => {
     setArtifact(null);
+    setApprovedReport(null);
     setReviewRevision(null);
     setRecomposingReview(false);
     setAcceptedTemplateSegmentIds(new Set());
@@ -827,8 +1091,15 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
     setReport(null);
     setCommands([]);
     setApplied([]);
+    setInput('');
     setVerbatimTranscript('');
     setFinalReportText('');
+    setFinalReportManuallyEdited(false);
+    setFinalReportEditing(false);
+    setCompositionReviewOpen(false);
+    setSourceReviewOpen(false);
+    setReviewError('');
+    setCopied(false);
     setFeedbackState('idle');
   }, []);
 
@@ -845,9 +1116,11 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
   const finishClientTranscriptArtifact = useCallback(async (
     transcript: string,
     source: 'browser' | 'manual' = 'browser',
-  ) => {
+  ): Promise<void> => {
     const clean = transcript.trim();
     if (!selectedId || !clean || operationInFlightRef.current) return;
+    if (!confirmDiscardCurrentReview(source === 'manual')) return;
+    clearClinicalResult();
     operationInFlightRef.current = true;
     let pending = pendingClientTranscriptRef.current;
     if (
@@ -894,7 +1167,7 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
       operationInFlightRef.current = false;
       if (mountedRef.current) setProcessingAudio(false);
     }
-  }, [applyArtifact, selectedId]);
+  }, [applyArtifact, clearClinicalResult, confirmDiscardCurrentReview, selectedId]);
 
   const startBrowserListening = useCallback(() => {
     if (!BROWSER_ASR_FALLBACK_ENABLED || !browserPhiConsent) {
@@ -907,6 +1180,7 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
       || pendingClientTranscriptRef.current
       || recoveringArtifact
     ) return;
+    if (!confirmDiscardCurrentReview()) return;
     const recog = getSpeechRecognition();
     if (!recog) {
       setBrowserPhiConsent(false);
@@ -978,6 +1252,7 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
   }, [
     browserPhiConsent,
     clearClinicalResult,
+    confirmDiscardCurrentReview,
     finishClientTranscriptArtifact,
     recoveringArtifact,
   ]);
@@ -994,6 +1269,7 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
       || isStopping
       || startingRecording
     ) return;
+    if (!confirmDiscardCurrentReview()) return;
     setStartingRecording(true);
     setError('');
     setRetentionNotice('');
@@ -1012,6 +1288,7 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
   }, [
     audioBlob,
     clearClinicalResult,
+    confirmDiscardCurrentReview,
     isRecording,
     isStopping,
     processingAudio,
@@ -1203,10 +1480,44 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
           // Already inactive.
         }
       }
+      if (copyResetTimerRef.current !== null) {
+        window.clearTimeout(copyResetTimerRef.current);
+        copyResetTimerRef.current = null;
+      }
       sessionIdRef.current = null;
       pendingClientTranscriptRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    const hasUnpersistedWork = Boolean(
+      input.trim()
+      || (artifact && !approvedReady)
+      || listening
+      || startingRecording
+      || isStopping
+      || processingAudio
+      || hasPendingServerAudio
+      || hasPendingClientTranscript,
+    );
+    if (!hasUnpersistedWork) return;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeUnload);
+    return () => window.removeEventListener('beforeunload', warnBeforeUnload);
+  }, [
+    approvedReady,
+    artifact,
+    hasPendingClientTranscript,
+    hasPendingServerAudio,
+    input,
+    isStopping,
+    listening,
+    processingAudio,
+    startingRecording,
+  ]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -1214,46 +1525,152 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
     return templates.filter((t) => (t.name + ' ' + t.title).toLowerCase().includes(q));
   }, [query, templates]);
 
-  const handleCopy = useCallback(() => {
-    const text = artifact && report
-      ? finalReportText
+  const handleCopy = useCallback(async () => {
+    if (artifact && (!approvedReady || finalReportEditing)) return;
+    const text = artifact
+      ? approvedReport?.finalReport ?? ''
       : report?.text ?? templatePreview?.text ?? '';
-    if (!text) return;
-    navigator.clipboard.writeText(text).then(() => {
+    if (!text.trim()) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setReviewError('');
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    });
-  }, [artifact, finalReportText, report, templatePreview]);
+      if (copyResetTimerRef.current !== null) {
+        window.clearTimeout(copyResetTimerRef.current);
+      }
+      copyResetTimerRef.current = window.setTimeout(() => {
+        copyResetTimerRef.current = null;
+        setCopied(false);
+      }, 1500);
+    } catch {
+      setReviewError('Не удалось скопировать протокол. Разрешите доступ к буферу обмена или выделите текст вручную.');
+    }
+  }, [approvedReady, approvedReport, artifact, finalReportEditing, report, templatePreview]);
+
+  const handleDownloadReport = useCallback(() => {
+    if (
+      !artifact
+      || !selected
+      || !approvedReady
+      || !approvedReport
+      || finalReportEditing
+      || !approvedReport.finalReport.trim()
+    ) return;
+    const approvedDate = new Date(approvedReport.approvedAt);
+    const date = localDateStamp(
+      Number.isNaN(approvedDate.getTime()) ? new Date() : approvedDate,
+    );
+    downloadUtf8Text(
+      approvedReport.finalReport,
+      `${safeProtocolFilename(selected.name)}-${date}-final.txt`,
+    );
+  }, [approvedReady, approvedReport, artifact, finalReportEditing, selected]);
+
+  const composeReviewText = useCallback((acceptedIds: Set<string>): string => {
+    if (reviewDraft) {
+      return composeAcceptedReviewDraftText(
+        reviewDraft,
+        acceptedIds,
+        effectiveRouting?.atoms,
+      );
+    }
+    return effectiveReport?.fullText ?? '';
+  }, [effectiveReport, effectiveRouting, reviewDraft]);
+
+  const resetManualFinalReport = useCallback(() => {
+    setFinalReportText(composeReviewText(acceptedTemplateSegmentIds));
+    setFinalReportManuallyEdited(false);
+    setFinalReportEditing(false);
+    setReviewError('');
+    setCopied(false);
+    setFeedbackState('idle');
+  }, [acceptedTemplateSegmentIds, composeReviewText]);
+
+  const beginFinalReportEdit = useCallback(() => {
+    if (reviewMutationBusy || feedbackState === 'saved_unverified') return;
+    finalReportEditBaselineRef.current = finalReportText;
+    finalReportEditFeedbackBaselineRef.current = feedbackState === 'saved' ? 'saved' : 'idle';
+    finalReportEditManualBaselineRef.current = finalReportManuallyEdited;
+    setReviewError('');
+    setCopied(false);
+    setFeedbackState('idle');
+    setFinalReportEditing(true);
+  }, [feedbackState, finalReportManuallyEdited, finalReportText, reviewMutationBusy]);
+
+  const cancelFinalReportEdit = useCallback(() => {
+    setFinalReportText(finalReportEditBaselineRef.current);
+    setFinalReportManuallyEdited(finalReportEditManualBaselineRef.current);
+    setFeedbackState(finalReportEditFeedbackBaselineRef.current);
+    setCopied(false);
+    setReviewError('');
+    setFinalReportEditing(false);
+  }, []);
+
+  const finishFinalReportEdit = useCallback(() => {
+    if (finalReportText === finalReportEditBaselineRef.current) {
+      setFinalReportManuallyEdited(finalReportEditManualBaselineRef.current);
+      setFeedbackState(finalReportEditFeedbackBaselineRef.current);
+    }
+    setFinalReportEditing(false);
+  }, [finalReportText]);
 
   const recomposeReviewDraft = useCallback(async () => {
     if (
       !artifact
       || !selected
       || reviewSpanCorrections.length === 0
-      || recomposingReview
-      || feedbackState === 'saving'
+      || reviewMutationBusy
+      || feedbackLocked
     ) {
       return;
     }
+    if (
+      finalReportManuallyEdited
+      && !window.confirm(
+        'Пересборка заменит ручные изменения финального протокола. Продолжить?',
+      )
+    ) {
+      return;
+    }
+    const requestGeneration = ++recomposeGenerationRef.current;
+    const requestedVerbatimTranscript = verbatimTranscript;
+    const previouslyAcceptedIds = new Set(acceptedTemplateSegmentIds);
     setRecomposingReview(true);
-    setError('');
+    setReviewError('');
     try {
       const { revision } = await apiClient.recomposeRadiologyReview(
         artifact.sessionId,
         {
-          verbatimTranscript,
+          verbatimTranscript: requestedVerbatimTranscript,
           spanCorrections: reviewSpanCorrections,
         },
       );
       if (
+        !mountedRef.current
+        || requestGeneration !== recomposeGenerationRef.current
+      ) {
+        return;
+      }
+      if (
         revision.sessionId !== artifact.sessionId
         || revision.templateId !== artifact.templateId
         || !/^[a-f0-9]{64}$/u.test(revision.sourceArtifactSha256)
+        || revision.verbatimTranscript.text !== requestedVerbatimTranscript
       ) {
         throw new Error('Сервер вернул пересборку для другого artifact');
       }
       const nextDraft = revision.report?.reviewDraft;
-      const accepted = initiallyAcceptedTemplateSegments(nextDraft);
+      const accepted = reviewDraft
+        ? new Set(
+            nextDraft?.segments
+              .filter((segment) => (
+                segment.confirmationRequired
+                && segment.defaultKind !== 'placeholder'
+                && previouslyAcceptedIds.has(segment.id)
+              ))
+              .map((segment) => segment.id) ?? [],
+          )
+        : initiallyAcceptedTemplateSegments(nextDraft);
       setReviewRevision(revision);
       setAcceptedTemplateSegmentIds(accepted);
       setReviewedResidualAtomIds(new Set());
@@ -1266,22 +1683,41 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
             )
           : revision.report?.fullText ?? '',
       );
+      setFinalReportManuallyEdited(false);
+      setFinalReportEditing(false);
+      setCompositionReviewOpen(Boolean(
+        nextDraft
+        && (
+          nextDraft.status === 'failed'
+          || nextDraft.residualAtomIds.length > 0
+          || nextDraft.fieldAssignments.some((assignment) => assignment.status !== 'applied')
+        )
+      ));
+      setSourceReviewOpen(
+        revision.normalization.issues.some((issue) => issue.severity === 'critical'),
+      );
+      setCopied(false);
       setReport(revision.report ? toDisplayReport(revision.report) : null);
       feedbackSubmissionRef.current = null;
       setFeedbackState('idle');
     } catch (recomposeError) {
-      setError(
+      setReviewError(
         recomposeError instanceof Error
           ? recomposeError.message
           : 'Не удалось пересобрать черновик после исправления расшифровки',
       );
     } finally {
-      setRecomposingReview(false);
+      if (mountedRef.current && requestGeneration === recomposeGenerationRef.current) {
+        setRecomposingReview(false);
+      }
     }
   }, [
+    acceptedTemplateSegmentIds,
     artifact,
-    feedbackState,
-    recomposingReview,
+    feedbackLocked,
+    finalReportManuallyEdited,
+    reviewMutationBusy,
+    reviewDraft,
     reviewSpanCorrections,
     selected,
     verbatimTranscript,
@@ -1292,7 +1728,9 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
       !artifact
       || !selected
       || feedbackSavingRef.current
-      || feedbackState === 'saved'
+      || feedbackLocked
+      || finalReportEditing
+      || hardApprovalBlockReason !== null
       || reviewRequiresRecompose
     ) return;
     const spanCorrections = reviewSpanCorrections;
@@ -1345,9 +1783,9 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
     }
     feedbackSavingRef.current = true;
     setFeedbackState('saving');
-    setError('');
+    setReviewError('');
     try {
-      await apiClient.submitRadiologyFeedback(artifact.sessionId, {
+      const savedFeedback = await apiClient.submitRadiologyFeedback(artifact.sessionId, {
         idempotencyKey: submission.idempotencyKey,
         verbatimTranscript,
         finalReport: finalReportText,
@@ -1360,20 +1798,45 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
         author: doctor.name,
       });
       feedbackSubmissionRef.current = null;
-      setFeedbackState('saved');
+      setApprovedReport(null);
+      try {
+        const response = await apiClient.getRadiologyApprovedReport(artifact.sessionId);
+        await validateApprovedReport(response.approvedReport, artifact);
+        if (
+          response.approvedReport.feedbackId !== savedFeedback.feedbackId
+          || response.approvedReport.revision !== savedFeedback.revision
+          || response.approvedReport.finalReport !== finalReportText
+        ) {
+          throw new Error('Сервер вернул не ту подтверждённую ревизию протокола');
+        }
+        applyApprovedReport(response.approvedReport, artifact);
+      } catch (approvedReportError) {
+        setFinalReportEditing(false);
+        setFeedbackState('saved_unverified');
+        setReviewError(
+          `Подтверждение сохранено, но повторная загрузка финальной версии не удалась: ${
+            approvedReportError instanceof Error
+              ? approvedReportError.message
+              : 'неизвестная ошибка'
+          }`,
+        );
+      }
     } catch (e) {
       setFeedbackState('idle');
-      setError(e instanceof Error ? e.message : 'Не удалось сохранить подтверждение');
+      setReviewError(e instanceof Error ? e.message : 'Не удалось сохранить подтверждение');
     } finally {
       feedbackSavingRef.current = false;
     }
   }, [
+    applyApprovedReport,
     artifact,
     acceptedTemplateSegmentIds,
     doctor.name,
     effectiveReport,
-    feedbackState,
+    feedbackLocked,
+    finalReportEditing,
     finalReportText,
+    hardApprovalBlockReason,
     reviewSpanCorrections,
     reviewRequiresRecompose,
     reviewedResidualAtomIds,
@@ -1381,7 +1844,29 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
     verbatimTranscript,
   ]);
 
+  const refreshApprovedReport = useCallback(async () => {
+    if (!artifact || feedbackSavingRef.current) return;
+    feedbackSavingRef.current = true;
+    setFeedbackState('saving');
+    setReviewError('');
+    try {
+      const response = await apiClient.getRadiologyApprovedReport(artifact.sessionId);
+      await validateApprovedReport(response.approvedReport, artifact);
+      applyApprovedReport(response.approvedReport, artifact);
+    } catch (refreshError) {
+      setFeedbackState('saved_unverified');
+      setReviewError(
+        refreshError instanceof Error
+          ? refreshError.message
+          : 'Не удалось загрузить подтверждённую версию протокола',
+      );
+    } finally {
+      feedbackSavingRef.current = false;
+    }
+  }, [applyApprovedReport, artifact]);
+
   const resetToSelection = useCallback(() => {
+    if (!confirmDiscardCurrentReview()) return;
     stopListening();
     resetRecording();
     setSelectedId(null);
@@ -1390,6 +1875,7 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
     setApplied([]);
     setInput('');
     setArtifact(null);
+    setApprovedReport(null);
     setReviewRevision(null);
     setRecomposingReview(false);
     setAcceptedTemplateSegmentIds(new Set());
@@ -1398,6 +1884,11 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
     setTemplatePreviewLoading(false);
     setVerbatimTranscript('');
     setFinalReportText('');
+    setFinalReportManuallyEdited(false);
+    setFinalReportEditing(false);
+    setCompositionReviewOpen(false);
+    setSourceReviewOpen(false);
+    setReviewError('');
     setFeedbackState('idle');
     setRetainAudioConsent(false);
     setRetentionNotice('');
@@ -1409,7 +1900,7 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
     sessionIdRef.current = null;
     attemptedAudioBlobRef.current = null;
     clearStoredRadiologyPointer(PENDING_RADIOLOGY_SESSION_KEY);
-  }, [resetRecording, stopListening]);
+  }, [confirmDiscardCurrentReview, resetRecording, stopListening]);
 
   // ─── Верхняя панель ────────────────────────────────────────────────────────
   const TopBar = (
@@ -1417,12 +1908,12 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
       <div className="flex items-center gap-2 text-medical-800 font-semibold">
         <Stethoscope size={18} /> Лучевая диагностика
       </div>
-      <div className="flex items-center gap-3 text-sm text-text-muted">
+      <div className="flex flex-wrap items-center justify-end gap-3 text-sm text-text-muted">
         <span className="hidden sm:inline">{doctor.name}</span>
-        {onOpenTherapy && <button disabled={workflowBusy} onClick={onOpenTherapy} className="hover:text-medical-700 disabled:text-slate-300">Терапия</button>}
-        {onOpenAdmin && <button disabled={workflowBusy} onClick={onOpenAdmin} className="flex items-center gap-1 hover:text-medical-700 disabled:text-slate-300"><Shield size={16} /> Админка</button>}
-        {onOpenSettings && <button disabled={workflowBusy} onClick={onOpenSettings} className="flex items-center gap-1 hover:text-medical-700 disabled:text-slate-300"><Settings size={16} /> Настройки</button>}
-        {onLogout && <button disabled={workflowBusy} onClick={onLogout} className="flex items-center gap-1 hover:text-red-600 disabled:text-slate-300"><LogOut size={16} /> Выйти</button>}
+        {onOpenTherapy && <button disabled={workflowBusy} onClick={() => { if (confirmDiscardCurrentReview()) onOpenTherapy(); }} className="hover:text-medical-700 disabled:text-slate-300">Терапия</button>}
+        {onOpenAdmin && <button disabled={workflowBusy} onClick={() => { if (confirmDiscardCurrentReview()) onOpenAdmin(); }} className="flex items-center gap-1 hover:text-medical-700 disabled:text-slate-300"><Shield size={16} /> Админка</button>}
+        {onOpenSettings && <button disabled={workflowBusy} onClick={() => { if (confirmDiscardCurrentReview()) onOpenSettings(); }} className="flex items-center gap-1 hover:text-medical-700 disabled:text-slate-300"><Settings size={16} /> Настройки</button>}
+        {onLogout && <button disabled={workflowBusy} onClick={() => { if (confirmDiscardCurrentReview()) onLogout(); }} className="flex items-center gap-1 hover:text-red-600 disabled:text-slate-300"><LogOut size={16} /> Выйти</button>}
       </div>
     </div>
   );
@@ -1478,7 +1969,7 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
       {TopBar}
       <div className="max-w-5xl mx-auto px-6 py-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
         {/* Документ */}
-        <div className="order-2 lg:order-1">
+        <div className={artifact ? 'order-1 lg:order-1' : 'order-2 lg:order-1'}>
           <div className="flex items-center justify-between mb-3">
             <button
               onClick={resetToSelection}
@@ -1487,17 +1978,298 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
             >
               ← Сменить шаблон
             </button>
-            <button
-              onClick={handleCopy}
-              disabled={!reviewDraft && !displayedDocument}
-              className="flex items-center gap-1 text-sm text-medical-700 hover:underline disabled:text-slate-300 disabled:no-underline"
-            >
-              {copied
-                ? <><Check size={15} /> Скопировано</>
-                : <><Copy size={15} /> {showingTemplateDefaults ? 'Копировать шаблон' : 'Копировать'}</>}
-            </button>
+            {!artifact && (
+              <button
+                onClick={() => void handleCopy()}
+                disabled={!reviewDraft && !displayedDocument}
+                className="flex items-center gap-1 text-sm text-medical-700 hover:underline disabled:text-slate-300 disabled:no-underline"
+              >
+                {copied
+                  ? <><Check size={15} /> Скопировано</>
+                  : <><Copy size={15} /> {showingTemplateDefaults ? 'Копировать шаблон' : 'Копировать'}</>}
+              </button>
+            )}
           </div>
-          <div className="bg-white rounded-xl border border-slate-200 p-5">
+
+          {artifact && (
+            <section
+              aria-labelledby="radiology-final-report-heading"
+              className="mb-4 rounded-xl border-2 border-medical-200 bg-white p-5 shadow-sm"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <FileText size={20} className="text-medical-700" />
+                    <h2 id="radiology-final-report-heading" className="text-lg font-bold text-medical-950">
+                      Готовый протокол
+                    </h2>
+                  </div>
+                  <p id="radiology-final-report-help" className="mt-1 text-sm text-text-muted">
+                    Это итоговый текст. Именно он будет подтверждён, скопирован и скачан.
+                    Для изменения нажмите «Редактировать».
+                  </p>
+                </div>
+                <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                  finalReportEditing
+                    ? 'bg-amber-100 text-amber-900'
+                    : approvedReady
+                    ? 'bg-emerald-100 text-emerald-800'
+                    : feedbackState === 'saved_unverified'
+                      ? 'bg-amber-100 text-amber-900'
+                    : reviewRequiresRecompose || finalReportManuallyEdited
+                      ? 'bg-amber-100 text-amber-900'
+                      : hardApprovalBlockReason
+                        ? 'bg-red-100 text-red-800'
+                        : 'bg-sky-100 text-sky-800'
+                }`}>
+                  {finalReportEditing
+                    ? 'Режим редактирования'
+                    : approvedReady
+                    ? 'Подтверждён врачом'
+                    : feedbackState === 'saved_unverified'
+                      ? 'Сохранён — нужна сверка'
+                    : feedbackState === 'saving'
+                      ? 'Проверяем на сервере…'
+                      : reviewRequiresRecompose
+                      ? 'Нужна пересборка'
+                      : finalReportManuallyEdited
+                        ? 'Изменён — не проверен'
+                        : hardApprovalBlockReason
+                          ? 'Подтверждение заблокировано'
+                          : 'Черновик'}
+                </span>
+              </div>
+
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+                <label htmlFor="radiology-final-report" className="block text-sm font-semibold text-medical-900">
+                  Текст протокола
+                </label>
+                {finalReportEditing ? (
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={cancelFinalReportEdit}
+                      disabled={reviewMutationBusy}
+                      className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                    >
+                      Отменить правки
+                    </button>
+                    <button
+                      type="button"
+                      onClick={finishFinalReportEdit}
+                      disabled={reviewMutationBusy}
+                      className="rounded-md bg-medical-700 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-medical-800 disabled:opacity-50"
+                    >
+                      Готово
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={beginFinalReportEdit}
+                    disabled={reviewMutationBusy || feedbackState === 'saved_unverified'}
+                    className="rounded-md border border-medical-300 bg-medical-50 px-2.5 py-1.5 text-xs font-semibold text-medical-800 hover:bg-medical-100 disabled:opacity-50"
+                  >
+                    {approvedReady ? 'Создать новую версию' : 'Редактировать'}
+                  </button>
+                )}
+              </div>
+              <textarea
+                id="radiology-final-report"
+                aria-describedby="radiology-final-report-help radiology-final-report-status"
+                value={finalReportText}
+                readOnly={!finalReportEditing}
+                disabled={reviewMutationBusy}
+                onChange={(event) => {
+                  const nextText = event.target.value;
+                  const changedFromBaseline = nextText !== finalReportEditBaselineRef.current;
+                  setFinalReportText(nextText);
+                  setFinalReportManuallyEdited(
+                    changedFromBaseline
+                      ? true
+                      : finalReportEditManualBaselineRef.current,
+                  );
+                  setCopied(false);
+                  setReviewError('');
+                  setFeedbackState(
+                    changedFromBaseline
+                      ? 'idle'
+                      : finalReportEditFeedbackBaselineRef.current,
+                  );
+                }}
+                rows={16}
+                className={`mt-1 w-full box-border rounded-lg border px-3 py-3 text-[15px] leading-6 text-medical-950 focus:border-medical-500 focus:outline-none focus:ring-2 focus:ring-medical-300 disabled:bg-slate-50 ${
+                  finalReportEditing
+                    ? 'border-medical-400 bg-white'
+                    : 'cursor-default border-slate-200 bg-slate-50'
+                }`}
+              />
+
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleCopy()}
+                  disabled={
+                    !approvedReady
+                    || reviewMutationBusy
+                    || finalReportEditing
+                    || !finalReportText.trim()
+                  }
+                  className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-medical-800 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {copied ? <Check size={16} /> : <Copy size={16} />}
+                  {copied ? 'Скопировано' : 'Копировать'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDownloadReport}
+                  disabled={
+                    !approvedReady
+                    || reviewMutationBusy
+                    || finalReportEditing
+                    || !finalReportText.trim()
+                  }
+                  className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-medical-800 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Download size={16} />
+                  Скачать TXT
+                </button>
+              </div>
+
+              {!approvedReady && feedbackState !== 'saved_unverified' && (
+                <p className="mt-2 text-xs text-amber-800">
+                  Копирование и скачивание откроются после серверной проверки и подтверждения врачом.
+                </p>
+              )}
+              {feedbackState === 'saved_unverified' && (
+                <p className="mt-2 text-xs text-amber-800">
+                  Подтверждение уже сохранено на сервере. Скачивание откроется после контрольной сверки сохранённой версии.
+                </p>
+              )}
+              {approvedReady && approvedReport && (
+                <p className="mt-2 text-xs text-emerald-800">
+                  Подтверждено {formatLocalDateTime(approvedReport.approvedAt)}
+                  {' · '}врач: {approvedReport.author}
+                  {' · '}ревизия {approvedReport.revision}
+                </p>
+              )}
+
+              {reviewError && (
+                <div
+                  role="alert"
+                  aria-live="assertive"
+                  className="mt-4 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900"
+                >
+                  {reviewError}
+                </div>
+              )}
+
+              {feedbackState === 'saved_unverified' ? (
+                <div id="radiology-final-report-status" className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+                  <div className="font-semibold">Сервер сохранил подтверждение, но браузер ещё не сверил контрольную копию.</div>
+                  <p className="mt-1">
+                    Правки временно заблокированы, чтобы не создать дублирующую ревизию. Повторите безопасную загрузку подтверждённого текста.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void refreshApprovedReport()}
+                    disabled={reviewMutationBusy}
+                    className="mt-3 rounded-md border border-amber-400 bg-white px-3 py-2 text-xs font-semibold hover:bg-amber-100 disabled:opacity-50"
+                  >
+                    Повторить сверку с сервером
+                  </button>
+                </div>
+              ) : finalReportEditing ? (
+                <p id="radiology-final-report-status" className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                  Завершите редактирование кнопкой «Готово». После этого протокол можно проверить и подтвердить.
+                </p>
+              ) : hardApprovalBlockReason ? (
+                <div id="radiology-final-report-status" className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+                    <div>
+                      <div className="font-semibold">Что нужно исправить перед подтверждением</div>
+                      <ul className="mt-1 space-y-1">
+                        {approvalBlockReasons.map((reason) => (
+                          <li key={reason}>• {reason}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {reviewDraft && (
+                      <button
+                        type="button"
+                        onClick={() => setCompositionReviewOpen(true)}
+                        className="rounded-md border border-red-300 bg-white px-2.5 py-1.5 text-xs font-semibold hover:bg-red-100"
+                      >
+                        Проверить подстановки
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setSourceReviewOpen(true)}
+                      className="rounded-md border border-red-300 bg-white px-2.5 py-1.5 text-xs font-semibold hover:bg-red-100"
+                    >
+                      Открыть расшифровку и ошибки
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <p id="radiology-final-report-status" className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+                  Текст готов к серверной проверке. Нажмите кнопку ниже, чтобы сохранить точную подтверждённую версию.
+                </p>
+              )}
+
+              <button
+                type="button"
+                onClick={() => void submitFeedback()}
+                disabled={
+                  feedbackLocked
+                  || feedbackState === 'saving'
+                  || finalReportEditing
+                  || hardApprovalBlockReason !== null
+                }
+                className="mt-4 w-full rounded-lg bg-emerald-600 py-3 font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+              >
+                {approvedReady
+                  ? 'Протокол подтверждён врачом'
+                  : feedbackState === 'saved_unverified'
+                    ? 'Подтверждение сохранено — требуется сверка'
+                  : feedbackState === 'saving'
+                    ? 'Проверяем и сохраняем…'
+                    : 'Проверить и подтвердить протокол'}
+              </button>
+            </section>
+          )}
+
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            {artifact && (
+              <button
+                type="button"
+                aria-expanded={compositionReviewOpen}
+                aria-controls="radiology-composition-review"
+                onClick={() => setCompositionReviewOpen((current) => !current)}
+                className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-medical-300"
+              >
+                <span>
+                  <span className="block font-semibold text-medical-900">Как шаблон собрал протокол</span>
+                  <span className="mt-0.5 block text-xs text-text-muted">
+                    Подстановки из речи, нормы шаблона и вычисленные значения
+                  </span>
+                </span>
+                <span className="flex shrink-0 items-center gap-2 text-xs text-text-muted">
+                  {reviewDraft?.fieldAssignments.filter((assignment) => assignment.status === 'applied').length ?? 0} полей
+                  <ChevronDown
+                    size={18}
+                    className={`transition-transform ${compositionReviewOpen ? 'rotate-180' : ''}`}
+                  />
+                </span>
+              </button>
+            )}
+            <div id="radiology-composition-review" className={artifact
+              ? compositionReviewOpen ? 'border-t border-slate-200 p-5' : 'hidden'
+              : 'p-5'}>
             {showingTemplateDefaults && (
               <div className="mb-4 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-900">
                 <span className="font-semibold">Предпросмотр шаблона.</span>{' '}
@@ -1512,12 +2284,37 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
                   <span className="mx-1 rounded-sm bg-indigo-50 px-0.5 text-indigo-900">fx</span>
                   — детерминированно вычисленные значения.
                 </p>
+                {finalReportManuallyEdited && (
+                  <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-950">
+                    <div className="font-semibold">Финальный текст изменён вручную.</div>
+                    <p className="mt-1">
+                      {feedbackLocked
+                        ? 'Подтверждённая версия защищена. Для изменения сначала нажмите «Создать новую версию» в готовом протоколе.'
+                        : 'Переключатели норм временно отключены, чтобы не потерять ваши правки.'}
+                    </p>
+                    {!feedbackLocked && (
+                      <button
+                        type="button"
+                        onClick={resetManualFinalReport}
+                        disabled={reviewMutationBusy || finalReportEditing}
+                        className="mt-2 inline-flex items-center gap-1 font-semibold text-amber-900 hover:underline disabled:opacity-50"
+                      >
+                        <RotateCcw size={13} /> Вернуть собранный вариант
+                      </button>
+                    )}
+                  </div>
+                )}
                 {confirmationSegments.length > 0 && (
                   <label className="mt-2 flex items-start gap-2 text-xs">
                     <input
                       type="checkbox"
                       checked={unacceptedTemplateSegmentIds.length === 0}
-                      disabled={feedbackState === 'saving'}
+                      disabled={
+                        reviewMutationBusy
+                        || feedbackLocked
+                        || finalReportEditing
+                        || finalReportManuallyEdited
+                      }
                       onChange={(event) => {
                         const checked = event.target.checked;
                         const next = new Set(acceptedTemplateSegmentIds);
@@ -1526,13 +2323,10 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
                           else next.delete(segment.id);
                         }
                         setAcceptedTemplateSegmentIds(next);
-                        setFinalReportText(
-                          composeAcceptedReviewDraftText(
-                            reviewDraft,
-                            next,
-                            artifact?.routing.atoms,
-                          ),
-                        );
+                        setFinalReportText(composeReviewText(next));
+                        setFinalReportManuallyEdited(false);
+                        setCopied(false);
+                        setReviewError('');
                         setFeedbackState('idle');
                       }}
                       className="mt-0.5"
@@ -1600,7 +2394,12 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
                             <input
                               type="checkbox"
                               checked={sectionAccepted}
-                              disabled={feedbackState === 'saving'}
+                              disabled={
+                                reviewMutationBusy
+                                || feedbackLocked
+                                || finalReportEditing
+                                || finalReportManuallyEdited
+                              }
                               onChange={(event) => {
                                 const checked = event.target.checked;
                                 const next = new Set(acceptedTemplateSegmentIds);
@@ -1609,13 +2408,10 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
                                   else next.delete(segmentId);
                                 }
                                 setAcceptedTemplateSegmentIds(next);
-                                setFinalReportText(
-                                  composeAcceptedReviewDraftText(
-                                    reviewDraft,
-                                    next,
-                                    artifact?.routing.atoms,
-                                  ),
-                                );
+                                setFinalReportText(composeReviewText(next));
+                                setFinalReportManuallyEdited(false);
+                                setCopied(false);
+                                setReviewError('');
                                 setFeedbackState('idle');
                               }}
                             />
@@ -1663,7 +2459,11 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
                       <input
                         type="checkbox"
                         checked={reviewedResidualAtomIds.has(atomId)}
-                        disabled={feedbackState === 'saving'}
+                        disabled={
+                          reviewMutationBusy
+                          || feedbackLocked
+                          || finalReportEditing
+                        }
                         onChange={(event) => {
                           const checked = event.target.checked;
                           setReviewedResidualAtomIds((current) => {
@@ -1672,6 +2472,8 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
                             else next.delete(atomId);
                             return next;
                           });
+                          setCopied(false);
+                          setReviewError('');
                           setFeedbackState('idle');
                         }}
                         className="mt-0.5"
@@ -1713,139 +2515,141 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
               </details>
             ) : null}
           </div>
+          </div>
 
           {artifact && (
-            <div className="bg-white rounded-xl border border-slate-200 p-5 mt-4">
-              <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
-                <div>
-                  <div className="font-semibold text-medical-900">Проверка перед подтверждением</div>
-                  <div className="text-xs text-text-muted">
-                    ASR: {artifact.model.asr.name} · decoder: {artifact.model.decoder.name} · SHA аудио: {
-                      artifact.audio.sha256 ? `${artifact.audio.sha256.slice(0, 12)}…` : 'нет аудио'
-                    }
-                  </div>
-                  <div className="text-xs text-text-muted">
-                    Dataset: {artifact.training.eligible
-                      ? 'может быть включён после врачебного ревью'
-                      : `исключён (${artifact.training.exclusionReasons.join(', ') || 'нет основания'})`}
-                  </div>
-                </div>
-                <span className={`text-xs font-semibold px-2 py-1 rounded-full ${
-                  effectiveSafety?.status === 'passed'
-                    ? 'bg-emerald-100 text-emerald-800'
-                    : effectiveSafety?.status === 'failed'
-                      ? 'bg-red-100 text-red-800'
-                      : 'bg-amber-100 text-amber-800'
-                }`}>
-                  {effectiveSafety?.status === 'passed' ? 'Проверки пройдены' : 'Требуется проверка'}
-                </span>
-              </div>
-
-              <label className="block text-sm font-semibold text-medical-800 mb-1">
-                Дословная расшифровка
-              </label>
-              <textarea
-                value={verbatimTranscript}
-                disabled={feedbackState === 'saving'}
-                onChange={(e) => {
-                  setVerbatimTranscript(e.target.value);
-                  setReviewRevision(null);
-                  setReviewedResidualAtomIds(new Set());
-                  setFeedbackState('idle');
-                }}
-                rows={5}
-                className="w-full box-border px-3 py-2 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-medical-400 text-sm"
-              />
-              <p className="text-xs text-text-muted mt-1 mb-4">
-                Исправляйте только то, что реально произнесено. Протокольные нормы сюда не добавляются.
-              </p>
-              {reviewSpanCorrections.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => void recomposeReviewDraft()}
-                  disabled={recomposingReview || feedbackState === 'saving'}
-                  className="mb-4 w-full rounded-lg border border-medical-300 bg-medical-50 px-3 py-2 text-sm font-semibold text-medical-800 hover:bg-medical-100 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {recomposingReview
-                    ? 'Пересобираем черновик…'
-                    : reviewRevision?.verbatimTranscript.text === verbatimTranscript
-                      ? 'Черновик пересобран по исправленному тексту'
-                      : 'Пересобрать черновик по исправленной расшифровке'}
-                </button>
-              )}
-
-              <label className="block text-sm font-semibold text-medical-800 mb-1">
-                Нормализованный текст
-              </label>
-              <div className="mb-4 whitespace-pre-wrap rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-medical-900">
-                {effectiveNormalization?.text || 'Нормализация не выполнена'}
-              </div>
-              {(effectiveNormalization?.issues.length ?? 0) > 0 && (
-                <ul className="mb-4 space-y-1 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
-                  {effectiveNormalization?.issues.map((issue) => (
-                    <li key={issue.id}>
-                      • {issue.message}
-                      {issue.source?.text ? ` Исходный фрагмент: «${issue.source.text}».` : ''}
-                    </li>
-                  ))}
-                </ul>
-              )}
-
-              <label className="block text-sm font-semibold text-medical-800 mb-1">
-                Финальный протокол
-              </label>
-              <textarea
-                value={finalReportText}
-                disabled={feedbackState === 'saving'}
-                onChange={(e) => {
-                  setFinalReportText(e.target.value);
-                  setFeedbackState('idle');
-                }}
-                rows={10}
-                className="w-full box-border px-3 py-2 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-medical-400 text-sm"
-              />
-
-              {(effectiveReport?.unmatched || artifact.unmatchedText) && (
-                <div className="mt-3 rounded-lg bg-amber-50 border border-amber-200 p-3 text-sm text-amber-900">
-                  <span className="font-semibold">Не удалось разнести по секциям:</span>{' '}
-                  {effectiveReport?.unmatched || artifact.unmatchedText}
-                </div>
-              )}
-              {(effectiveSafety?.issues.length ?? 0) > 0 && (
-                <ul className="mt-3 space-y-1 rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-900">
-                  {effectiveSafety?.issues.map((issue, index) => (
-                    <li key={`${issue.code}-${index}`}>• {issue.message}</li>
-                  ))}
-                </ul>
-              )}
-
+            <section className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white">
               <button
                 type="button"
-                onClick={() => void submitFeedback()}
-                disabled={
-                  feedbackState === 'saving'
-                  || feedbackState === 'saved'
-                  || hardApprovalBlockReason !== null
-                }
-                className="mt-4 w-full py-2.5 rounded-lg bg-emerald-600 text-white font-semibold hover:bg-emerald-700 disabled:bg-slate-300"
+                aria-expanded={sourceReviewOpen}
+                aria-controls="radiology-source-review"
+                onClick={() => setSourceReviewOpen((current) => !current)}
+                className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-medical-300"
               >
-                {feedbackState === 'saved'
-                  ? 'Подтверждение сохранено'
-                  : feedbackState === 'saving'
-                    ? 'Сохраняем…'
-                    : 'Подтвердить протокол врачом'}
+                <span>
+                  <span className="block font-semibold text-medical-900">
+                    Исходная расшифровка и техническая проверка
+                  </span>
+                  <span className="mt-0.5 block text-xs text-text-muted">
+                    Открывайте этот раздел, если ASR распознал фразу неверно или подтверждение заблокировано
+                  </span>
+                </span>
+                <span className="flex shrink-0 items-center gap-2">
+                  <span className={`rounded-full px-2 py-1 text-xs font-semibold ${
+                    effectiveSafety?.status === 'passed'
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : effectiveSafety?.status === 'failed'
+                        ? 'bg-red-100 text-red-800'
+                        : 'bg-amber-100 text-amber-800'
+                  }`}>
+                    {effectiveSafety?.status === 'passed' ? 'Текст проверен' : 'Есть замечания'}
+                  </span>
+                  <ChevronDown
+                    size={18}
+                    className={`text-text-muted transition-transform ${sourceReviewOpen ? 'rotate-180' : ''}`}
+                  />
+                </span>
               </button>
-              <p className="text-xs text-text-muted mt-2">
-                {hardApprovalBlockReason
-                  ?? 'Правки сохраняются как отдельное versioned-событие и не становятся глобальным regex автоматически.'}
-              </p>
-            </div>
+
+              {sourceReviewOpen && (
+                <div id="radiology-source-review" className="border-t border-slate-200 p-5">
+                  <div className="mb-4 rounded-lg bg-slate-50 px-3 py-2 text-xs text-text-muted">
+                    <div>
+                      ASR: {artifact.model.asr.name} · decoder: {artifact.model.decoder.name} · SHA аудио: {
+                        artifact.audio.sha256 ? `${artifact.audio.sha256.slice(0, 12)}…` : 'нет аудио'
+                      }
+                    </div>
+                    <div className="mt-1">
+                      Dataset: {artifact.training.eligible
+                        ? 'может быть включён после врачебного ревью'
+                        : `исключён (${artifact.training.exclusionReasons.join(', ') || 'нет основания'})`}
+                    </div>
+                  </div>
+
+                  <label htmlFor="radiology-verbatim-transcript" className="block text-sm font-semibold text-medical-800 mb-1">
+                    Дословная расшифровка — исправление ошибок ASR
+                  </label>
+                  <textarea
+                    id="radiology-verbatim-transcript"
+                    value={verbatimTranscript}
+                    disabled={
+                      reviewMutationBusy
+                      || feedbackLocked
+                      || finalReportEditing
+                    }
+                    onChange={(event) => {
+                      recomposeGenerationRef.current += 1;
+                      setVerbatimTranscript(event.target.value);
+                      setReviewRevision(null);
+                      setReviewedResidualAtomIds(new Set());
+                      setCopied(false);
+                      setReviewError('');
+                      setFeedbackState('idle');
+                    }}
+                    rows={5}
+                    className="w-full box-border rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-medical-400"
+                  />
+                  <p className="mb-4 mt-1 text-xs text-text-muted">
+                    Исправляйте только то, что реально произнесено. Протокольные нормы сюда не добавляются.
+                  </p>
+                  {reviewSpanCorrections.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => void recomposeReviewDraft()}
+                      disabled={
+                        reviewMutationBusy
+                        || feedbackLocked
+                        || finalReportEditing
+                      }
+                      className="mb-4 w-full rounded-lg border border-medical-300 bg-medical-50 px-3 py-2 text-sm font-semibold text-medical-800 hover:bg-medical-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {recomposingReview
+                        ? 'Пересобираем протокол…'
+                        : reviewRevision?.verbatimTranscript.text === verbatimTranscript
+                          ? 'Протокол пересобран по исправленному тексту'
+                          : 'Применить исправления и пересобрать протокол'}
+                    </button>
+                  )}
+
+                  <div className="mb-1 text-sm font-semibold text-medical-800">
+                    Нормализованный текст — только для контроля
+                  </div>
+                  <div className="mb-4 whitespace-pre-wrap rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-medical-900">
+                    {effectiveNormalization?.text || 'Нормализация не выполнена'}
+                  </div>
+                  {(effectiveNormalization?.issues.length ?? 0) > 0 && (
+                    <ul className="mb-4 space-y-1 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+                      {effectiveNormalization?.issues.map((issue) => (
+                        <li key={issue.id}>
+                          • {issue.message}
+                          {issue.source?.text ? ` Исходный фрагмент: «${issue.source.text}».` : ''}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+
+                  {(effectiveReport?.unmatched || artifact.unmatchedText) && (
+                    <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                      <span className="font-semibold">Не удалось разнести по секциям:</span>{' '}
+                      {effectiveReport?.unmatched || artifact.unmatchedText}
+                    </div>
+                  )}
+                  {(effectiveSafety?.issues.length ?? 0) > 0 && (
+                    <ul className="mt-3 space-y-1 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900">
+                      {effectiveSafety?.issues.map((issue, index) => (
+                        <li key={`${issue.code}-${index}`}>• {issue.message}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </section>
           )}
         </div>
 
         {/* Панель управления диктовкой */}
-        <div className="order-1 lg:order-2">
-          <div className="bg-white rounded-xl border border-slate-200 p-5 sticky top-6">
+        <div className={artifact ? 'order-2 lg:order-2' : 'order-1 lg:order-2'}>
+          <div className="rounded-xl border border-slate-200 bg-white p-5 lg:sticky lg:top-6">
             <div className="text-sm font-semibold text-medical-800 mb-1">{selected.name}</div>
             <p className="text-xs text-text-muted mb-3">Органы и параметры можно диктовать в естественном порядке — норма подставится только для неупомянутых секций.</p>
 
@@ -2002,7 +2806,6 @@ export function RadiologyWorkspaceScreen({ doctor, onOpenSettings, onOpenAdmin, 
                   if (workflowBusy || operationInFlightRef.current) return;
                   const manualTranscript = input.trim();
                   if (!manualTranscript) return;
-                  setInput('');
                   void finishClientTranscriptArtifact(manualTranscript, 'manual');
                 }}
                 className="flex gap-2"

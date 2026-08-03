@@ -522,6 +522,24 @@ export interface RadiologyFeedbackEvent {
   };
 }
 
+export interface ApprovedRadiologyReport {
+  sessionId: string;
+  templateId: string;
+  sourceArtifactSha256: string;
+  feedbackId: string;
+  revision: number;
+  approvedAt: string;
+  createdAt: string;
+  author: string;
+  verbatimTranscript: string;
+  finalReport: string;
+  finalReportSha256: string;
+  baseDraftSha256: string | null;
+  acceptedTemplateSegmentIds: string[];
+  reviewedResidualAtomIds: string[];
+  recomposeRevision: RadiologyRecomposeRevision | null;
+}
+
 export class RadiologySessionError extends Error {
   constructor(
     public readonly statusCode: number,
@@ -1113,6 +1131,90 @@ export class RadiologyArtifactStore {
   ): Promise<RadiologyFeedbackEvent | null> {
     const feedback = await this.listFeedback(sessionId);
     return feedback.find((event) => event.idempotencyKey === idempotencyKey) ?? null;
+  }
+
+  async getLatestApprovedReport(
+    sessionId: string,
+    expectedSourceArtifactSha256: string,
+  ): Promise<ApprovedRadiologyReport | null> {
+    const safeId = safeSessionId(sessionId);
+    const approved = (await this.listFeedback(safeId))
+      .filter((event) => event.approved === true)
+      .sort((left, right) => right.revision - left.revision)[0];
+    if (!approved) return null;
+    const baseDraftSha256 = approved.baseDraftSha256 ?? null;
+    const acceptedTemplateSegmentIds = approved.acceptedTemplateSegmentIds ?? [];
+    const reviewedResidualAtomIds = approved.reviewedResidualAtomIds ?? [];
+    const recomposeRevision = approved.recomposeRevision ?? null;
+    const contentWithExpectedArtifact = {
+      sessionId: approved.sessionId,
+      templateId: approved.templateId,
+      source: approved.source,
+      sourceArtifactSha256: expectedSourceArtifactSha256,
+      author: approved.author,
+      verbatimTranscript: approved.verbatimTranscript,
+      finalReport: approved.finalReport,
+      spanCorrections: approved.spanCorrections,
+      normalizationResolutions: approved.normalizationResolutions,
+      ...(baseDraftSha256 !== null
+        ? {
+            baseDraftSha256,
+            acceptedTemplateSegmentIds,
+            reviewedResidualAtomIds,
+          }
+        : {}),
+      approved: approved.approved,
+    };
+    if (
+      approved.sessionId !== safeId
+      || !/^[a-f0-9]{64}$/u.test(expectedSourceArtifactSha256)
+      || !Number.isSafeInteger(approved.revision)
+      || approved.revision < 1
+      || sha256Text(approved.verbatimTranscript) !== approved.verbatimTranscriptSha256
+      || sha256Text(approved.finalReport) !== approved.finalReportSha256
+      || sha256Text(canonicalJson(contentWithExpectedArtifact)) !== approved.contentSha256
+      || (
+        recomposeRevision !== null
+        && (
+          recomposeRevision.sourceArtifactSha256 !== expectedSourceArtifactSha256
+          || recomposeRevision.sessionId !== approved.sessionId
+          || recomposeRevision.templateId !== approved.templateId
+          || recomposeRevision.verbatimTranscript.text !== approved.verbatimTranscript
+          || recomposeRevision.verbatimTranscript.sha256
+            !== approved.verbatimTranscriptSha256
+          || (
+            baseDraftSha256 !== null
+            && recomposeRevision.report?.reviewDraft?.sha256
+              !== baseDraftSha256
+          )
+        )
+      )
+    ) {
+      throw new RadiologySessionError(
+        500,
+        'approved_report_integrity_mismatch',
+        'The stored approved report failed its immutable identity or SHA-256 check',
+      );
+    }
+    return {
+      sessionId: approved.sessionId,
+      templateId: approved.templateId,
+      sourceArtifactSha256: expectedSourceArtifactSha256,
+      feedbackId: approved.feedbackId,
+      revision: approved.revision,
+      approvedAt: approved.createdAt,
+      createdAt: approved.createdAt,
+      author: approved.author,
+      verbatimTranscript: approved.verbatimTranscript,
+      finalReport: approved.finalReport,
+      finalReportSha256: approved.finalReportSha256,
+      baseDraftSha256,
+      acceptedTemplateSegmentIds: [...acceptedTemplateSegmentIds],
+      reviewedResidualAtomIds: [...reviewedResidualAtomIds],
+      recomposeRevision: recomposeRevision === null
+        ? null
+        : structuredClone(recomposeRevision),
+    };
   }
 
   private async maybeCleanupExpiredData(): Promise<void> {
@@ -3022,6 +3124,41 @@ export class RadiologySessionService {
     const artifact = await this.options.store.getArtifact(sessionId);
     if (artifact) this.assertOwner(this.artifactOwner(artifact), actor);
     return artifact;
+  }
+
+  async getApprovedReport(
+    sessionId: string,
+    actor?: RadiologySessionActor,
+  ): Promise<ApprovedRadiologyReport> {
+    const artifact = await this.options.store.getArtifact(sessionId);
+    if (!artifact) {
+      throw new RadiologySessionError(
+        404,
+        'artifact_not_found',
+        'Radiology session artifact not found',
+      );
+    }
+    this.assertOwner(this.artifactOwner(artifact), actor);
+    const sourceArtifactSha256 = sha256Text(canonicalJson(artifact));
+    const approvedReport = await this.options.store.getLatestApprovedReport(
+      sessionId,
+      sourceArtifactSha256,
+    );
+    if (!approvedReport) {
+      throw new RadiologySessionError(
+        404,
+        'approved_report_not_found',
+        'This radiology session has no approved report',
+      );
+    }
+    if (approvedReport.templateId !== artifact.templateId) {
+      throw new RadiologySessionError(
+        500,
+        'approved_report_integrity_mismatch',
+        'The approved report template does not match its immutable source artifact',
+      );
+    }
+    return approvedReport;
   }
 
   private async buildRecomposeRevision(

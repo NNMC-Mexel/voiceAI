@@ -563,6 +563,24 @@ export interface RadiologyRecomposeRevision {
   components: RadiologyTranscriptionArtifact['components'];
 }
 
+export interface RadiologyApprovedReport {
+  sessionId: string;
+  templateId: string;
+  sourceArtifactSha256: string;
+  feedbackId: string;
+  revision: number;
+  approvedAt: string;
+  createdAt: string;
+  author: string;
+  verbatimTranscript: string;
+  finalReport: string;
+  finalReportSha256: string;
+  baseDraftSha256: string | null;
+  acceptedTemplateSegmentIds: string[];
+  reviewedResidualAtomIds: string[];
+  recomposeRevision: RadiologyRecomposeRevision | null;
+}
+
 export interface RadiologySpanCorrection {
   start: number;
   end: number;
@@ -859,6 +877,16 @@ class ApiClient {
   ): Promise<{ artifact: RadiologyTranscriptionArtifact }> {
     return this.request(
       `/api/radiology/sessions/${encodeURIComponent(sessionId)}/artifact`,
+      undefined,
+      30_000,
+    );
+  }
+
+  async getRadiologyApprovedReport(
+    sessionId: string,
+  ): Promise<{ approvedReport: RadiologyApprovedReport }> {
+    return this.request(
+      `/api/radiology/sessions/${encodeURIComponent(sessionId)}/approved-report`,
       undefined,
       30_000,
     );
